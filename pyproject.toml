@@ -1,0 +1,53 @@
+[project]
+name = "browser-tools"
+version = "0.1.0"
+description = "Browser automation, debugging, and anti-detect browsing CLI"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "camoufox[geoip]>=0.4.11",
+    "pillow>=10.0.0",
+    "websockets>=14.0",
+]
+
+[project.scripts]
+browser-tools = "browser_tools.browser_tools_session:main"
+browser-tools-profiler = "browser_tools.profiler:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/browser_tools"]
+artifacts = [
+    "src/browser_tools/*.js",
+    "src/browser_tools/*.mjs",
+    "src/browser_tools/*.sh",
+]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "src/browser_tools",
+    "tests",
+    "README.md",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=1.3.0",
+    "ruff>=0.8.0",
+    "ty>=0.0.1a21",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I"]
+ignore = ["E501", "E731", "F841"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["browser_tools"]
