@@ -65,6 +65,8 @@ TOOL_CATEGORIES = {
     "export": [
         "export_pdf",
         "screenshot_element",
+        "screencast_start",
+        "screencast_stop",
     ],
     "element_query": [
         "element_exists",
@@ -215,6 +217,17 @@ TOOL_SCHEMAS = {
     "screenshot_element": {
         "selector": (str, True, "CSS selector for element to capture"),
         "path": (str, False, "Output file path"),
+    },
+    "screencast_start": {
+        "format": (str, False, "Frame format: 'jpeg' (default) or 'png'"),
+        "quality": (int, False, "JPEG quality 0-100 (default 80)"),
+        "every_nth_frame": (int, False, "Capture every Nth painted frame (default 1)"),
+        "max_frames": (int, False, "Max frames to buffer before pausing (default 600)"),
+        "max_width": (int, False, "Downscale frames to this max width"),
+        "max_height": (int, False, "Downscale frames to this max height"),
+    },
+    "screencast_stop": {
+        "dir": (str, True, "Directory to write timestamped frames + frames.json"),
     },
     # Element query tools
     "element_exists": {"selector": (str, True, "CSS selector")},
@@ -385,6 +398,8 @@ def get_tool_description(tool_name):
         # Export
         "export_pdf": "Export current page as PDF file",
         "screenshot_element": "Screenshot a specific element by CSS selector",
+        "screencast_start": "Start recording every painted frame (catches transient states like loading spinners that take_screenshot misses)",
+        "screencast_stop": "Stop the screencast and write buffered frames + a manifest to a directory",
         # Element queries
         "element_exists": "Check if element exists in the DOM",
         "element_visible": "Check if element is visible",

@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import json
 import os
 import queue
@@ -89,6 +90,8 @@ CDP_TOOLS = frozenset(
         # Page export/capture tools (Page CDP domain)
         "export_pdf",
         "screenshot_element",
+        "screencast_start",
+        "screencast_stop",
         # Semantic wait tools (Runtime.evaluate — needs async CDP, D-006)
         "wait_idle",
         "wait_stable",
@@ -373,6 +376,11 @@ class CDPHandler:
         self._stop_event: asyncio.Event | None = None
         self._cdp_client: Any = None
         self._frame_manager: Any = None
+        # Screencast capture state (Page.startScreencast → Page.screencastFrame).
+        self._screencast_active: bool = False
+        self._screencast_frames: list[dict[str, Any]] = []
+        self._screencast_max_frames: int = 600
+        self._screencast_format: str = "jpeg"
 
     @property
     def available(self) -> bool:
@@ -518,6 +526,10 @@ class CDPHandler:
             return await self._handle_export_pdf(arguments)
         elif name == "screenshot_element":
             return await self._handle_screenshot_element(arguments)
+        elif name == "screencast_start":
+            return await self._handle_screencast_start(arguments)
+        elif name == "screencast_stop":
+            return await self._handle_screencast_stop(arguments)
         # Semantic waits
         elif name == "wait_idle":
             return await self._handle_wait_idle(arguments)
@@ -966,6 +978,140 @@ class CDPHandler:
                 lines.append(f"Warning: could not write file: {exc}")
 
         lines.append(f"data:image/png;base64,{img_data}")
+        return _make_text("\n".join(lines))
+
+    # ------------------------------------------------------------------ #
+    # Screencast capture (catches transient states like loading spinners) #
+    # ------------------------------------------------------------------ #
+
+    def _on_screencast_frame(self, params: dict[str, Any]) -> None:
+        """Buffer a screencast frame and ack it so the stream continues.
+
+        Called from the CDP read loop, so this stays synchronous: the ack is
+        scheduled with ``ensure_future`` rather than awaited here, because the
+        read loop is what resolves the ack's response — awaiting it inline would
+        deadlock. Once the buffer is full we stop acking, which pauses the stream
+        (CDP flow control) instead of growing memory without bound.
+        """
+        if not self._screencast_active:
+            return
+        if len(self._screencast_frames) >= self._screencast_max_frames:
+            return
+        self._screencast_frames.append(
+            {
+                "data": params.get("data", ""),
+                "timestamp": params.get("metadata", {}).get("timestamp"),
+            }
+        )
+        session_id = params.get("sessionId")
+        cdp = self._cdp_client
+        if session_id is not None and cdp is not None:
+            asyncio.ensure_future(
+                cdp.send("Page.screencastFrameAck", {"sessionId": session_id})
+            )
+
+    async def _handle_screencast_start(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        """Start buffering every painted frame via Page.startScreencast.
+
+        Drive the UI with the normal click/fill/navigate tools between
+        screencast_start and screencast_stop; transient states (loading spinners,
+        skeletons, flashes) that a discrete take_screenshot would miss are captured.
+
+        Args:
+            arguments: Optional 'format' (jpeg|png), 'quality' (0-100),
+                'every_nth_frame', 'max_frames', 'max_width', 'max_height'.
+
+        Returns:
+            JSON-RPC style response dict.
+        """
+        cdp = self._cdp_client
+        if cdp is None or not cdp.connected:
+            return _make_error("CDP client not connected")
+        if self._screencast_active:
+            return _make_error("screencast already recording; call screencast_stop first")
+
+        fmt = str(arguments.get("format", "jpeg")).lower()
+        if fmt not in ("jpeg", "png"):
+            return _make_error("format must be 'jpeg' or 'png'")
+
+        self._screencast_frames = []
+        self._screencast_format = fmt
+        self._screencast_max_frames = max(1, int(arguments.get("max_frames", 600)))
+        self._screencast_active = True
+        cdp.on("Page.screencastFrame", self._on_screencast_frame)
+
+        params: dict[str, Any] = {
+            "format": fmt,
+            "everyNthFrame": max(1, int(arguments.get("every_nth_frame", 1))),
+        }
+        if fmt == "jpeg":
+            params["quality"] = int(arguments.get("quality", 80))
+        if arguments.get("max_width"):
+            params["maxWidth"] = int(arguments["max_width"])
+        if arguments.get("max_height"):
+            params["maxHeight"] = int(arguments["max_height"])
+
+        try:
+            await cdp.send("Page.startScreencast", params)
+        except Exception as exc:
+            self._screencast_active = False
+            cdp.off("Page.screencastFrame", self._on_screencast_frame)
+            return _make_error(f"Page.startScreencast failed: {exc}")
+        return _make_text(
+            "Screencast recording. Drive the UI with click/fill/navigate, "
+            "then call screencast_stop to write the frames."
+        )
+
+    async def _handle_screencast_stop(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        """Stop the screencast and write buffered frames to a directory.
+
+        Args:
+            arguments: 'dir' (required) — directory to write timestamped frames
+                plus a frames.json manifest.
+
+        Returns:
+            JSON-RPC style response dict.
+        """
+        cdp = self._cdp_client
+        if cdp is None or not cdp.connected:
+            return _make_error("CDP client not connected")
+        if not self._screencast_active:
+            return _make_error("no screencast in progress; call screencast_start first")
+
+        self._screencast_active = False
+        try:
+            await cdp.send("Page.stopScreencast")
+        except Exception:
+            pass  # stopping is best-effort; we still return what we captured
+        cdp.off("Page.screencastFrame", self._on_screencast_frame)
+
+        frames = self._screencast_frames
+        self._screencast_frames = []
+        truncated = len(frames) >= self._screencast_max_frames
+        ext = "jpg" if self._screencast_format == "jpeg" else "png"
+
+        lines = [f"Captured {len(frames)} frames."]
+        if truncated:
+            lines.append(
+                f"Note: hit max_frames={self._screencast_max_frames}; "
+                "capture may be truncated (raise max_frames or every_nth_frame)."
+            )
+
+        out_dir = str(arguments.get("dir", "")).strip()
+        if not out_dir:
+            return _make_error("dir is required to write screencast frames")
+        try:
+            base = Path(out_dir).resolve()
+            base.mkdir(parents=True, exist_ok=True)
+            manifest = []
+            for i, frame in enumerate(frames):
+                fname = f"frame_{i:05d}.{ext}"
+                (base / fname).write_bytes(base64.b64decode(frame["data"]))
+                manifest.append({"file": fname, "timestamp": frame["timestamp"]})
+            (base / "frames.json").write_text(json.dumps(manifest, indent=2))
+            lines.append(f"Wrote {len(frames)} frames + frames.json to {base}")
+        except Exception as exc:
+            return _make_error(f"could not write frames: {exc}")
         return _make_text("\n".join(lines))
 
     # ------------------------------------------------------------------ #
