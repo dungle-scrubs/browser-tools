@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  lint:
+    name: Lint & Type Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+
+      - run: uv sync
+
+      - name: ruff check
+        run: uv run ruff check src/ tests/
+
+      - name: pyright
+        run: uv run pyright src/
+
+  test:
+    name: Test (Python 3.13)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+
+      - run: uv sync
+
+      - name: pytest (unit tests)
+        run: uv run pytest tests/ -q --tb=short --ignore=tests/test_mcp_daemon.py --ignore=tests/test_e2e_camoufox.py
