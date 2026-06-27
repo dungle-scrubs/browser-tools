@@ -1,0 +1,373 @@
+"""Process and Chrome utility functions for browser-tools.
+
+Low-level helpers for inspecting Chrome processes, managing PIDs, finding
+executables and ports, and interacting with Chrome's remote debugging
+HTTP endpoints. Extracted from persistent_browser.py to keep the module
+under 800 lines.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import shutil
+import signal
+import socket
+import subprocess
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+from typing import Any
+
+try:
+    from .persistent_browser import INITIAL_PAGE_URL as _initial_page_url
+except ImportError:
+    # Fallback when imported before persistent_browser is loaded
+    _initial_page_url = "about:blank"
+
+_DEBUG_PORT_PATTERN = re.compile(r"--remote-debugging-port=(\d+)")
+_USER_DATA_DIR_PATTERN = re.compile(r"--user-data-dir=(\S+)")
+
+
+def resolve_chrome_executable(channel: str) -> str | None:
+    """Find a Chrome executable for the requested channel.
+
+    Args:
+        channel: Requested Chrome channel.
+
+    Returns:
+        Executable path when found, otherwise None.
+    """
+    mac_candidates = {
+        "canary": [
+            "/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
+        ],
+        "stable": [
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        ],
+        "beta": [
+            "/Applications/Google Chrome Beta.app/Contents/MacOS/Google Chrome Beta",
+        ],
+        "dev": [
+            "/Applications/Google Chrome Dev.app/Contents/MacOS/Google Chrome Dev",
+        ],
+    }
+    linux_candidates = {
+        "canary": ["google-chrome-canary", "chrome-canary", "google-chrome"],
+        "stable": ["google-chrome", "chromium", "chromium-browser"],
+        "beta": ["google-chrome-beta", "google-chrome"],
+        "dev": ["google-chrome-unstable", "google-chrome"],
+    }
+
+    for candidate in mac_candidates.get(channel, []):
+        if Path(candidate).exists():
+            return candidate
+    for candidate in linux_candidates.get(channel, []):
+        resolved = shutil.which(candidate)
+        if resolved:
+            return resolved
+    return None
+
+
+def build_browser_command(
+    *,
+    executable: str,
+    port: int,
+    user_data_dir: Path,
+    headless: bool,
+    viewport: str | None,
+) -> list[str]:
+    """Build the Chrome launch command for a persistent remote-debugging session.
+
+    Args:
+        executable: Chrome executable path.
+        port: Remote debugging port.
+        user_data_dir: Dedicated browser profile directory.
+        headless: Whether to launch headless.
+        viewport: Initial window size formatted as WIDTHxHEIGHT.
+
+    Returns:
+        Command list for subprocess.Popen.
+    """
+    command = [
+        executable,
+        f"--remote-debugging-port={port}",
+        f"--user-data-dir={user_data_dir}",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--disable-sync",
+    ]
+    if headless:
+        command.append("--headless=new")
+    if viewport:
+        width, height = viewport.lower().split("x", 1)
+        command.append(f"--window-size={width},{height}")
+    command.append(_initial_page_url)
+    return command
+
+
+def find_free_port() -> int:
+    """Find an available localhost TCP port.
+
+    Returns:
+        Free TCP port number.
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+def wait_for_devtools(browser_url: str, timeout_seconds: float) -> bool:
+    """Wait for Chrome's remote debugging endpoint to become reachable.
+
+    Args:
+        browser_url: Base URL of the remote debugging endpoint.
+        timeout_seconds: Maximum number of seconds to wait.
+
+    Returns:
+        True when the endpoint becomes reachable before the timeout.
+    """
+    deadline = time.time() + timeout_seconds
+    while time.time() < deadline:
+        if is_devtools_available(browser_url):
+            return True
+        time.sleep(0.2)
+    return False
+
+
+def is_devtools_available(browser_url: str) -> bool:
+    """Check whether the remote debugging endpoint is reachable.
+
+    Args:
+        browser_url: Base URL of the remote debugging endpoint.
+
+    Returns:
+        True when the endpoint responds successfully.
+    """
+    request = urllib.request.Request(f"{browser_url}/json/version")
+    try:
+        with urllib.request.urlopen(request, timeout=1) as response:
+            return response.status == 200
+    except (urllib.error.URLError, TimeoutError, ValueError):
+        return False
+
+
+def enumerate_tabs(browser_url: str) -> list[dict[str, Any]]:
+    """Enumerate open browser tabs via the /json/list debugging endpoint.
+
+    Only returns tabs with type "page" (not background pages, service workers,
+    or extensions).
+
+    Args:
+        browser_url: Base URL of the remote debugging endpoint.
+
+    Returns:
+        List of tab dictionaries with id, title, url, webSocketDebuggerUrl.
+    """
+    request = urllib.request.Request(f"{browser_url}/json/list")
+    try:
+        with urllib.request.urlopen(request, timeout=5) as response:
+            tabs = json.loads(response.read())
+    except (urllib.error.URLError, TimeoutError, ValueError, json.JSONDecodeError):
+        return []
+    return [tab for tab in tabs if tab.get("type") == "page"]
+
+
+def select_tab_by_url(tabs: list[dict[str, Any]], url_pattern: str) -> dict[str, Any] | None:
+    """Select the first tab whose URL contains the given pattern.
+
+    Args:
+        tabs: List of tab dictionaries from enumerate_tabs.
+        url_pattern: Substring to match against tab URLs (case-insensitive).
+
+    Returns:
+        First matching tab dictionary, or None if no match.
+    """
+    pattern_lower = url_pattern.lower()
+    for tab in tabs:
+        if pattern_lower in tab.get("url", "").lower():
+            return tab
+    return None
+
+
+def read_singleton_lock_pid(user_data_dir: Path) -> int | None:
+    """Read the PID Chrome embedded in its SingletonLock symlink.
+
+    Chrome creates ``SingletonLock`` as a symlink whose target is
+    ``<hostname>-<pid>``. The PID identifies the running Chrome process
+    holding this user-data-dir.
+
+    Args:
+        user_data_dir: Chrome profile directory.
+
+    Returns:
+        PID of the holding Chrome process, or None when no readable lock exists.
+    """
+    lock_path = user_data_dir / "SingletonLock"
+    try:
+        target = os.readlink(lock_path)
+    except OSError:
+        return None
+    if "-" not in target:
+        return None
+    pid_part = target.rsplit("-", 1)[1]
+    try:
+        return int(pid_part)
+    except ValueError:
+        return None
+
+
+def clean_stale_singleton_lock(user_data_dir: Path) -> None:
+    """Remove Chrome singleton files when no live process holds the profile.
+
+    Args:
+        user_data_dir: Chrome profile directory.
+
+    Returns:
+        None.
+    """
+    lock_pid = read_singleton_lock_pid(user_data_dir)
+    if lock_pid is not None and is_process_alive(lock_pid):
+        return
+    for name in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
+        try:
+            (user_data_dir / name).unlink()
+        except (OSError, FileNotFoundError):
+            continue
+
+
+def read_process_command(pid: int) -> str | None:
+    """Read the full command line of a running process via ``ps``.
+
+    Args:
+        pid: PID to inspect.
+
+    Returns:
+        Command-line string, or None when the process is gone or unreadable.
+    """
+    try:
+        result = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "command="],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return None
+    if result.returncode != 0:
+        return None
+    return result.stdout
+
+
+def find_chrome_debug_port(pid: int) -> int | None:
+    """Inspect a running Chrome process's command line for its debug port.
+
+    Args:
+        pid: PID of the Chrome process.
+
+    Returns:
+        Remote-debugging-port value if present in the command line, else None.
+    """
+    cmd = read_process_command(pid)
+    if cmd is None:
+        return None
+    match = _DEBUG_PORT_PATTERN.search(cmd)
+    if match is None:
+        return None
+    try:
+        return int(match.group(1))
+    except ValueError:
+        return None
+
+
+def find_chrome_user_data_dir(pid: int) -> Path | None:
+    """Extract a Chrome process's --user-data-dir flag from its command line.
+
+    Args:
+        pid: PID of the Chrome process.
+
+    Returns:
+        The configured user-data directory, or None when not present.
+    """
+    cmd = read_process_command(pid)
+    if cmd is None:
+        return None
+    match = _USER_DATA_DIR_PATTERN.search(cmd)
+    if match is None:
+        return None
+    try:
+        return Path(match.group(1)).expanduser().resolve()
+    except (OSError, RuntimeError):
+        return None
+
+
+def find_listeners_on_port(port: int) -> list[int]:
+    """Return PIDs holding TCP listeners on the given port.
+
+    Uses ``lsof`` so it works without root on macOS and Linux. Returns an
+    empty list if ``lsof`` is missing or no listeners are found.
+
+    Args:
+        port: TCP port to probe.
+
+    Returns:
+        Distinct PIDs listening on ``port`` (any address family).
+    """
+    try:
+        result = subprocess.run(
+            ["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except (subprocess.SubprocessError, OSError, FileNotFoundError):
+        return []
+    if result.returncode not in (0, 1):
+        return []
+    pids: list[int] = []
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            pid = int(line)
+        except ValueError:
+            continue
+        if pid not in pids:
+            pids.append(pid)
+    return pids
+
+
+def is_process_alive(pid: int) -> bool:
+    """Check whether a process id currently exists.
+
+    Args:
+        pid: Process id to probe.
+
+    Returns:
+        True when the process exists.
+    """
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def terminate_process(pid: int | None) -> None:
+    """Best-effort termination for a spawned Chrome process.
+
+    Args:
+        pid: Process id to terminate.
+
+    Returns:
+        None.
+    """
+    if pid is None:
+        return
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except OSError:
+        return
