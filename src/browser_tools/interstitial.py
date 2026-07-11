@@ -124,32 +124,6 @@ async def detect_interstitials_async(
     return _deduplicate(all_results)
 
 
-def detect_interstitials_sync(
-    cdp_client: Any, context_id: int | None = None
-) -> list[dict[str, Any]]:
-    """Synchronous wrapper for interstitial detection.
-
-    Args:
-        cdp_client: Connected CDPClient instance.
-        context_id: Execution context ID.
-
-    Returns:
-        Deduplicated list of detection results.
-    """
-    import asyncio
-
-    loop = asyncio.get_event_loop()
-    if loop.is_running():
-        # Already in async context — run directly
-        import concurrent.futures
-
-        with concurrent.futures.ThreadPoolExecutor() as pool:
-            return pool.submit(
-                lambda: asyncio.run(detect_interstitials_async(cdp_client, context_id))
-            ).result()
-    return asyncio.run(detect_interstitials_async(cdp_client, context_id))
-
-
 async def _run_detection(
     cdp_client: Any, script: str, context_id: int | None
 ) -> list[dict[str, Any]]:

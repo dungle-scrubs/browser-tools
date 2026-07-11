@@ -8,7 +8,7 @@
 Browser automation, debugging, and anti-detect browsing CLI. Provides:
 
 - **Chrome DevTools MCP wrapper** — Snapshot-based page automation via
-  [chrome-devtools-mcp](https://github.com/anthropics/chrome-devtools-mcp)
+  [chrome-devtools-mcp](https://github.com/ChromeDevTools/chrome-devtools-mcp)
 - **Persistent browser sessions** — Long-lived Chrome instances with named profiles,
   daemon-based MCP reuse, and attach-to-running-browser support
 - **Frame-aware tools** — Iframe/CDP frame tree management, execution context
@@ -38,13 +38,18 @@ pip install browser-tools
 # Run the CLI
 browser-tools --help
 
-# Take a snapshot of a page
-browser-tools --headless navigate --url https://example.com
-browser-tools --headless take-snapshot
-
-# Use a persistent profile
-browser-tools --profile dev navigate --url https://example.com
+# Navigate then snapshot. Pass --isolated (or --browser-url) so both commands
+# reuse the SAME long-lived Chrome; a bare `browser-tools navigate` followed by
+# a bare `browser-tools take-snapshot` would each spawn a throwaway browser and
+# NOT share page or login state.
+browser-tools --isolated navigate --url https://example.com
+browser-tools --isolated take-snapshot
 ```
+
+There is no `--profile` CLI flag. Named, login-bearing profiles are selected
+through a project config file (see [Project Configuration](#project-configuration))
+or the `use_browser_session` / `attach_browser` MCP tools. `--isolated` gives a
+dedicated persistent profile directory that is separate from named profiles.
 
 ### Development setup
 
@@ -57,8 +62,10 @@ uv sync
 
 Runtime requirements:
 
-- **Chrome** or **Chrome Canary** for DevTools automation
-- **Node.js** (>=18) for `chrome-devtools-mcp`
+- **Chrome Canary** by default (the default channel is `canary`). Use another
+  installed channel with `--channel stable|beta|dev`, e.g. `--channel stable`
+  for regular Google Chrome.
+- **Node.js** (>=20.19; Node 22+ recommended) for `chrome-devtools-mcp`
 - **Camoufox** (`camoufox fetch`) for anti-detect Firefox workflows
 
 ## Architecture
@@ -94,7 +101,8 @@ uv run pytest
 
 ### Project Configuration
 
-Place a `.browser-tools.json` in your project root:
+Place a `.browser-tools.json` in your project root (searched upward from the
+project working directory):
 
 ```json
 {
@@ -106,6 +114,32 @@ Place a `.browser-tools.json` in your project root:
 ```
 
 This auto-selects a persistent headed browser session using the named profile.
+
+The config is read either as a flat object or wrapped in a `preferredSession`
+(or `preferred_session`) key. Recognized fields:
+
+| Field      | Meaning                                                             |
+| ---------- | ------------------------------------------------------------------- |
+| `mode`     | `headless`, `headed-auth` (aliases: `headed`, `auth`, `auth-headed`), or `headless-auth` |
+| `profile`  | Named profile that persists cookies/login across runs               |
+| `endpoint` | Existing Chrome remote-debugging endpoint to attach to (loopback)   |
+| `channel`  | `stable`, `canary` (default), `beta`, or `dev`                      |
+| `viewport` | Initial window size, e.g. `1280x720`                                |
+| `stealth`  | Inject anti-fingerprinting patches                                  |
+
+### Keeping login state across calls
+
+Auth/login state lives in a Chrome profile directory and survives only while
+the same directory is reused. To keep a session logged in:
+
+- **Use a named `profile`** (via the config above or
+  `use_browser_session(mode="headed-auth", profile="<name>")`). Named profiles
+  persist across restarts and are unaffected by headed↔headless switches,
+  viewport, or which directory you invoke from.
+- The **default/isolated** sessions are keyed per project and Chrome channel;
+  they are not a stable place to keep a long-lived login.
+- **Camoufox** persists login state only when you pass a `profile` to
+  `launch_camoufox`; without it, every launch starts logged out.
 
 ## License
 

@@ -468,12 +468,16 @@ class TestReuseExistingChrome:
         assert result is None
 
     def test_reuses_live_chrome_with_reachable_port(self, tmp_path: Path) -> None:
-        """A live Chrome with a reachable debug port is reused as-is."""
+        """A live Chrome holding this dir with a reachable port is reused as-is."""
         (tmp_path / "SingletonLock").symlink_to("host-99999")
         controller = PersistentChromeController(headless=True, isolated=True)
 
         with (
             patch("browser_tools.persistent_browser.is_process_alive", return_value=True),
+            patch(
+                "browser_tools.persistent_browser.find_chrome_user_data_dir",
+                return_value=tmp_path,
+            ),
             patch("browser_tools.persistent_browser.find_chrome_debug_port", return_value=12345),
             patch("browser_tools.persistent_browser.is_devtools_available", return_value=True),
         ):
@@ -491,8 +495,34 @@ class TestReuseExistingChrome:
 
         with (
             patch("browser_tools.persistent_browser.is_process_alive", return_value=True),
+            patch(
+                "browser_tools.persistent_browser.find_chrome_user_data_dir",
+                return_value=tmp_path,
+            ),
             patch("browser_tools.persistent_browser.find_chrome_debug_port", return_value=12345),
             patch("browser_tools.persistent_browser.is_devtools_available", return_value=False),
+        ):
+            result = controller._try_reuse_existing_chrome(tmp_path)
+
+        assert result is None
+
+    def test_returns_none_when_pid_holds_different_dir(self, tmp_path: Path) -> None:
+        """A live PID running a different user-data-dir must not be reused.
+
+        Guards against a recycled SingletonLock PID or a Chrome launched with an
+        unrelated profile silently serving another session's requests.
+        """
+        (tmp_path / "SingletonLock").symlink_to("host-99999")
+        controller = PersistentChromeController(headless=True, isolated=True)
+
+        with (
+            patch("browser_tools.persistent_browser.is_process_alive", return_value=True),
+            patch(
+                "browser_tools.persistent_browser.find_chrome_user_data_dir",
+                return_value=tmp_path / "someone-else",
+            ),
+            patch("browser_tools.persistent_browser.find_chrome_debug_port", return_value=12345),
+            patch("browser_tools.persistent_browser.is_devtools_available", return_value=True),
         ):
             result = controller._try_reuse_existing_chrome(tmp_path)
 
