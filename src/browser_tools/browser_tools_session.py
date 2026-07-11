@@ -11,6 +11,12 @@ import json
 import sys
 from typing import Any
 
+from .browser_state import (
+    AUTH_MODES,
+    HEADED_AUTH_MODES,
+    HEADLESS_AUTH_MODES,
+    normalize_mode,
+)
 from .chrome_config import get_mcp_command
 from .chrome_utils import (
     BrowserToolsError,
@@ -33,6 +39,19 @@ from .persistent_browser import (
     save_active_attach_config,
     save_session_override,
 )
+from .process_utils import validate_local_endpoint
+
+
+def _tool_error(text: str) -> dict[str, Any]:
+    """Build a JSON-RPC error response with a single text block.
+
+    Args:
+        text: Human-readable error message.
+
+    Returns:
+        JSON-RPC response dict flagged as an error.
+    """
+    return {"result": {"content": [{"type": "text", "text": text}], "isError": True}}
 
 
 def create_parser():
@@ -44,7 +63,12 @@ def create_parser():
 
     # Global options
     parser.add_argument("--headless", action="store_true", help="Run Chrome without UI")
-    parser.add_argument("--isolated", action="store_true", help="Use temporary user data directory")
+    parser.add_argument(
+        "--isolated",
+        action="store_true",
+        help="Use a dedicated profile directory separate from named profiles "
+        "(login state is not shared with the default or named-profile sessions)",
+    )
     parser.add_argument("--viewport", type=str, help="Initial viewport (e.g., 1280x720)")
     parser.add_argument(
         "--channel",
@@ -178,7 +202,9 @@ def create_parser():
     return parser
 
 
-def create_persistent_controller(args: argparse.Namespace, force_persistent: bool = False) -> PersistentChromeController:
+def create_persistent_controller(
+    args: argparse.Namespace, force_persistent: bool = False
+) -> PersistentChromeController:
     """Create a persistent browser controller for multi-step flows.
 
     Args:
@@ -317,6 +343,10 @@ def handle_attach_browser(controller_ref: list[Any], args: Any) -> dict[str, Any
     )
 
     endpoint = (args.get("endpoint") or "").strip() or None
+    if endpoint is not None:
+        endpoint_error = validate_local_endpoint(endpoint)
+        if endpoint_error:
+            return _tool_error(f"Error: {endpoint_error}")
     tab_url = args.get("tab_url")
     profile = args.get("profile")
     mode = args.get("mode", "full")
@@ -635,7 +665,7 @@ def handle_use_browser_session(controller_ref: list[Any], args: Any) -> dict[str
     Returns:
         JSON-RPC response dict.
     """
-    mode = args.get("mode", "project").lower().replace("_", "-")
+    mode = normalize_mode(args.get("mode", "project"))
     if mode in {"clear", "default", "project"}:
         clear_session_override()
         if args.get("clear_active_attach", False):
@@ -659,13 +689,20 @@ def handle_use_browser_session(controller_ref: list[Any], args: Any) -> dict[str
     viewport = args.get("viewport") or (project_config.viewport if project_config else None)
     stealth = bool(args.get("stealth", project_config.stealth if project_config else False))
 
-    if mode in {"headed", "headed-auth", "auth", "auth-headed", "headless-auth"}:
+    if mode in AUTH_MODES:
         if profile is None and project_config is not None:
             profile = project_config.profile
-        if endpoint is None and project_config is not None and mode != "headless-auth":
+        if endpoint is None and project_config is not None and mode not in HEADLESS_AUTH_MODES:
             endpoint = project_config.endpoint or project_config.browser_url
         if profile is None and endpoint is None:
             profile = "google-auth"
+
+    # Validate the resolved endpoint (whether from args or the project config)
+    # before it is persisted and later dialed.
+    if endpoint is not None:
+        endpoint_error = validate_local_endpoint(endpoint)
+        if endpoint_error:
+            return _tool_error(f"Error: {endpoint_error}")
 
     config = ProjectBrowserConfig(
         mode=mode,
@@ -685,11 +722,11 @@ def handle_use_browser_session(controller_ref: list[Any], args: Any) -> dict[str
         lines.append(f"Profile: {profile}")
     if endpoint:
         lines.append(f"Endpoint: {endpoint}")
-    if mode in {"headless-auth"}:
+    if mode in HEADLESS_AUTH_MODES:
         lines.append(
             "Headless auth uses a persistent profile, but Google may challenge or invalidate automated headless sessions."
         )
-    if mode in {"headed", "headed-auth", "auth", "auth-headed"} and endpoint is None:
+    if mode in HEADED_AUTH_MODES and endpoint is None:
         lines.append("A headed Chrome session will be launched/reused with the configured profile.")
     return {"result": {"content": [{"type": "text", "text": "\n".join(lines)}]}}
 
@@ -771,7 +808,9 @@ def _camoufox_result_to_mcp(result: dict[str, Any]) -> dict[str, Any]:
     return {"result": {"content": [{"type": "text", "text": text}]}}
 
 
-def choose_live_profile_fallback() -> tuple[PersistentChromeController | None, list[dict[str, Any]]]:
+def choose_live_profile_fallback() -> tuple[
+    PersistentChromeController | None, list[dict[str, Any]]
+]:
     """Decide whether to auto-attach to a live profile when no session is configured.
 
     Returns:

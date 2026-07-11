@@ -75,7 +75,9 @@ class ChromeMcpSession:
         self._initialize()
         return self
 
-    def __exit__(self, exc_type: type[BaseException] | None, exc: BaseException | None, traceback: object) -> None:
+    def __exit__(
+        self, exc_type: type[BaseException] | None, exc: BaseException | None, traceback: object
+    ) -> None:
         """Terminate the subprocess and release resources.
 
         Args:

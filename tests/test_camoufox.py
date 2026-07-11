@@ -35,6 +35,35 @@ class TestLaunchBrowser:
         assert "error" not in result
         assert result["result"]["status"] == "already_running"
 
+    def test_launch_browser_invalid_profile_errors(
+        self, camoufox_session, mock_camoufox_playwright
+    ):
+        """An unsafe profile name must error, not silently run profile-less."""
+        result = camoufox_session.call_tool("launch_browser", {"profile": "bad/name"})
+
+        assert "error" in result
+        mock_camoufox_playwright["cls"].assert_not_called()
+
+    def test_named_profile_restores_and_persists_state(
+        self, camoufox_session, mock_camoufox_playwright, monkeypatch, tmp_path
+    ):
+        """A named profile loads saved storage_state and writes it back on close."""
+        monkeypatch.setattr("browser_tools.camoufox_session.CAMOUFOX_STATE_DIR", tmp_path)
+        state_file = tmp_path / "dev.json"
+        state_file.write_text('{"cookies": [], "origins": []}')
+
+        launch = camoufox_session.call_tool("launch_browser", {"profile": "dev"})
+        assert "error" not in launch
+        assert launch["result"]["restored_state"] is True
+        new_context = mock_camoufox_playwright["browser"].new_context
+        assert new_context.call_args.kwargs.get("storage_state") == str(state_file)
+
+        close = camoufox_session.call_tool("close_browser", {})
+        assert close["result"]["state_saved"] is True
+        mock_camoufox_playwright["context"].storage_state.assert_called_once_with(
+            path=str(state_file)
+        )
+
 
 class TestNavigate:
     """Page navigation."""

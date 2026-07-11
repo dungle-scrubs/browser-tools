@@ -206,9 +206,7 @@ class CDPHandler:
                 self._frame_manager.handle_execution_context_destroyed,
             )
         except Exception:
-            logger.exception(
-                "CDP connection failed for %s", self._browser_url
-            )
+            logger.exception("CDP connection failed for %s", self._browser_url)
             self._cdp_client = None
 
     async def _inject_stealth(self) -> None:
@@ -498,9 +496,7 @@ class CDPHandler:
             return make_error(f"Accessibility.queryAXTree failed: {exc.cause}")
 
         except Exception:
-            logger.exception(
-                "Unexpected error in Accessibility.queryAXTree failed"
-            )
+            logger.exception("Unexpected error in Accessibility.queryAXTree failed")
 
             return make_error("Accessibility.queryAXTree failed")
 
@@ -611,9 +607,7 @@ class CDPHandler:
             return make_error(f"Accessibility.getPartialAXTree failed: {exc.cause}")
 
         except Exception:
-            logger.exception(
-                "Unexpected error in Accessibility.getPartialAXTree failed"
-            )
+            logger.exception("Unexpected error in Accessibility.getPartialAXTree failed")
 
             return make_error("Accessibility.getPartialAXTree failed")
 
@@ -708,11 +702,9 @@ class CDPHandler:
             return make_error(f"E009: Failed to write PDF to '{out_path}': {exc.cause}")
 
         except Exception:
-            logger.exception(
-                "Unexpected error in E009: Failed to write PDF to '{out_path}'"
-            )
+            logger.exception("Unexpected error writing PDF to '%s'", out_path)
 
-            return make_error("E009: Failed to write PDF to '{out_path}' failed")
+            return make_error(f"E009: Failed to write PDF to '{out_path}'")
 
         return make_text(f"PDF saved to: {abs_path} ({len(pdf_bytes):,} bytes)")
 
@@ -786,9 +778,7 @@ class CDPHandler:
             return make_error(f"Page.captureScreenshot failed: {exc.cause}")
 
         except Exception:
-            logger.exception(
-                "Unexpected error in Page.captureScreenshot failed"
-            )
+            logger.exception("Unexpected error in Page.captureScreenshot failed")
 
             return make_error("Page.captureScreenshot failed")
 
@@ -806,9 +796,7 @@ class CDPHandler:
                 Path(abs_path).write_bytes(img_bytes)
                 lines.append(f"Screenshot saved to: {abs_path}")
             except Exception as exc:
-                logger.warning(
-                    "Could not write screenshot to %s: %s", out_path, exc
-                )
+                logger.warning("Could not write screenshot to %s: %s", out_path, exc)
                 lines.append(f"Warning: could not write file: {exc}")
 
         lines.append(f"data:image/png;base64,{img_data}")
@@ -1410,9 +1398,7 @@ class CDPHandler:
         try:
             return future.result(timeout=(timeout_ms / 1000.0) + 2.0)
         except Exception:
-            logger.debug(
-                "await_paint_ready timed out or failed", exc_info=True
-            )
+            logger.debug("await_paint_ready timed out or failed", exc_info=True)
             return False
 
     async def _await_paint_ready_async(self, timeout_ms: int) -> bool:

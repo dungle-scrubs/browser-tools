@@ -8,8 +8,10 @@ and exposes automation tools for navigating bot-protected sites.
 from __future__ import annotations
 
 import logging
+import re
 import time
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 try:
@@ -18,6 +20,27 @@ except ImportError:
     Camoufox = None  # type: ignore[assignment,misc]
 
 logger = logging.getLogger(__name__)
+
+# Named Camoufox profiles persist cookies + localStorage as a Playwright
+# storage-state file so a login survives close_browser and process exit.
+CAMOUFOX_STATE_DIR = Path.home() / ".cache" / "tool-proxy" / "browser-tools" / "camoufox_profiles"
+_SAFE_PROFILE_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+def _camoufox_state_path(profile: str) -> Path | None:
+    """Resolve the storage-state path for a named Camoufox profile.
+
+    Args:
+        profile: Requested profile name.
+
+    Returns:
+        Path to the profile's storage-state file, or None when the name is
+        empty or contains anything but ``[A-Za-z0-9._-]`` (which could escape
+        the state directory).
+    """
+    if not profile or profile in {".", ".."} or not _SAFE_PROFILE_RE.match(profile):
+        return None
+    return CAMOUFOX_STATE_DIR / f"{profile}.json"
 
 
 class CamoufoxSession:
@@ -32,6 +55,7 @@ class CamoufoxSession:
         self._context: Any = None
         self._page: Any = None
         self._camoufox_cm: Any = None
+        self._storage_path: Path | None = None
 
     def call_tool(self, tool: str, args: dict[str, Any] | None = None) -> dict[str, Any]:
         """Execute a tool call.
@@ -82,14 +106,36 @@ class CamoufoxSession:
             os_map = {"windows": "Windows", "macos": "Macintosh", "linux": "Linux"}
             camoufox_kwargs["os"] = os_map.get(target_os, target_os)
 
+        # A named profile persists login state across sessions: load any saved
+        # storage-state now and write it back on close.
+        profile = args.get("profile")
+        if profile:
+            self._storage_path = _camoufox_state_path(profile)
+            if self._storage_path is None:
+                # Fail loudly rather than silently launching profile-less, which
+                # would discard the login the caller asked us to persist.
+                raise ValueError(
+                    f"Invalid profile name '{profile}': use only letters, digits, "
+                    "'.', '_', or '-'."
+                )
+        else:
+            self._storage_path = None
+        context_kwargs: dict[str, Any] = {}
+        restored = False
+        if self._storage_path is not None and self._storage_path.exists():
+            context_kwargs["storage_state"] = str(self._storage_path)
+            restored = True
+
         self._camoufox_cm = Camoufox(**camoufox_kwargs)  # type: ignore[reportOptionalCall]
         self._browser = self._camoufox_cm.__enter__()  # type: ignore[reportOptionalMemberAccess]
-        self._context = self._browser.new_context()  # type: ignore[reportAttributeAccessIssue]
+        self._context = self._browser.new_context(**context_kwargs)  # type: ignore[reportAttributeAccessIssue]
         self._page = self._context.new_page()  # type: ignore[reportOptionalMemberAccess]
 
         return {
             "status": "running",
             "fingerprint": "auto-generated via BrowserForge",
+            "profile": profile if self._storage_path is not None else None,
+            "restored_state": restored,
         }
 
     def _tool_navigate(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -281,13 +327,31 @@ class CamoufoxSession:
         Returns:
             Confirmation.
         """
+        saved = self._save_storage_state()
         if self._camoufox_cm is not None:
             self._camoufox_cm.__exit__(None, None, None)
         self._browser = None
         self._context = None
         self._page = None
         self._camoufox_cm = None
-        return {"status": "closed"}
+        self._storage_path = None
+        return {"status": "closed", "state_saved": saved}
+
+    def _save_storage_state(self) -> bool:
+        """Persist the current context's cookies + localStorage, if a profile is set.
+
+        Returns:
+            True when a storage-state file was written, otherwise False.
+        """
+        if self._storage_path is None or self._context is None:
+            return False
+        try:
+            self._storage_path.parent.mkdir(parents=True, exist_ok=True)
+            self._context.storage_state(path=str(self._storage_path))
+        except Exception:
+            logger.exception("Failed to persist Camoufox storage state")
+            return False
+        return True
 
     # ------------------------------------------------------------------
     # Internal helpers
