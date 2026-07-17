@@ -9,12 +9,14 @@ fresh MCP session before invoking the requested tool.
 
 from __future__ import annotations
 
+import contextlib
 import fcntl
 import hashlib
 import json
 import os
 import re
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -47,6 +49,7 @@ from .process_utils import (
     read_process_command,  # type: ignore[reportUnusedImport]  # noqa: F401  # re-exported for tests
     read_singleton_lock_pid,
     resolve_chrome_executable,
+    resolve_system_profile_dir,
     select_tab_by_url,  # type: ignore[reportUnusedImport]  # noqa: F401  # re-exported for tests
     terminate_process,
     wait_for_devtools,
@@ -74,6 +77,88 @@ PROJECT_CONFIG_FILENAMES = (
 )
 
 
+def is_owned_profile_dir(user_data_dir: str | Path | None) -> bool:
+    """Report whether a user-data-dir is a browser-tools-owned automation profile.
+
+    Only Chrome instances running one of browser-tools' private profiles (under
+    ``CACHE_DIR/profiles``) may be force-quit on teardown. Instances driving the
+    user's real everyday profile (mode='real') or an externally attached Chrome
+    are never killed — they are only detached from.
+
+    Args:
+        user_data_dir: The Chrome instance's ``--user-data-dir`` value.
+
+    Returns:
+        True when the directory is a private automation profile that the tool
+        may terminate, False otherwise.
+    """
+    if user_data_dir is None:
+        return False
+    try:
+        return Path(user_data_dir).resolve().is_relative_to((CACHE_DIR / "profiles").resolve())
+    except (OSError, ValueError):
+        return False
+
+
+def close_active_session(controller: PersistentChromeController) -> dict[str, Any]:
+    """Tear down the running browser session backing ``controller``.
+
+    Stops the MCP daemon broker, then either quits the Chrome the tool launched
+    (only when it is a private automation profile we own) or simply detaches
+    from an external / real-profile Chrome, leaving it running. Transient
+    session state and the active-attach record are cleared; explicit session
+    overrides and project preferences are left intact.
+
+    Args:
+        controller: The controller whose session should be closed.
+
+    Returns:
+        A summary dict with keys ``quit_chrome``, ``detached``,
+        ``daemon_stopped``, ``pid``, and ``endpoint``.
+    """
+    state = BrowserState.from_path(controller.state_path)
+    session_key = controller.session_key
+    summary: dict[str, Any] = {
+        "quit_chrome": False,
+        "detached": False,
+        "daemon_stopped": False,
+        "pid": state.pid if state else None,
+        "endpoint": (state.browser_url if state else None) or controller.browser_url,
+    }
+
+    # Stop the MCP daemon broker for this session and clean its runtime files.
+    if state is not None and state.daemon_pid is not None and is_process_alive(state.daemon_pid):
+        terminate_process(state.daemon_pid)
+        summary["daemon_stopped"] = True
+    for suffix in (".sock", ".daemon.pid", ".lock"):
+        (CACHE_DIR / f"{session_key}{suffix}").unlink(missing_ok=True)
+
+    # Only a private automation profile launched by the tool may be force-quit.
+    attached_external = controller.browser_url is not None
+    user_data_dir = state.user_data_dir if state else str(controller.user_data_dir)
+    pid = state.pid if state else None
+    owned = (not attached_external) and is_owned_profile_dir(user_data_dir)
+
+    if owned and pid is not None and is_process_alive(pid):
+        terminate_process(pid)  # SIGTERM
+        deadline = time.time() + 5.0
+        while time.time() < deadline and is_process_alive(pid):
+            time.sleep(0.1)
+        if is_process_alive(pid):
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.kill(pid, signal.SIGKILL)
+        if user_data_dir:
+            clean_stale_singleton_lock(Path(user_data_dir))
+        summary["quit_chrome"] = True
+    elif summary["endpoint"] is not None or pid is not None:
+        summary["detached"] = True
+
+    # Forget the running-session state; keep overrides / project preferences.
+    controller.state_path.unlink(missing_ok=True)
+    clear_active_attach_config()
+    return summary
+
+
 class PersistentChromeController:
     """Coordinates persistent browser reuse across wrapper invocations."""
 
@@ -88,6 +173,7 @@ class PersistentChromeController:
         force_persistent: bool = False,
         profile: str | None = None,
         stealth: bool = False,
+        system_profile: bool = False,
     ) -> None:
         """Configure the persistent browser controller.
 
@@ -101,12 +187,16 @@ class PersistentChromeController:
             profile: Named profile for persistent cookie/session storage.
             stealth: Whether to inject stealth patches to reduce automation
                 fingerprinting (navigator.webdriver, plugins, WebGL, etc.).
+            system_profile: When True, drive the user's real everyday Chrome
+                profile (mode='real') instead of a private automation profile.
+                Its Chrome is never force-quit on teardown — only detached.
 
         Returns:
             None.
 
         Raises:
-            ValueError: If both profile and isolated=True are set (E005).
+            ValueError: If both profile and isolated=True are set (E005), or if
+                system_profile is combined with profile/isolated (E006).
         """
         if profile and isolated:
             raise ValueError(
@@ -114,6 +204,11 @@ class PersistentChromeController:
                 "Named profiles persist state; isolated mode discards it. "
                 "Use profile alone for persistent sessions, or isolated alone "
                 "for throwaway sessions."
+            )
+        if system_profile and (profile or isolated):
+            raise ValueError(
+                "E006: mode='real' drives your everyday Chrome profile and "
+                "cannot be combined with a named 'profile' or 'isolated=True'."
             )
 
         self.headless = headless
@@ -124,9 +219,19 @@ class PersistentChromeController:
         self.force_persistent = force_persistent
         self.profile = profile
         self.stealth = stealth
+        self.system_profile = system_profile
         self.mode: str | None = None  # Set by attach_browser tool
 
-        if profile:
+        if system_profile:
+            system_dir = resolve_system_profile_dir(channel)
+            if system_dir is None:
+                raise ValueError(
+                    f"E006: mode='real' is not supported for channel '{channel}' "
+                    "on this platform."
+                )
+            self.session_key = f"real_{channel}"
+            self.user_data_dir = system_dir
+        elif profile:
             self.session_key = f"profile_{profile}"
             self.user_data_dir = CACHE_DIR / "profiles" / profile
         else:
@@ -344,6 +449,11 @@ class PersistentChromeController:
         # Pass stealth mode to daemon
         if getattr(self, "stealth", False):
             daemon_cmd.append("--stealth")
+        # Pass the tool-launched Chrome to the daemon so it can quit it on idle
+        # timeout or shutdown — but only when it is a private automation profile
+        # we own. External / real-profile Chrome is left running.
+        if state.pid is not None and is_owned_profile_dir(state.user_data_dir):
+            daemon_cmd.extend(["--chrome-pid", str(state.pid), "--chrome-owned"])
 
         try:
             subprocess.Popen(
@@ -440,6 +550,17 @@ class PersistentChromeController:
             and is_process_alive(lock_pid)
             and _pid_holds_user_data_dir(lock_pid, user_data_dir)
         ):
+            if self.system_profile:
+                # mode='real': the user's everyday Chrome is open but was not
+                # started with remote debugging, so we cannot attach and must
+                # not force-quit their browser. Tell them how to recover.
+                raise MCPInvocationError(
+                    f"Your everyday {self.channel} Chrome (pid {lock_pid}) is running "
+                    "without --remote-debugging-port, so mode='real' cannot drive it. "
+                    "Quit that Chrome and retry (browser-tools will relaunch it with "
+                    "debugging enabled), or restart it yourself with "
+                    "--remote-debugging-port=<port>."
+                )
             raise MCPInvocationError(format_dead_port_error(self.profile, user_data_dir, lock_pid))
 
         # Clean stale singleton lock files so Chrome can launch cleanly.
@@ -504,6 +625,7 @@ class PersistentChromeController:
                 user_data_dir=user_data_dir,
                 headless=self.headless,
                 viewport=self.viewport,
+                system_profile=self.system_profile,
             )
             try:
                 process = subprocess.Popen(
@@ -952,6 +1074,21 @@ def create_controller_from_browser_config(
     # (the PersistentChromeController constructor rejects that combination, E005).
     if config.profile:
         isolated = False
+
+    # mode='real' drives the user's everyday Chrome profile. It never uses a
+    # private/isolated profile, but the agent may still choose headed/headless.
+    if mode == "real":
+        controller = PersistentChromeController(
+            headless=headless if config.headless is not None else False,
+            isolated=False,
+            viewport=config.viewport,
+            channel=config.channel,
+            stealth=config.stealth,
+            system_profile=True,
+            force_persistent=True,
+        )
+        controller.mode = "full"
+        return controller
 
     controller = PersistentChromeController(
         headless=headless,

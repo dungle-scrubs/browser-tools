@@ -728,7 +728,66 @@ def handle_use_browser_session(controller_ref: list[Any], args: Any) -> dict[str
         )
     if mode in HEADED_AUTH_MODES and endpoint is None:
         lines.append("A headed Chrome session will be launched/reused with the configured profile.")
+    if mode == "real":
+        lines.append(
+            "mode='real' drives your everyday Chrome profile (shared cookies/extensions/history), "
+            "so there is a single dock icon that closes normally. If that Chrome is already open "
+            "without --remote-debugging-port, quit it first so browser-tools can relaunch it with "
+            "debugging enabled. Call close_browser to detach; it will not force-quit your browser."
+        )
     return {"result": {"content": [{"type": "text", "text": "\n".join(lines)}]}}
+
+
+def handle_close_browser(
+    controller_ref: list[Any], fallback: Any, args: Any
+) -> dict[str, Any]:
+    """Handle the close_browser tool: end the active browser session cleanly.
+
+    Stops the background MCP daemon and either quits the Chrome the tool
+    launched (private automation profile) or detaches from an external /
+    real-profile Chrome, leaving it running. This is the supported way to end
+    a session without hunting for and killing a process by hand.
+
+    Args:
+        controller_ref: Single-element list holding the active controller.
+        fallback: Controller to fall back to when none has been swapped in.
+        args: Tool arguments. ``reset_session`` (bool) also clears any explicit
+            session override so the next call falls back to project preference.
+
+    Returns:
+        JSON-RPC response dict.
+    """
+    from .persistent_browser import clear_session_override, close_active_session
+
+    active = controller_ref[0] or fallback
+    if active is None:
+        return {
+            "result": {
+                "content": [{"type": "text", "text": "No active browser session to close."}]
+            }
+        }
+
+    summary = close_active_session(active)
+    controller_ref[0] = None
+    if args.get("reset_session"):
+        clear_session_override()
+
+    if summary["quit_chrome"]:
+        text = (
+            f"Closed browser session: quit the tool-launched Chrome (pid {summary['pid']}) "
+            "and stopped its background daemon."
+        )
+    elif summary["detached"]:
+        endpoint = summary["endpoint"] or "the attached browser"
+        text = (
+            f"Closed browser session: detached from {endpoint} and stopped the background daemon. "
+            "The browser itself was left running (external or mode='real')."
+        )
+    else:
+        text = "No running browser was found; cleared background session state."
+    if args.get("reset_session"):
+        text += " Session override cleared; project preference will be used next."
+    return {"result": {"content": [{"type": "text", "text": text}]}}
 
 
 # Session-level tools that don't need MCP daemon
@@ -738,6 +797,7 @@ SESSION_TOOLS = {
     "delete_profile",
     "use_browser_session",
     "browser_session_status",
+    "close_browser",
 }
 
 # Tools routed through Camoufox when active. Maps browser-tools names to
@@ -994,6 +1054,8 @@ def create_tool_proxy_handlers():
             return handle_use_browser_session(controller_ref, args)
         if tool == "browser_session_status":
             return handle_browser_session_status(args)
+        if tool == "close_browser":
+            return handle_close_browser(controller_ref, controller, args)
         if tool == "list_profiles":
             return handle_list_profiles(args)
         if tool == "delete_profile":
