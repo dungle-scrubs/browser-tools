@@ -8,6 +8,7 @@ under 800 lines.
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
 import re
@@ -21,6 +22,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 try:
     from .persistent_browser import INITIAL_PAGE_URL as _initial_page_url
@@ -30,6 +32,47 @@ except ImportError:
 
 _DEBUG_PORT_PATTERN = re.compile(r"--remote-debugging-port=(\d+)")
 _USER_DATA_DIR_PATTERN = re.compile(r"--user-data-dir=(\S+)")
+
+# Advanced escape hatch for connecting to a non-loopback CDP endpoint.
+_ALLOW_REMOTE_ENDPOINT_ENV = "BROWSER_TOOLS_ALLOW_REMOTE_ENDPOINT"
+
+
+def validate_local_endpoint(endpoint: str) -> str | None:
+    """Validate that a CDP endpoint targets the local loopback interface.
+
+    Chrome remote debugging is loopback-bound by default, so an endpoint that
+    resolves elsewhere is almost always a mistake or an attempt to make the
+    wrapper issue requests to an arbitrary host. Non-loopback endpoints are
+    rejected unless ``BROWSER_TOOLS_ALLOW_REMOTE_ENDPOINT=1`` is set.
+
+    Args:
+        endpoint: Remote debugging endpoint URL (e.g. http://127.0.0.1:9222).
+
+    Returns:
+        None when the endpoint is acceptable, otherwise a human-readable
+        error message explaining the rejection.
+    """
+    if os.environ.get(_ALLOW_REMOTE_ENDPOINT_ENV) == "1":
+        return None
+    parsed = urlparse(endpoint)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        return f"Invalid endpoint '{endpoint}': expected http(s)://host:port."
+    host = parsed.hostname
+    if host == "localhost":
+        return None
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return (
+            f"Endpoint host '{host}' is not loopback. Chrome remote debugging is "
+            f"local; set {_ALLOW_REMOTE_ENDPOINT_ENV}=1 to allow a remote endpoint."
+        )
+    if not ip.is_loopback:
+        return (
+            f"Endpoint host '{host}' is not loopback. Chrome remote debugging is "
+            f"local; set {_ALLOW_REMOTE_ENDPOINT_ENV}=1 to allow a remote endpoint."
+        )
+    return None
 
 
 def resolve_chrome_executable(channel: str) -> str | None:

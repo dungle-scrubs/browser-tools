@@ -51,8 +51,6 @@ try:
         LOCAL_TOOLS,
         NAVIGATION_TOOLS,
         REQUEST_TIMEOUT_SECONDS,
-        SCREENSHOT_BLANK_BYTES_PER_PIXEL_THRESHOLD,
-        SCREENSHOT_BLANK_LUMINANCE_STDDEV_THRESHOLD,
         SCREENSHOT_BLANK_MAX_RETRIES,
         SCREENSHOT_BLANK_RETRY_DELAY_SECONDS,
     )
@@ -60,6 +58,10 @@ try:
         CDPHandler,
         make_error,
         make_text,
+    )
+    from .screenshot_utils import (
+        extract_screenshot_png_b64,
+        screenshot_looks_blank,
     )
 except ImportError:
     from cdp_constants import (  # type: ignore[import-untyped,no-redef]
@@ -72,8 +74,6 @@ except ImportError:
         LOCAL_TOOLS,
         NAVIGATION_TOOLS,
         REQUEST_TIMEOUT_SECONDS,
-        SCREENSHOT_BLANK_BYTES_PER_PIXEL_THRESHOLD,
-        SCREENSHOT_BLANK_LUMINANCE_STDDEV_THRESHOLD,
         SCREENSHOT_BLANK_MAX_RETRIES,
         SCREENSHOT_BLANK_RETRY_DELAY_SECONDS,
     )
@@ -81,6 +81,10 @@ except ImportError:
         CDPHandler,
         make_error,
         make_text,
+    )
+    from screenshot_utils import (  # type: ignore[import-untyped,no-redef]
+        extract_screenshot_png_b64,
+        screenshot_looks_blank,
     )
 
 IDLE_TIMEOUT_SECONDS = 30 * 60  # 30 minutes
@@ -257,10 +261,15 @@ def main(
         while True:
             time.sleep(5)
             if proc.poll() is not None:
+                # Subprocess already exited; reap it to avoid a zombie, stop the
+                # CDP client, then tear the daemon down.
+                with contextlib.suppress(Exception):
+                    proc.wait(timeout=5)
+                cdp_handler.stop()
                 _cleanup_files(socket_path, pid_file)
                 os._exit(1)
             if time.time() - last_activity[0] > IDLE_TIMEOUT_SECONDS:
-                proc.terminate()
+                _reap_process(proc)
                 cdp_handler.stop()
                 _terminate_owned_chrome(chrome_pid, chrome_owned)
                 _cleanup_files(socket_path, pid_file)
@@ -269,9 +278,14 @@ def main(
     health = threading.Thread(target=health_check, daemon=True)
     health.start()
 
-    # Listen on Unix socket
+    # Listen on Unix socket. Restrict access to the owner: any local user who
+    # can connect to this socket can drive a possibly logged-in browser.
     server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     server.bind(socket_path)
+    try:
+        os.chmod(socket_path, 0o600)
+    except OSError:
+        logger.warning("Could not restrict daemon socket permissions on %s", socket_path)
     server.listen(2)
     server.settimeout(10)
 
@@ -285,11 +299,7 @@ def main(
         Returns:
             None.
         """
-        proc.terminate()
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            proc.kill()
+        _reap_process(proc)
         cdp_handler.stop()
         _terminate_owned_chrome(chrome_pid, chrome_owned)
         server.close()
@@ -521,115 +531,6 @@ def _forward_to_mcp_subprocess(
     return response
 
 
-def _extract_screenshot_png_b64(response: dict[str, Any]) -> str | None:
-    """Find the PNG base64 payload in a take_screenshot MCP response.
-
-    chrome-devtools-mcp returns screenshots as either an `image` content
-    block (`{"type": "image", "data": "<b64>", ...}`) or, for some
-    versions, embedded as a `data:image/...` URI inside a text block.
-    We probe for both shapes and return the raw base64 string, or None
-    if no image is found (e.g. the screenshot was saved-to-file only,
-    or the response is an error).
-    """
-    result = response.get("result")
-    if not isinstance(result, dict):
-        return None
-    content = result.get("content")
-    if not isinstance(content, list):
-        return None
-
-    for block in content:
-        if not isinstance(block, dict):
-            continue
-        if block.get("type") == "image":
-            data = block.get("data")
-            if isinstance(data, str) and data:
-                return data
-        if block.get("type") == "text":
-            text = block.get("text", "")
-            marker = "data:image/"
-            idx = text.find(marker)
-            if idx >= 0:
-                # Extract from "data:image/<fmt>;base64,<payload>"
-                comma = text.find(",", idx)
-                if comma > 0:
-                    payload = text[comma + 1 :].strip()
-                    # Stop at first whitespace/newline — payload should be a
-                    # contiguous base64 run with no embedded whitespace.
-                    end = len(payload)
-                    for i, ch in enumerate(payload):
-                        if ch in (" ", "\n", "\r", "\t"):
-                            end = i
-                            break
-                    return payload[:end] or None
-    return None
-
-
-def _screenshot_looks_blank(png_b64: str) -> bool:
-    """Heuristically decide whether a captured PNG is effectively blank.
-
-    Two signals, in order of precision:
-
-    1. Luminance variance (preferred) — decode via Pillow if available,
-       downscale to a small grid for speed, compute stddev of grayscale
-       pixels. A stddev under SCREENSHOT_BLANK_LUMINANCE_STDDEV_THRESHOLD
-       means almost no contrast (solid color, gradient-only loader, etc.).
-
-    2. Compressed-size ratio (fallback) — uniform pixels compress to a
-       tiny fraction of raw size. Parsing just the IHDR chunk gives us
-       width/height with no decoding cost. If Pillow is not importable
-       in the daemon's Python, this is the floor.
-
-    Returns False on any decoding error so we never accidentally drop a
-    real screenshot due to a corrupt-looking buffer.
-    """
-    import base64 as _b64
-    import binascii
-
-    try:
-        png_bytes = _b64.b64decode(png_b64, validate=False)
-    except (binascii.Error, ValueError):
-        return False
-    if len(png_bytes) < 24 or png_bytes[:8] != b"\x89PNG\r\n\x1a\n":
-        return False
-
-    # IHDR is always the first chunk after the 8-byte signature; layout:
-    # 4 bytes length, 4 bytes "IHDR", 4 bytes width, 4 bytes height, ...
-    try:
-        width = int.from_bytes(png_bytes[16:20], "big")
-        height = int.from_bytes(png_bytes[20:24], "big")
-    except (ValueError, IndexError):
-        return False
-    if width <= 0 or height <= 0:
-        return False
-
-    # Try Pillow path for the more precise variance signal.
-    try:
-        import io as _io
-
-        from PIL import Image  # type: ignore
-
-        img = Image.open(_io.BytesIO(png_bytes)).convert("L")
-        # Thumbnail to bound CPU on large fullPage screenshots.
-        img.thumbnail((96, 96))
-        pixels = list(img.getdata())  # type: ignore[reportArgumentType]
-        if not pixels:
-            return False
-        n = len(pixels)
-        mean = sum(pixels) / n
-        var = sum((p - mean) * (p - mean) for p in pixels) / n
-        stddev = var**0.5
-        return stddev < SCREENSHOT_BLANK_LUMINANCE_STDDEV_THRESHOLD
-    except (OSError, ImportError):
-        # Pillow missing or decode failed — fall through to size-ratio.
-        logger.debug(
-            "Pillow not available for blank detection", exc_info=True
-        )
-
-    ratio = len(png_bytes) / float(width * height)
-    return ratio < SCREENSHOT_BLANK_BYTES_PER_PIXEL_THRESHOLD
-
-
 def _take_screenshot_with_paint_gate(
     request: dict[str, Any],
     client_id: Any,
@@ -670,13 +571,13 @@ def _take_screenshot_with_paint_gate(
         if "error" in last_response:
             return last_response
 
-        png_b64 = _extract_screenshot_png_b64(last_response)
+        png_b64 = extract_screenshot_png_b64(last_response)
         if png_b64 is None:
             # No image content found (e.g. saved-to-file only response).
             # Nothing for us to inspect; trust the subprocess.
             return last_response
 
-        if not _screenshot_looks_blank(png_b64):
+        if not screenshot_looks_blank(png_b64):
             return last_response
 
         # Looks blank. If we have retries left, brief sleep so any
@@ -761,6 +662,27 @@ def _cleanup_files(socket_path: str, pid_file: str) -> None:
     """
     Path(socket_path).unlink(missing_ok=True)
     Path(pid_file).unlink(missing_ok=True)
+
+
+def _reap_process(proc: subprocess.Popen[str]) -> None:
+    """Terminate the MCP subprocess and wait for it so no zombie is left.
+
+    Args:
+        proc: The MCP subprocess to stop.
+
+    Returns:
+        None.
+    """
+    with contextlib.suppress(Exception):
+        proc.terminate()
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        with contextlib.suppress(Exception):
+            proc.kill()
+            proc.wait(timeout=5)
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":

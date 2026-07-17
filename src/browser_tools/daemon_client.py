@@ -13,7 +13,9 @@ from typing import Any
 
 from .chrome_utils import MCPInvocationError
 
-DEFAULT_BROWSER_TIMEOUT_SECONDS = 60
+# Must exceed the daemon's own per-request timeout so the client does not abort
+# a call the daemon is still legitimately servicing.
+DEFAULT_BROWSER_TIMEOUT_SECONDS = 180
 
 
 class DaemonClient:
@@ -105,21 +107,30 @@ class DaemonClient:
         except OSError as exc:
             raise MCPInvocationError(f"Failed to send request to MCP daemon: {exc}") from exc
 
-        while b"\n" not in self._buf:
-            try:
-                data = self._sock.recv(262144)
-            except TimeoutError as exc:
-                raise MCPInvocationError(
-                    f"MCP daemon request timed out after {self.timeout}s"
-                ) from exc
-            except OSError as exc:
-                raise MCPInvocationError(f"MCP daemon connection error: {exc}") from exc
-            if not data:
-                raise MCPInvocationError("MCP daemon connection closed unexpectedly")
-            self._buf += data
+        # Read until we see the response whose id matches this request. Any
+        # interleaved notifications or stale responses (different id) are
+        # discarded so a slow/second call cannot receive an earlier reply.
+        while True:
+            while b"\n" not in self._buf:
+                try:
+                    data = self._sock.recv(262144)
+                except TimeoutError as exc:
+                    raise MCPInvocationError(
+                        f"MCP daemon request timed out after {self.timeout}s"
+                    ) from exc
+                except OSError as exc:
+                    raise MCPInvocationError(f"MCP daemon connection error: {exc}") from exc
+                if not data:
+                    raise MCPInvocationError("MCP daemon connection closed unexpectedly")
+                self._buf += data
 
-        line, self._buf = self._buf.split(b"\n", 1)
-        try:
-            return json.loads(line)
-        except json.JSONDecodeError as exc:
-            raise MCPInvocationError(f"Invalid JSON from MCP daemon: {exc}") from exc
+            line, self._buf = self._buf.split(b"\n", 1)
+            if not line.strip():
+                continue
+            try:
+                message = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise MCPInvocationError(f"Invalid JSON from MCP daemon: {exc}") from exc
+            if isinstance(message, dict) and message.get("id") == self._msg_id:
+                return message
+            # Not our response (notification or stale id); keep reading.

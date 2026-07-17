@@ -130,6 +130,11 @@ class TestRealModeController:
         monkeypatch.setattr(
             "browser_tools.persistent_browser.is_process_alive", lambda pid: True
         )
+        # The everyday Chrome genuinely holds the real profile dir.
+        monkeypatch.setattr(
+            "browser_tools.persistent_browser._pid_holds_user_data_dir",
+            lambda pid, d: True,
+        )
         controller = PersistentChromeController(system_profile=True, isolated=False)
         with pytest.raises(MCPInvocationError, match="remote-debugging-port"):
             controller.ensure_browser_state()

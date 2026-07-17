@@ -26,9 +26,11 @@ from pathlib import Path
 from typing import Any
 
 from .browser_state import (  # re-exported for consumers
+    HEADLESS_AUTH_MODES,
     ActiveAttachConfig,
     BrowserState,
     ProjectBrowserConfig,
+    normalize_mode,
 )
 from .chrome_config import get_mcp_command
 from .chrome_utils import MCPInvocationError
@@ -39,7 +41,7 @@ from .process_utils import (
     clean_stale_singleton_lock,
     enumerate_tabs,
     find_chrome_debug_port,
-    find_chrome_user_data_dir,  # type: ignore[reportUnusedImport]  # noqa: F401  # re-exported for tests
+    find_chrome_user_data_dir,  # type: ignore[reportUnusedImport]  # re-exported for tests
     find_free_port,
     find_listeners_on_port,
     is_devtools_available,
@@ -56,6 +58,9 @@ from .process_utils import (
 CACHE_DIR = Path.home() / ".cache" / "tool-proxy" / "browser-tools"
 DEFAULT_BROWSER_TIMEOUT_SECONDS = 60
 BROWSER_READY_TIMEOUT_SECONDS = 10.0
+# Chrome launch attempts; each retry picks a fresh debug port so a lost race
+# for the port (find_free_port releases it before Chrome binds) is recovered.
+LAUNCH_PORT_ATTEMPTS = 3
 INITIAL_PAGE_URL = "about:blank"
 SELECTED_PAGE_PATTERN = re.compile(r"^\s*(\d+):.*\[selected\]\s*$", re.MULTILINE)
 PAGE_LINE_PATTERN = re.compile(r"^\s*(\d+):\s*(.*?)(?:\s*\[selected\])?\s*$", re.MULTILINE)
@@ -232,9 +237,7 @@ class PersistentChromeController:
         else:
             self.session_key = build_session_key(
                 browser_url=browser_url,
-                headless=headless,
                 isolated=isolated,
-                viewport=viewport,
                 channel=channel,
             )
             self.user_data_dir = CACHE_DIR / "profiles" / self.session_key
@@ -441,7 +444,7 @@ class PersistentChromeController:
         if state.browser_url:
             daemon_cmd.extend(["--browser-url", state.browser_url])
         # Pass access mode to daemon
-        if hasattr(self, "mode") and self.mode:
+        if self.mode:
             daemon_cmd.extend(["--mode", self.mode])
         # Pass stealth mode to daemon
         if getattr(self, "stealth", False):
@@ -510,17 +513,7 @@ class PersistentChromeController:
             return state
 
         if self.browser_url:
-            state = BrowserState(
-                browser_url=self.browser_url,
-                selected_page_id=None,
-                pid=None,
-                user_data_dir=None,
-                headless=self.headless,
-                isolated=self.isolated,
-                channel=self.channel,
-                viewport=self.viewport,
-                last_used_at=time.time(),
-            )
+            state = self._make_state(browser_url=self.browser_url, pid=None, user_data_dir=None)
             if not is_devtools_available(state.browser_url):
                 raise MCPInvocationError(
                     f"Chrome remote debugging endpoint is unavailable: {state.browser_url}"
@@ -552,7 +545,11 @@ class PersistentChromeController:
         # single-instance check would fail) and surface what's wrong so the
         # caller can recover. Otherwise the agent loops on a silent failure.
         lock_pid = read_singleton_lock_pid(user_data_dir)
-        if lock_pid is not None and is_process_alive(lock_pid):
+        if (
+            lock_pid is not None
+            and is_process_alive(lock_pid)
+            and _pid_holds_user_data_dir(lock_pid, user_data_dir)
+        ):
             if self.system_profile:
                 # mode='real': the user's everyday Chrome is open but was not
                 # started with remote debugging, so we cannot attach and must
@@ -569,50 +566,97 @@ class PersistentChromeController:
         # Clean stale singleton lock files so Chrome can launch cleanly.
         clean_stale_singleton_lock(user_data_dir)
 
-        port = find_free_port()
-        browser_url = f"http://127.0.0.1:{port}"
-        command = build_browser_command(
-            executable=executable,
-            port=port,
-            user_data_dir=user_data_dir,
-            headless=self.headless,
-            viewport=self.viewport,
-            system_profile=self.system_profile,
-        )
+        browser_url, pid = self._launch_chrome(executable, user_data_dir)
+        state = self._make_state(browser_url=browser_url, pid=pid, user_data_dir=str(user_data_dir))
+        state.save(self.state_path)
+        return state
 
-        try:
-            process = subprocess.Popen(
-                command,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True,
-            )
-        except OSError as exc:
-            raise MCPInvocationError(f"Failed to launch Chrome: {exc}") from exc
+    def _make_state(
+        self, *, browser_url: str, pid: int | None, user_data_dir: str | None
+    ) -> BrowserState:
+        """Build a BrowserState stamped with this controller's launch settings.
 
-        if not wait_for_devtools(browser_url, timeout_seconds=BROWSER_READY_TIMEOUT_SECONDS):
-            terminate_process(process.pid)
-            raise MCPInvocationError(
-                f"Timed out waiting for Chrome remote debugging endpoint at {browser_url}. "
-                f"Chrome (pid {process.pid}, user-data-dir {user_data_dir}) failed to expose "
-                "its debug port. Another Chrome may be holding the profile, or the executable "
-                f"({executable}) may be unable to start."
-            )
+        Args:
+            browser_url: Remote debugging endpoint for the browser.
+            pid: PID of the browser process, or None for an external endpoint.
+            user_data_dir: Profile directory string, or None for an external
+                endpoint.
 
-        state = BrowserState(
+        Returns:
+            A freshly timestamped BrowserState.
+        """
+        return BrowserState(
             browser_url=browser_url,
             selected_page_id=None,
-            pid=process.pid,
-            user_data_dir=str(user_data_dir),
+            pid=pid,
+            user_data_dir=user_data_dir,
             headless=self.headless,
             isolated=self.isolated,
             channel=self.channel,
             viewport=self.viewport,
             last_used_at=time.time(),
         )
-        state.save(self.state_path)
-        return state
+
+    def _launch_chrome(self, executable: str, user_data_dir: Path) -> tuple[str, int]:
+        """Launch Chrome, retrying on a lost race for the chosen debug port.
+
+        ``find_free_port`` releases the port before Chrome binds it, so another
+        process can steal it in between. Each attempt picks a fresh port, so a
+        stolen port is recovered rather than surfaced as a spurious timeout.
+
+        Args:
+            executable: Chrome executable path.
+            user_data_dir: Profile directory to launch into.
+
+        Returns:
+            The reachable ``browser_url`` and the launched process PID.
+
+        Raises:
+            MCPInvocationError: If Chrome cannot be launched or never exposes a
+                reachable debug port within the retry budget.
+        """
+        last_error = ""
+        for _ in range(LAUNCH_PORT_ATTEMPTS):
+            port = find_free_port()
+            browser_url = f"http://127.0.0.1:{port}"
+            command = build_browser_command(
+                executable=executable,
+                port=port,
+                user_data_dir=user_data_dir,
+                headless=self.headless,
+                viewport=self.viewport,
+                system_profile=self.system_profile,
+            )
+            try:
+                process = subprocess.Popen(
+                    command,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True,
+                )
+            except OSError as exc:
+                raise MCPInvocationError(f"Failed to launch Chrome: {exc}") from exc
+
+            if wait_for_devtools(browser_url, timeout_seconds=BROWSER_READY_TIMEOUT_SECONDS):
+                return browser_url, process.pid
+
+            last_error = (
+                f"Timed out waiting for Chrome remote debugging endpoint at {browser_url}. "
+                f"Chrome (pid {process.pid}, user-data-dir {user_data_dir}) failed to expose "
+                "its debug port. Another Chrome may be holding the profile, or the executable "
+                f"({executable}) may be unable to start."
+            )
+            # Fully retire this attempt before retrying: SIGTERM is async, and a
+            # relaunch into the same user-data-dir while the old Chrome still
+            # holds the SingletonLock would just hand off to the dying instance
+            # (which never binds a port). Wait for it to die, then re-clean the
+            # lock so the next attempt launches into a clean profile.
+            terminate_process(process.pid)
+            _wait_for_process_exit(process.pid, timeout_seconds=BROWSER_READY_TIMEOUT_SECONDS)
+            clean_stale_singleton_lock(user_data_dir)
+
+        raise MCPInvocationError(last_error)
 
     def _try_reuse_existing_chrome(self, user_data_dir: Path) -> BrowserState | None:
         """Reuse a Chrome already holding this user-data-dir, if one exists.
@@ -627,22 +671,19 @@ class PersistentChromeController:
         lock_pid = read_singleton_lock_pid(user_data_dir)
         if lock_pid is None or not is_process_alive(lock_pid):
             return None
+        # The SingletonLock PID may have been recycled by an unrelated process,
+        # or point at a Chrome running a different profile. Only reuse it when
+        # it actually holds this user-data-dir.
+        if not _pid_holds_user_data_dir(lock_pid, user_data_dir):
+            return None
         port = find_chrome_debug_port(lock_pid)
         if port is None:
             return None
         browser_url = f"http://127.0.0.1:{port}"
         if not is_devtools_available(browser_url):
             return None
-        return BrowserState(
-            browser_url=browser_url,
-            selected_page_id=None,
-            pid=lock_pid,
-            user_data_dir=str(user_data_dir),
-            headless=self.headless,
-            isolated=self.isolated,
-            channel=self.channel,
-            viewport=self.viewport,
-            last_used_at=time.time(),
+        return self._make_state(
+            browser_url=browser_url, pid=lock_pid, user_data_dir=str(user_data_dir)
         )
 
     def _is_state_usable(self, state: BrowserState) -> bool:
@@ -656,9 +697,19 @@ class PersistentChromeController:
         """
         if state.browser_url != (self.browser_url or state.browser_url):
             return False
-        if state.channel != self.channel or state.headless != self.headless:
+        # channel/isolated select the on-disk profile dir, so a mismatch means
+        # a different bucket; headless/viewport are presentation-only and must
+        # NOT force a relaunch (that would abandon the logged-in profile).
+        if state.channel != self.channel or state.isolated != self.isolated:
             return False
-        if state.viewport != self.viewport or state.isolated != self.isolated:
+        # For auto-managed browsers, confirm the saved state still describes the
+        # profile dir this controller resolves to, so recorded state can't
+        # silently point at a different (logged-out) user-data-dir.
+        if (
+            self.browser_url is None
+            and state.user_data_dir is not None
+            and Path(state.user_data_dir).resolve() != self.user_data_dir.resolve()
+        ):
             return False
         if state.pid is not None and not is_process_alive(state.pid):
             return False
@@ -940,17 +991,25 @@ def get_project_cwd() -> Path:
     return Path(os.environ.get("CLAUDE_CWD") or os.getcwd()).expanduser().resolve()
 
 
+def _project_key_suffix() -> str:
+    """Return the short hash identifying the current project's config files.
+
+    Returns:
+        16-char hex suffix derived from CLAUDE_PROJECT_ID and the project cwd.
+    """
+    project_id = os.environ.get("CLAUDE_PROJECT_ID") or ""
+    project_cwd = str(get_project_cwd())
+    raw_key = f"{project_id}|{project_cwd}"
+    return hashlib.sha1(raw_key.encode("utf-8")).hexdigest()[:16]
+
+
 def get_active_attach_config_path() -> Path:
     """Return the per-project file used to remember the active Chrome attach.
 
     Returns:
         Path to the active attach config JSON file.
     """
-    project_id = os.environ.get("CLAUDE_PROJECT_ID") or ""
-    project_cwd = str(get_project_cwd())
-    raw_key = f"{project_id}|{project_cwd}"
-    suffix = hashlib.sha1(raw_key.encode("utf-8")).hexdigest()[:16]
-    return CACHE_DIR / f"active_attach_{suffix}.json"
+    return CACHE_DIR / f"active_attach_{_project_key_suffix()}.json"
 
 
 def find_project_browser_config_path() -> Path | None:
@@ -995,20 +1054,25 @@ def create_controller_from_browser_config(
         Configured browser controller.
     """
     del source  # Reserved for future response diagnostics.
-    mode = config.mode.lower().replace("_", "-")
+    mode = normalize_mode(config.mode)
     browser_url = config.endpoint or config.browser_url
-    headless = (
-        config.headless if config.headless is not None else mode in {"headless", "headless-auth"}
-    )
-    isolated = config.isolated if config.isolated is not None else mode == "headless"
 
-    if config.profile and isolated:
-        isolated = False
-    if mode in {"headed", "headed-auth", "auth", "auth-headed"}:
-        headless = False
-        isolated = False
-    if mode == "headless-auth":
-        headless = True
+    # Per-mode defaults for presentation (headless) and persistence (isolated),
+    # each overridable by an explicit config field. Only the plain "headless"
+    # mode is isolated; every auth mode keeps a persistent profile.
+    if mode == "headless":
+        default_headless, default_isolated = True, True
+    elif mode in HEADLESS_AUTH_MODES:
+        default_headless, default_isolated = True, False
+    else:  # headed / headed-auth / auth / auth-headed / unknown
+        default_headless, default_isolated = False, False
+
+    headless = config.headless if config.headless is not None else default_headless
+    isolated = config.isolated if config.isolated is not None else default_isolated
+
+    # A named profile always persists login state, so it can never be isolated
+    # (the PersistentChromeController constructor rejects that combination, E005).
+    if config.profile:
         isolated = False
 
     # mode='real' drives the user's everyday Chrome profile. It never uses a
@@ -1058,11 +1122,7 @@ def get_session_override_path() -> Path:
     Returns:
         Path to the browser session override JSON file.
     """
-    project_id = os.environ.get("CLAUDE_PROJECT_ID") or ""
-    project_cwd = str(get_project_cwd())
-    raw_key = f"{project_id}|{project_cwd}"
-    suffix = hashlib.sha1(raw_key.encode("utf-8")).hexdigest()[:16]
-    return CACHE_DIR / f"browser_session_{suffix}.json"
+    return CACHE_DIR / f"browser_session_{_project_key_suffix()}.json"
 
 
 def save_session_override(config: ProjectBrowserConfig) -> None:
@@ -1190,7 +1250,10 @@ def load_active_attach_controller() -> PersistentChromeController | None:
         clear_active_attach_config()
         return None
     if not is_devtools_available(config.browser_url):
-        clear_active_attach_config()
+        # Transient unreachability (Chrome restarting, port not yet up) must not
+        # permanently drop the attachment to a fresh logged-out default. Keep
+        # the saved config so the next call can reattach once Chrome is back;
+        # only the TTL above clears it.
         return None
 
     controller = PersistentChromeController(
@@ -1204,21 +1267,65 @@ def load_active_attach_controller() -> PersistentChromeController | None:
     return controller
 
 
+def _wait_for_process_exit(pid: int, timeout_seconds: float) -> bool:
+    """Poll until a process exits or a deadline passes.
+
+    Args:
+        pid: Process ID to watch.
+        timeout_seconds: Maximum time to wait.
+
+    Returns:
+        True when the process is gone before the deadline, else False.
+    """
+    deadline = time.time() + timeout_seconds
+    while time.time() < deadline:
+        if not is_process_alive(pid):
+            return True
+        time.sleep(0.1)
+    return not is_process_alive(pid)
+
+
+def _pid_holds_user_data_dir(pid: int, user_data_dir: Path) -> bool:
+    """Check whether a live PID is a Chrome holding the given profile dir.
+
+    Guards against a recycled SingletonLock PID (now an unrelated process) or a
+    Chrome running a different ``--user-data-dir``.
+
+    Args:
+        pid: Process ID recorded in the profile's SingletonLock.
+        user_data_dir: Profile directory the caller expects that PID to hold.
+
+    Returns:
+        True only when ``pid``'s command line resolves to ``user_data_dir``.
+    """
+    actual = find_chrome_user_data_dir(pid)
+    if actual is None:
+        return False
+    try:
+        return actual.resolve() == user_data_dir.resolve()
+    except OSError:
+        return False
+
+
 def build_session_key(
     *,
     browser_url: str | None,
-    headless: bool,
     isolated: bool,
-    viewport: str | None,
     channel: str,
 ) -> str:
-    """Build a stable key for persisted browser state.
+    """Build a stable key for the on-disk profile of a non-named session.
+
+    The key deliberately excludes presentation-only settings (``headless``,
+    ``viewport``): a headed and a headless call from the same project must
+    resolve to the same ``user-data-dir`` so cookies and login state survive
+    when a consumer switches between them. ``channel`` is included because
+    different Chrome channels are different binaries that should not share a
+    profile directory, and ``isolated`` is included because throwaway sessions
+    must not collide with the persistent default bucket.
 
     Args:
         browser_url: Explicit remote debugging endpoint, if any.
-        headless: Whether the browser runs headless.
-        isolated: Whether the browser uses a dedicated profile.
-        viewport: Initial viewport string.
+        isolated: Whether the browser uses a dedicated throwaway profile.
         channel: Chrome channel.
 
     Returns:
@@ -1232,9 +1339,7 @@ def build_session_key(
             project_id,
             project_cwd,
             channel,
-            str(headless),
             str(isolated),
-            viewport or "default",
         ]
     )
     return hashlib.sha1(raw_key.encode("utf-8")).hexdigest()[:16]
@@ -1431,7 +1536,27 @@ def delete_profile(name: str) -> bool:
     Returns:
         True when the profile existed and was deleted, False otherwise.
     """
-    profile_dir = CACHE_DIR / "profiles" / name
+    # Reject anything that isn't a plain profile name so a crafted value like
+    # "../.." or "/etc" cannot escape the profiles directory and delete
+    # arbitrary paths.
+    if (
+        not name
+        or name in {".", ".."}
+        or "/" in name
+        or "\\" in name
+        or "\x00" in name
+        or os.sep in name
+        or (os.altsep and os.altsep in name)
+        or not _is_named_profile(name)
+    ):
+        return False
+    try:
+        profiles_root = (CACHE_DIR / "profiles").resolve()
+        profile_dir = (CACHE_DIR / "profiles" / name).resolve()
+    except (OSError, ValueError):
+        return False
+    if profile_dir.parent != profiles_root:
+        return False
     if not profile_dir.exists() or not profile_dir.is_dir():
         return False
 
