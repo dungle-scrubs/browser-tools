@@ -145,6 +145,15 @@ class BrowserState(_PersistedConfig):
     last_used_at: float = 0.0
     daemon_pid: int | None = None
     daemon_socket: str | None = None
+    # True only when this tool launched ``pid`` itself. Recorded rather than
+    # inferred, because inferring ownership from the profile directory alone
+    # cannot tell a tool-launched Chrome from one a user started on the same
+    # directory and attached to. Defaults False so a state file written before
+    # this field existed is treated as not-ours and never force-quit.
+    chrome_owned: bool = False
+    # ``ps`` start-time of ``pid``, pinning process identity across the window
+    # between deciding to quit a browser and actually signalling it.
+    chrome_started_at: str | None = None
 
 
 @dataclass

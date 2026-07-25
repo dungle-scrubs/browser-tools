@@ -424,6 +424,36 @@ def find_listeners_on_port(port: int) -> list[int]:
     return pids
 
 
+def read_process_start_time(pid: int) -> str | None:
+    """Read a process's start time, used as an identity token across signals.
+
+    A PID alone is not an identity: the kernel recycles it, so a PID that was
+    Chrome a moment ago can be an unrelated process by the time a signal is
+    sent. The (pid, start time) pair is stable for the lifetime of a process and
+    is not reused, so it is safe to compare before signalling.
+
+    Args:
+        pid: PID to inspect.
+
+    Returns:
+        The ``ps`` start-time string, or None when the process is gone or
+        unreadable.
+    """
+    try:
+        result = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "lstart="],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return None
+    if result.returncode != 0:
+        return None
+    token = result.stdout.strip()
+    return token or None
+
+
 def is_process_alive(pid: int) -> bool:
     """Check whether a process id currently exists.
 
