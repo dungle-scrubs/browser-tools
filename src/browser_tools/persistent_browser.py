@@ -47,6 +47,7 @@ from .process_utils import (
     is_devtools_available,
     is_process_alive,
     read_process_command,  # type: ignore[reportUnusedImport]  # noqa: F401  # re-exported for tests
+    read_process_start_time,
     read_singleton_lock_pid,
     resolve_chrome_executable,
     resolve_system_profile_dir,
@@ -69,6 +70,12 @@ PAGE_LINE_PATTERN = re.compile(r"^\s*(\d+):\s*(.*?)(?:\s*\[selected\])?\s*$", re
 DAEMON_STARTUP_TIMEOUT_SECONDS = 30
 DAEMON_RECOVERY_RETRY_COUNT = 1
 ACTIVE_ATTACH_TTL_SECONDS = 12 * 60 * 60
+# How long an owned automation Chrome may sit with no live daemon before the
+# orphan sweep quits it. Matches mcp_daemon.IDLE_TIMEOUT_SECONDS: a session this
+# idle would already have been torn down had its daemon survived.
+ORPHAN_REAP_IDLE_SECONDS = 30 * 60
+# Grace period after SIGTERM before escalating to SIGKILL.
+CHROME_QUIT_TIMEOUT_SECONDS = 5.0
 DAEMON_SCRIPT = Path(__file__).parent / "mcp_daemon.py"
 BROWSER_TOOLS_ROOT = DAEMON_SCRIPT.parents[2]
 PROJECT_CONFIG_FILENAMES = (
@@ -100,6 +107,256 @@ def is_owned_profile_dir(user_data_dir: str | Path | None) -> bool:
         return False
 
 
+def quit_owned_chrome(
+    pid: int, user_data_dir: str | Path | None, started_at: str | None = None
+) -> bool:
+    """Quit a Chrome process that browser-tools owns, escalating if it hangs.
+
+    Sends SIGTERM, waits, then SIGKILLs a process that has not exited, and
+    finally clears the profile's stale singleton lock so the next launch on that
+    ``user-data-dir`` is not refused. Callers are responsible for establishing
+    ownership first — this function does not re-check it.
+
+    When ``started_at`` is given, the target's identity is re-verified
+    immediately before each signal. A PID alone is not an identity: the process
+    can exit and the kernel can hand that PID to something unrelated, and the
+    five-second wait before SIGKILL is more than long enough for that to happen.
+
+    Args:
+        pid: Chrome process ID to quit.
+        user_data_dir: The instance's profile directory, used for lock cleanup.
+        started_at: Recorded ``ps`` start time pinning the process identity.
+            None skips the check, for callers with no recorded token.
+
+    Returns:
+        True when the process is gone afterwards, False when it was already gone
+        before signalling, is no longer the process we recorded, or survived.
+    """
+
+    def is_still_target() -> bool:
+        if not is_process_alive(pid):
+            return False
+        return started_at is None or read_process_start_time(pid) == started_at
+
+    if not is_still_target():
+        return False
+    terminate_process(pid)  # SIGTERM
+    if not _wait_for_process_exit(pid, CHROME_QUIT_TIMEOUT_SECONDS) and is_still_target():
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.kill(pid, signal.SIGKILL)
+        _wait_for_process_exit(pid, CHROME_QUIT_TIMEOUT_SECONDS)
+    # A signal can fail silently (EPERM), so confirm rather than assume.
+    if is_still_target():
+        return False
+    if user_data_dir:
+        clean_stale_singleton_lock(Path(user_data_dir))
+    return True
+
+
+def clear_session_files(session_key: str, *, keep_lock: bool = False) -> None:
+    """Delete the runtime files belonging to a browser session.
+
+    Args:
+        session_key: Session key whose state, socket, and pid files should be
+            removed.
+        keep_lock: Leave the ``.lock`` file in place. Unlinking it while another
+            process holds it breaks mutual exclusion — the next process creates
+            a fresh inode and both then believe they hold the lock — so only
+            callers discarding the profile entirely should remove it.
+
+    Returns:
+        None.
+    """
+    suffixes = (
+        (".json", ".sock", ".daemon.pid")
+        if keep_lock
+        else (".json", ".sock", ".daemon.pid", ".lock")
+    )
+    for suffix in suffixes:
+        (CACHE_DIR / f"{session_key}{suffix}").unlink(missing_ok=True)
+
+
+def _iter_session_state_paths() -> list[Path]:
+    """List the browser-session state files under the cache directory.
+
+    Returns:
+        Sorted ``<session_key>.json`` paths, excluding the differently shaped
+        ``browser_session_*`` overrides and ``active_attach_*`` records.
+    """
+    if not CACHE_DIR.exists():
+        return []
+    return sorted(
+        path
+        for path in CACHE_DIR.glob("*.json")
+        if not path.name.startswith(("browser_session_", "active_attach_"))
+    )
+
+
+def _daemon_still_running(state: BrowserState, session_key: str) -> bool:
+    """Check whether the daemon recorded in ``state`` is genuinely still alive.
+
+    A bare "is that PID alive" test is not enough: the daemon's PID can be
+    recycled by an unrelated long-lived process, which would make its Chrome
+    look permanently managed and exempt it from reaping forever. The PID file is
+    what the daemon itself writes, so agreement between the two is the identity
+    check.
+
+    Args:
+        state: Session state naming a daemon PID.
+        session_key: Session key identifying that daemon's PID file.
+
+    Returns:
+        True when a live process matches the PID that daemon recorded on disk.
+    """
+    if state.daemon_pid is None or not is_process_alive(state.daemon_pid):
+        return False
+    try:
+        recorded = int((CACHE_DIR / f"{session_key}.daemon.pid").read_text().strip())
+    except (OSError, ValueError):
+        return False
+    return recorded == state.daemon_pid
+
+
+def _looks_orphaned(state: BrowserState | None, session_key: str, now: float) -> bool:
+    """Apply the cheap, file-only half of the orphan test.
+
+    Deliberately excludes the probes that cost a process lookup, so the sweep
+    can rule most sessions out before it touches a lock file. A True result is
+    provisional: the caller must re-run the full test under the session lock.
+
+    Args:
+        state: Parsed session state, or None when the file was unreadable.
+        session_key: Session key owning that state.
+        now: Current wall-clock time.
+
+    Returns:
+        True when this session is worth locking and examining properly.
+    """
+    if state is None or state.pid is None:
+        return False
+    # Only a Chrome this tool launched may be force-quit. The directory check is
+    # kept as a second, independent barrier against a mode='real' or external
+    # browser reaching this point with a stale owned flag.
+    if not state.chrome_owned or not is_owned_profile_dir(state.user_data_dir):
+        return False
+    # A live daemon still owns this Chrome and will quit it on its idle timeout.
+    if _daemon_still_running(state, session_key):
+        return False
+    return now - state.last_used_at >= ORPHAN_REAP_IDLE_SECONDS
+
+
+def _quit_session_if_orphaned(
+    state_path: Path, session_key: str, now: float
+) -> dict[str, Any] | None:
+    """Apply the orphan test to one session and quit its Chrome when it passes.
+
+    Must be called while holding the session's spawn lock, because it reads the
+    state file and signals the PID it names.
+
+    Args:
+        state_path: ``<session_key>.json`` file to evaluate.
+        session_key: Session key owning that state file.
+        now: Current wall-clock time, shared across one sweep.
+
+    Returns:
+        A summary dict when a Chrome was quit, else None.
+    """
+    # Re-read under the lock: the pre-filter's copy may be stale by now.
+    state = BrowserState.from_path(state_path)
+    if not _looks_orphaned(state, session_key, now) or state is None or state.pid is None:
+        return None
+    user_data_dir = Path(str(state.user_data_dir))
+    # Guard against a recycled PID that is now an unrelated process.
+    if not is_process_alive(state.pid) or not _pid_holds_user_data_dir(state.pid, user_data_dir):
+        clear_session_files(session_key, keep_lock=True)
+        return None
+    if not quit_owned_chrome(state.pid, user_data_dir, state.chrome_started_at):
+        # The browser survived, most likely because signalling failed. Leave
+        # every runtime file in place: the state is the only record of what is
+        # still running, and the next sweep needs it to try again.
+        return None
+    # Cleanup happens here, under the lock, so no other wrapper can be midway
+    # through spawning a daemon against files we are deleting.
+    clear_session_files(session_key, keep_lock=True)
+    return {
+        "session_key": session_key,
+        "pid": state.pid,
+        "user_data_dir": str(user_data_dir),
+        "endpoint": state.browser_url,
+    }
+
+
+def _reap_one_session(state_path: Path, now: float) -> dict[str, Any] | None:
+    """Quit the Chrome behind a single orphaned session state file.
+
+    Takes the session's spawn lock before reading the state, so a wrapper that
+    is concurrently launching or reusing this session cannot have its Chrome
+    signalled out from under it. A session whose lock is already held is in use
+    by definition and is skipped.
+
+    Args:
+        state_path: ``<session_key>.json`` file to evaluate.
+        now: Current wall-clock time, shared across one sweep.
+
+    Returns:
+        A summary dict when a Chrome was quit, else None.
+    """
+    session_key = state_path.stem
+    lock_path = CACHE_DIR / f"{session_key}.lock"
+    summary: dict[str, Any] | None = None
+    with contextlib.suppress(OSError), open(lock_path, "w") as lock_file:
+        try:
+            fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            # Another wrapper holds this session; it is in use, not orphaned.
+            return None
+        try:
+            summary = _quit_session_if_orphaned(state_path, session_key, now)
+        finally:
+            fcntl.flock(lock_file, fcntl.LOCK_UN)
+    return summary
+
+
+def reap_orphaned_sessions() -> list[dict[str, Any]]:
+    """Quit automation Chromes whose daemon died and left them running.
+
+    The daemon quits the Chrome it owns on its idle timeout and on shutdown, but
+    a daemon that is SIGKILLed, or that dies with the machine, never gets that
+    chance. Its Chrome then survives indefinitely — and because headless Chrome
+    still registers a macOS dock icon with no window, the user cannot quit it
+    from the UI at all. This sweep is the safety net, run on every session
+    creation.
+
+    A session is only reaped when all of these hold, so a browser that is still
+    in use or that the tool does not own is never signalled:
+
+    - the state records ``chrome_owned`` — this tool launched that process, and
+      it is not a ``mode='real'`` or externally attached browser,
+    - its ``user-data-dir`` is a private automation profile under
+      ``CACHE_DIR/profiles``, an independent second barrier,
+    - the daemon recorded for it is gone, confirmed against its PID file so a
+      recycled daemon PID cannot exempt a browser forever,
+    - it has been idle longer than the daemon's own idle timeout,
+    - the recorded PID's command line still resolves to that profile,
+    - and its ``ps`` start time still matches the one recorded at launch,
+      re-checked immediately before each signal.
+
+    Returns:
+        Summaries of the sessions whose Chrome was quit.
+    """
+    now = time.time()
+    reaped: list[dict[str, Any]] = []
+    for state_path in _iter_session_state_paths():
+        # Cheap pre-filter first: this runs on every tool call, and most state
+        # files describe sessions whose Chrome is long gone.
+        if not _looks_orphaned(BrowserState.from_path(state_path), state_path.stem, now):
+            continue
+        summary = _reap_one_session(state_path, now)
+        if summary is not None:
+            reaped.append(summary)
+    return reaped
+
+
 def close_active_session(controller: PersistentChromeController) -> dict[str, Any]:
     """Tear down the running browser session backing ``controller``.
 
@@ -113,7 +370,7 @@ def close_active_session(controller: PersistentChromeController) -> dict[str, An
         controller: The controller whose session should be closed.
 
     Returns:
-        A summary dict with keys ``quit_chrome``, ``detached``,
+        A summary dict with keys ``quit_chrome``, ``quit_failed``, ``detached``,
         ``daemon_stopped``, ``pid``, and ``endpoint``.
     """
     state = BrowserState.from_path(controller.state_path)
@@ -139,17 +396,12 @@ def close_active_session(controller: PersistentChromeController) -> dict[str, An
     pid = state.pid if state else None
     owned = (not attached_external) and is_owned_profile_dir(user_data_dir)
 
-    if owned and pid is not None and is_process_alive(pid):
-        terminate_process(pid)  # SIGTERM
-        deadline = time.time() + 5.0
-        while time.time() < deadline and is_process_alive(pid):
-            time.sleep(0.1)
-        if is_process_alive(pid):
-            with contextlib.suppress(ProcessLookupError, PermissionError):
-                os.kill(pid, signal.SIGKILL)
-        if user_data_dir:
-            clean_stale_singleton_lock(Path(user_data_dir))
-        summary["quit_chrome"] = True
+    if owned and pid is not None:
+        # Report what happened, not what was attempted: signalling can fail
+        # (EPERM), and "quit" would then be a lie the caller acts on.
+        started_at = state.chrome_started_at if state else None
+        summary["quit_chrome"] = quit_owned_chrome(pid, user_data_dir, started_at)
+        summary["quit_failed"] = not summary["quit_chrome"] and is_process_alive(pid)
     elif summary["endpoint"] is not None or pid is not None:
         summary["detached"] = True
 
@@ -226,8 +478,7 @@ class PersistentChromeController:
             system_dir = resolve_system_profile_dir(channel)
             if system_dir is None:
                 raise ValueError(
-                    f"E006: mode='real' is not supported for channel '{channel}' "
-                    "on this platform."
+                    f"E006: mode='real' is not supported for channel '{channel}' on this platform."
                 )
             self.session_key = f"real_{channel}"
             self.user_data_dir = system_dir
@@ -500,6 +751,31 @@ class PersistentChromeController:
     def ensure_browser_state(self) -> BrowserState:
         """Return a live browser state, relaunching if necessary.
 
+        Holds this session's spawn lock for the whole decision. The orphan sweep
+        takes the same lock, so without it a sweep could read a stale
+        ``last_used_at``, decide the session is idle, and quit the browser in the
+        window where this call is reviving it.
+
+        Returns:
+            BrowserState for a reachable browser instance.
+
+        Raises:
+            MCPInvocationError: If no browser can be launched or connected.
+        """
+        lock_path = CACHE_DIR / f"{self.session_key}.lock"
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(lock_path, "w") as lock_file:
+            fcntl.flock(lock_file, fcntl.LOCK_EX)
+            try:
+                return self._resolve_browser_state()
+            finally:
+                fcntl.flock(lock_file, fcntl.LOCK_UN)
+
+    def _resolve_browser_state(self) -> BrowserState:
+        """Reuse, attach to, or launch a browser for this session.
+
+        Must be called while holding the session's spawn lock.
+
         Returns:
             BrowserState for a reachable browser instance.
 
@@ -567,12 +843,24 @@ class PersistentChromeController:
         clean_stale_singleton_lock(user_data_dir)
 
         browser_url, pid = self._launch_chrome(executable, user_data_dir)
-        state = self._make_state(browser_url=browser_url, pid=pid, user_data_dir=str(user_data_dir))
+        # We started this Chrome, so we may quit it later. mode='real' drives
+        # the user's everyday browser and is never ours to force-quit.
+        state = self._make_state(
+            browser_url=browser_url,
+            pid=pid,
+            user_data_dir=str(user_data_dir),
+            chrome_owned=not self.system_profile,
+        )
         state.save(self.state_path)
         return state
 
     def _make_state(
-        self, *, browser_url: str, pid: int | None, user_data_dir: str | None
+        self,
+        *,
+        browser_url: str,
+        pid: int | None,
+        user_data_dir: str | None,
+        chrome_owned: bool = False,
     ) -> BrowserState:
         """Build a BrowserState stamped with this controller's launch settings.
 
@@ -581,6 +869,8 @@ class PersistentChromeController:
             pid: PID of the browser process, or None for an external endpoint.
             user_data_dir: Profile directory string, or None for an external
                 endpoint.
+            chrome_owned: True only when this tool launched ``pid`` itself. Only
+                an owned browser may later be force-quit.
 
         Returns:
             A freshly timestamped BrowserState.
@@ -595,6 +885,10 @@ class PersistentChromeController:
             channel=self.channel,
             viewport=self.viewport,
             last_used_at=time.time(),
+            chrome_owned=chrome_owned,
+            chrome_started_at=(
+                read_process_start_time(pid) if chrome_owned and pid is not None else None
+            ),
         )
 
     def _launch_chrome(self, executable: str, user_data_dir: Path) -> tuple[str, int]:
@@ -682,9 +976,22 @@ class PersistentChromeController:
         browser_url = f"http://127.0.0.1:{port}"
         if not is_devtools_available(browser_url):
             return None
-        return self._make_state(
-            browser_url=browser_url, pid=lock_pid, user_data_dir=str(user_data_dir)
+        # Carry ownership forward from the state we are replacing rather than
+        # re-deriving it: this path runs when a previous invocation's state was
+        # invalidated but its Chrome survived, and that Chrome is still ours
+        # only if we launched it. A browser the user started on this directory
+        # by hand stays unowned.
+        previous = BrowserState.from_path(self.state_path)
+        inherited = previous is not None and previous.chrome_owned and previous.pid == lock_pid
+        state = self._make_state(
+            browser_url=browser_url,
+            pid=lock_pid,
+            user_data_dir=str(user_data_dir),
+            chrome_owned=inherited,
         )
+        if inherited and previous is not None:
+            state.chrome_started_at = previous.chrome_started_at
+        return state
 
     def _is_state_usable(self, state: BrowserState) -> bool:
         """Check whether saved browser state still points to a live browser.
@@ -1174,7 +1481,9 @@ def get_browser_session_status() -> dict[str, Any]:
     """Return project browser session diagnostics.
 
     Returns:
-        Browser session status for override, project preference, and active attach.
+        Browser session status for override, project preference, and active
+        attach, plus every browser-tools Chrome currently live on this machine
+        so an unexpected extra instance is visible rather than inferred.
     """
     override = load_session_override()
     project_path = find_project_browser_config_path()
@@ -1198,6 +1507,17 @@ def get_browser_session_status() -> dict[str, Any]:
         "active_attach": asdict(active) if active else None,
         "active_attach_live": active_live,
         "default": {"mode": "headless", "headless": True, "isolated": True, "channel": "canary"},
+        "live_browsers": [
+            {
+                "profile": info["profile"],
+                "named": info["named"],
+                "pid": info["pid"],
+                "endpoint": info["endpoint"],
+                "tab_count": info["tab_count"],
+                "current_url": info["current_url"],
+            }
+            for info in find_live_profiles()
+        ],
     }
 
 
@@ -1353,11 +1673,15 @@ def describe_profile_runtime(profile_name: str) -> dict[str, Any]:
     """Describe the live state of a named profile's Chrome process.
 
     Args:
-        profile_name: Named profile under ``CACHE_DIR / 'profiles'``.
+        profile_name: Profile directory name under ``CACHE_DIR / 'profiles'``.
+            Accepts both human-named profiles and the hashed session keys used
+            by default per-project sessions.
 
     Returns:
         Status dict with keys:
             - ``profile``: profile name.
+            - ``named``: whether this is a human-named profile rather than a
+              hashed per-project session key.
             - ``user_data_dir``: profile directory path string.
             - ``exists``: whether the profile directory exists.
             - ``pid``: PID of the Chrome holding the profile, or None.
@@ -1373,6 +1697,7 @@ def describe_profile_runtime(profile_name: str) -> dict[str, Any]:
     profile_dir = CACHE_DIR / "profiles" / profile_name
     info: dict[str, Any] = {
         "profile": profile_name,
+        "named": _is_named_profile(profile_name),
         "user_data_dir": str(profile_dir),
         "exists": profile_dir.exists(),
         "pid": None,
@@ -1512,15 +1837,36 @@ def list_profiles() -> list[str]:
     )
 
 
+def list_profile_dirs() -> list[str]:
+    """List every profile directory, named or hashed session key.
+
+    ``list_profiles`` deliberately hides hashed session keys because they are
+    not addressable by name. This function does not, because a hashed session's
+    Chrome is just as real a browser instance as a named profile's and must be
+    visible to liveness checks.
+
+    Returns:
+        Sorted list of directory names under ``CACHE_DIR / 'profiles'``.
+    """
+    profiles_dir = CACHE_DIR / "profiles"
+    if not profiles_dir.exists():
+        return []
+    return sorted(d.name for d in profiles_dir.iterdir() if d.is_dir())
+
+
 def find_live_profiles() -> list[dict[str, Any]]:
-    """Return runtime descriptors for every profile with a reachable debug port.
+    """Return runtime descriptors for every live browser-tools Chrome.
+
+    Covers hashed per-project session profiles as well as named ones — those
+    hashed sessions are the default, so a listing that skipped them reported
+    "one browser is live" while several were.
 
     Returns:
         List of ``describe_profile_runtime`` results filtered to those whose
         Chrome process is alive and whose DevTools endpoint answered.
     """
     live: list[dict[str, Any]] = []
-    for name in list_profiles():
+    for name in list_profile_dirs():
         info = describe_profile_runtime(name)
         if info.get("devtools_alive"):
             live.append(info)
@@ -1564,8 +1910,6 @@ def delete_profile(name: str) -> bool:
     shutil.rmtree(profile_dir, ignore_errors=True)
 
     # Remove associated state files
-    session_key = f"profile_{name}"
-    for suffix in (".json", ".sock", ".daemon.pid", ".lock"):
-        (CACHE_DIR / f"{session_key}{suffix}").unlink(missing_ok=True)
+    clear_session_files(f"profile_{name}")
 
     return True

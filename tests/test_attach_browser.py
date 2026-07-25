@@ -579,12 +579,31 @@ class TestLiveProfileFallback:
 
             self._setup_profiles(monkeypatch, tmp_path, {"google-auth": urlparse(url).port})
 
-            controller, live = choose_live_profile_fallback()
+            live = find_live_profiles()
+            controller = choose_live_profile_fallback(live)
             assert controller is not None
             assert controller.profile == "google-auth"
             assert controller.headless is False
             assert controller.isolated is False
             assert len(live) == 1
+        finally:
+            server.shutdown()
+
+    def test_choose_live_profile_fallback_ignores_unnamed_session(
+        self, monkeypatch, tmp_path: Path
+    ) -> None:
+        """A hashed session key belongs to another project — never auto-attach to it."""
+        url, server = self._start_fake_chrome()
+        try:
+            from urllib.parse import urlparse
+
+            session_key = "a1b2c3d4e5f60718"
+            self._setup_profiles(monkeypatch, tmp_path, {session_key: urlparse(url).port})
+
+            live = find_live_profiles()
+            assert [info["profile"] for info in live] == [session_key]
+            assert live[0]["named"] is False
+            assert choose_live_profile_fallback(live) is None
         finally:
             server.shutdown()
 
@@ -603,8 +622,8 @@ class TestLiveProfileFallback:
                 {"google-auth": urlparse(url_a).port, "dev": urlparse(url_b).port},
             )
 
-            controller, live = choose_live_profile_fallback()
-            assert controller is None
+            live = find_live_profiles()
+            assert choose_live_profile_fallback(live) is None
             names = {info["profile"] for info in live}
             assert names == {"google-auth", "dev"}
         finally:
@@ -618,9 +637,9 @@ class TestLiveProfileFallback:
         monkeypatch.setattr("browser_tools.persistent_browser.CACHE_DIR", tmp_path)
         (tmp_path / "profiles").mkdir()
 
-        controller, live = choose_live_profile_fallback()
-        assert controller is None
+        live = find_live_profiles()
         assert live == []
+        assert choose_live_profile_fallback(live) is None
 
     def test_select_default_controller_prefers_live_profile(
         self, monkeypatch, tmp_path: Path
@@ -664,6 +683,65 @@ class TestLiveProfileFallback:
         finally:
             server_a.shutdown()
             server_b.shutdown()
+
+    def test_select_default_controller_reuses_own_live_session(
+        self, monkeypatch, tmp_path: Path
+    ) -> None:
+        """This project's own live session wins over auto-attaching elsewhere.
+
+        Hopping to another profile would abandon a Chrome this project
+        launched, leaving it to linger as a second dock icon.
+        """
+        url_own, server_own = self._start_fake_chrome()
+        url_named, server_named = self._start_fake_chrome()
+        try:
+            from urllib.parse import urlparse
+
+            from browser_tools.persistent_browser import build_session_key
+
+            own_key = build_session_key(browser_url=None, isolated=True, channel="canary")
+            self._setup_profiles(
+                monkeypatch,
+                tmp_path,
+                {
+                    own_key: urlparse(url_own).port,
+                    "google-auth": urlparse(url_named).port,
+                },
+            )
+
+            controller, conflict = select_default_controller()
+            assert conflict is None
+            assert controller.session_key == own_key
+            assert controller.headless is True
+            assert controller.isolated is True
+        finally:
+            server_own.shutdown()
+            server_named.shutdown()
+
+    def test_select_default_controller_ignores_other_projects_sessions(
+        self, monkeypatch, tmp_path: Path
+    ) -> None:
+        """Another project's hashed session must not block or be attached to."""
+        url_other, server_other = self._start_fake_chrome()
+        url_named, server_named = self._start_fake_chrome()
+        try:
+            from urllib.parse import urlparse
+
+            self._setup_profiles(
+                monkeypatch,
+                tmp_path,
+                {
+                    "fedcba9876543210": urlparse(url_other).port,
+                    "google-auth": urlparse(url_named).port,
+                },
+            )
+
+            controller, conflict = select_default_controller()
+            assert conflict is None
+            assert controller.profile == "google-auth"
+        finally:
+            server_other.shutdown()
+            server_named.shutdown()
 
     def test_select_default_controller_falls_through_to_headless_when_no_live(
         self, monkeypatch, tmp_path: Path
