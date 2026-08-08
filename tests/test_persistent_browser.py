@@ -13,6 +13,8 @@ from browser_tools.persistent_browser import (
     BrowserState,
     PersistentChromeController,
     clean_stale_singleton_lock,
+)
+from browser_tools.process_utils import (
     find_chrome_debug_port,
     read_singleton_lock_pid,
 )
@@ -341,21 +343,21 @@ class TestSingletonLockHelpers:
             },
         )()
 
-        with patch("browser_tools.persistent_browser.subprocess.run", return_value=fake):
+        with patch("browser_tools.process_utils.subprocess.run", return_value=fake):
             assert find_chrome_debug_port(99999) == 51843
 
     def test_find_chrome_debug_port_no_port_arg(self) -> None:
         """A Chrome process without --remote-debugging-port returns None."""
         fake = type("R", (), {"returncode": 0, "stdout": "/Applications/Chrome --foo\n"})()
 
-        with patch("browser_tools.persistent_browser.subprocess.run", return_value=fake):
+        with patch("browser_tools.process_utils.subprocess.run", return_value=fake):
             assert find_chrome_debug_port(99999) is None
 
     def test_find_chrome_debug_port_dead_process(self) -> None:
         """A dead PID (ps returncode != 0) returns None."""
         fake = type("R", (), {"returncode": 1, "stdout": ""})()
 
-        with patch("browser_tools.persistent_browser.subprocess.run", return_value=fake):
+        with patch("browser_tools.process_utils.subprocess.run", return_value=fake):
             assert find_chrome_debug_port(99999) is None
 
 
@@ -375,7 +377,7 @@ class TestReuseExistingChrome:
         (tmp_path / "SingletonLock").symlink_to("host-1")
         controller = PersistentChromeController(headless=True, isolated=True)
 
-        with patch("browser_tools.persistent_browser.is_process_alive", return_value=False):
+        with patch("browser_tools.process_utils.is_process_alive", return_value=False):
             result = controller._try_reuse_existing_chrome(tmp_path)
 
         assert result is None
@@ -386,13 +388,13 @@ class TestReuseExistingChrome:
         controller = PersistentChromeController(headless=True, isolated=True)
 
         with (
-            patch("browser_tools.persistent_browser.is_process_alive", return_value=True),
+            patch("browser_tools.process_utils.is_process_alive", return_value=True),
             patch(
-                "browser_tools.persistent_browser.find_chrome_user_data_dir",
+                "browser_tools.process_utils.find_chrome_user_data_dir",
                 return_value=tmp_path,
             ),
-            patch("browser_tools.persistent_browser.find_chrome_debug_port", return_value=12345),
-            patch("browser_tools.persistent_browser.is_devtools_available", return_value=True),
+            patch("browser_tools.process_utils.find_chrome_debug_port", return_value=12345),
+            patch("browser_tools.process_utils.is_devtools_available", return_value=True),
         ):
             result = controller._try_reuse_existing_chrome(tmp_path)
 
@@ -407,13 +409,13 @@ class TestReuseExistingChrome:
         controller = PersistentChromeController(headless=True, isolated=True)
 
         with (
-            patch("browser_tools.persistent_browser.is_process_alive", return_value=True),
+            patch("browser_tools.process_utils.is_process_alive", return_value=True),
             patch(
-                "browser_tools.persistent_browser.find_chrome_user_data_dir",
+                "browser_tools.process_utils.find_chrome_user_data_dir",
                 return_value=tmp_path,
             ),
-            patch("browser_tools.persistent_browser.find_chrome_debug_port", return_value=12345),
-            patch("browser_tools.persistent_browser.is_devtools_available", return_value=False),
+            patch("browser_tools.process_utils.find_chrome_debug_port", return_value=12345),
+            patch("browser_tools.process_utils.is_devtools_available", return_value=False),
         ):
             result = controller._try_reuse_existing_chrome(tmp_path)
 
@@ -429,13 +431,13 @@ class TestReuseExistingChrome:
         controller = PersistentChromeController(headless=True, isolated=True)
 
         with (
-            patch("browser_tools.persistent_browser.is_process_alive", return_value=True),
+            patch("browser_tools.process_utils.is_process_alive", return_value=True),
             patch(
-                "browser_tools.persistent_browser.find_chrome_user_data_dir",
+                "browser_tools.process_utils.find_chrome_user_data_dir",
                 return_value=tmp_path / "someone-else",
             ),
-            patch("browser_tools.persistent_browser.find_chrome_debug_port", return_value=12345),
-            patch("browser_tools.persistent_browser.is_devtools_available", return_value=True),
+            patch("browser_tools.process_utils.find_chrome_debug_port", return_value=12345),
+            patch("browser_tools.process_utils.is_devtools_available", return_value=True),
         ):
             result = controller._try_reuse_existing_chrome(tmp_path)
 

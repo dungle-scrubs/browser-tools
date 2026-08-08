@@ -35,8 +35,21 @@ and code should use these terms, not ad-hoc synonyms.
 - **PageSelection** - owns the Active Page: restore-before-call,
   update-from-response, param normalize, URL re-resolution. (Candidate B.)
 - **Tool Dispatch** - routing policy over `tool_registry`: inspect-gate,
-  CDP/local/forward routing, screenshot paint-gate, post-navigation
-  detection. Data lives in the registry; policy lives here. (Candidate C.)
+  CDP/local/forward routing, screenshot paint-gate, post-navigation detection
+  trigger. Data lives in the registry; policy lives here. (Candidate C.)
+- **LiveChrome** - owns the resolution of the live Chrome backing a
+  user-data-dir: read the SingletonLock PID, confirm it is alive, confirm it
+  holds the directory (PID-recycle guard), find its debug port, confirm
+  DevTools answers. Returns one structured result consumed by
+  `PersistentChromeController`, `profile_catalog`, and `handle_attach_browser`.
+  The implementation module is `live_chrome`.
+- **Interstitial Detection** - owns the post-navigation challenge-response
+  policy end to end: detection-script loading, two-pass single-shot detect,
+  auto-retry for JS-solvable challenges, dedupe, and formatting. The retry
+  tuning (delay, max retries, retryable types) lives in the module next to the
+  retry loop that reads it. CDPHandler exposes only a thread-safe
+  `run_post_navigation_detection` that marshals onto its event loop; it owns
+  no detection policy. The implementation module is `interstitial`.
 
 ## Mode vocabulary
 

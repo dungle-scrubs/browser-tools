@@ -123,14 +123,12 @@ class TestRealModeController:
         monkeypatch.setattr(
             PersistentChromeController, "_try_reuse_existing_chrome", lambda self, d: None
         )
-        monkeypatch.setattr(
-            "browser_tools.persistent_browser.read_singleton_lock_pid", lambda d: 4242
-        )
-        monkeypatch.setattr("browser_tools.persistent_browser.is_process_alive", lambda pid: True)
+        monkeypatch.setattr("browser_tools.process_utils.read_singleton_lock_pid", lambda d: 4242)
+        monkeypatch.setattr("browser_tools.process_utils.is_process_alive", lambda pid: True)
         # The everyday Chrome genuinely holds the real profile dir.
         monkeypatch.setattr(
-            "browser_tools.persistent_browser.pid_holds_user_data_dir",
-            lambda pid, d: True,
+            "browser_tools.process_utils.find_chrome_user_data_dir",
+            lambda pid: real,
         )
         controller = PersistentChromeController(system_profile=True, isolated=False)
         with pytest.raises(MCPInvocationError, match="remote-debugging-port"):
@@ -493,9 +491,7 @@ class TestChromeOwnershipProvenance:
             "_try_reuse_existing_chrome",
             lambda self, directory: None,
         )
-        monkeypatch.setattr(
-            "browser_tools.persistent_browser.read_singleton_lock_pid", lambda d: None
-        )
+        monkeypatch.setattr("browser_tools.process_utils.read_singleton_lock_pid", lambda d: None)
         monkeypatch.setattr(
             "browser_tools.persistent_browser.clean_stale_singleton_lock", lambda d: None
         )
@@ -535,19 +531,14 @@ class TestChromeOwnershipProvenance:
     def test_reuse_inherits_ownership_from_prior_state(self, monkeypatch, tmp_path: Path) -> None:
         """A relaunch-free reuse of our own Chrome keeps it reapable."""
         monkeypatch.setattr("browser_tools.session_layout.CACHE_DIR", tmp_path)
+        monkeypatch.setattr("browser_tools.process_utils.read_singleton_lock_pid", lambda d: 777)
+        monkeypatch.setattr("browser_tools.process_utils.is_process_alive", lambda pid: True)
         monkeypatch.setattr(
-            "browser_tools.persistent_browser.read_singleton_lock_pid", lambda d: 777
+            "browser_tools.process_utils.find_chrome_user_data_dir",
+            lambda pid: controller.user_data_dir,
         )
-        monkeypatch.setattr("browser_tools.persistent_browser.is_process_alive", lambda pid: True)
-        monkeypatch.setattr(
-            "browser_tools.persistent_browser.pid_holds_user_data_dir", lambda pid, d: True
-        )
-        monkeypatch.setattr(
-            "browser_tools.persistent_browser.find_chrome_debug_port", lambda pid: 9556
-        )
-        monkeypatch.setattr(
-            "browser_tools.persistent_browser.is_devtools_available", lambda url: True
-        )
+        monkeypatch.setattr("browser_tools.process_utils.find_chrome_debug_port", lambda pid: 9556)
+        monkeypatch.setattr("browser_tools.process_utils.is_devtools_available", lambda url: True)
         controller = PersistentChromeController(isolated=False, profile="reused-app")
         BrowserState(
             browser_url="http://127.0.0.1:9556",
@@ -568,19 +559,14 @@ class TestChromeOwnershipProvenance:
     ) -> None:
         """A Chrome we find but never launched must not become force-quittable."""
         monkeypatch.setattr("browser_tools.session_layout.CACHE_DIR", tmp_path)
+        monkeypatch.setattr("browser_tools.process_utils.read_singleton_lock_pid", lambda d: 777)
+        monkeypatch.setattr("browser_tools.process_utils.is_process_alive", lambda pid: True)
         monkeypatch.setattr(
-            "browser_tools.persistent_browser.read_singleton_lock_pid", lambda d: 777
+            "browser_tools.process_utils.find_chrome_user_data_dir",
+            lambda pid: controller.user_data_dir,
         )
-        monkeypatch.setattr("browser_tools.persistent_browser.is_process_alive", lambda pid: True)
-        monkeypatch.setattr(
-            "browser_tools.persistent_browser.pid_holds_user_data_dir", lambda pid, d: True
-        )
-        monkeypatch.setattr(
-            "browser_tools.persistent_browser.find_chrome_debug_port", lambda pid: 9556
-        )
-        monkeypatch.setattr(
-            "browser_tools.persistent_browser.is_devtools_available", lambda url: True
-        )
+        monkeypatch.setattr("browser_tools.process_utils.find_chrome_debug_port", lambda pid: 9556)
+        monkeypatch.setattr("browser_tools.process_utils.is_devtools_available", lambda url: True)
         controller = PersistentChromeController(isolated=False, profile="foreign-app")
         # No prior state at all: we have no evidence this Chrome is ours.
 

@@ -7,17 +7,6 @@ from __future__ import annotations
 
 REQUEST_TIMEOUT_SECONDS = 120
 
-# Interstitial auto-retry settings
-INTERSTITIAL_RETRY_DELAY_SECONDS = 3.0
-INTERSTITIAL_MAX_RETRIES = 3
-# Challenge types eligible for auto-retry (JS-solvable, no human interaction)
-INTERSTITIAL_AUTO_RETRY_TYPES = frozenset(
-    {
-        "cloudflare_challenge",
-        "access_denied",
-    }
-)
-
 # Screenshot readiness + blank-frame retry settings.
 #
 # The chrome-devtools-mcp subprocess takes screenshots immediately when asked,
@@ -63,14 +52,11 @@ SCREENSHOT_BLANK_MAX_RETRIES = _blank_max_retries
 SCREENSHOT_BLANK_BYTES_PER_PIXEL_THRESHOLD = _blank_bpp
 SCREENSHOT_BLANK_LUMINANCE_STDDEV_THRESHOLD = _blank_stddev
 
-# Tool routing and behavior sets (CDP_TOOLS, LOCAL_TOOLS, INSPECT_BLOCKED_TOOLS,
+# Tool routing and behavior sets (CDP_TOOLS, INSPECT_BLOCKED_TOOLS,
 # NAVIGATION_TOOLS, INSPECT_WARN_TOOLS, INTERACTION_TOOLS) now live in
 # tool_registry.py as the single source of truth. Import them from there.
 
 __all__ = [
-    "INTERSTITIAL_AUTO_RETRY_TYPES",
-    "INTERSTITIAL_MAX_RETRIES",
-    "INTERSTITIAL_RETRY_DELAY_SECONDS",
     "REQUEST_TIMEOUT_SECONDS",
     "SCREENSHOT_BLANK_BYTES_PER_PIXEL_THRESHOLD",
     "SCREENSHOT_BLANK_LUMINANCE_STDDEV_THRESHOLD",

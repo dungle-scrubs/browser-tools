@@ -362,15 +362,11 @@ class TestAttachByProfile:
         profile_dir.mkdir(parents=True)
         port = urlparse(fake_chrome).port
 
+        monkeypatch.setattr("browser_tools.process_utils.read_singleton_lock_pid", lambda d: 9999)
+        monkeypatch.setattr("browser_tools.process_utils.is_process_alive", lambda pid: True)
+        monkeypatch.setattr("browser_tools.process_utils.find_chrome_debug_port", lambda pid: port)
         monkeypatch.setattr(
-            "browser_tools.persistent_browser.read_singleton_lock_pid", lambda d: 9999
-        )
-        monkeypatch.setattr("browser_tools.persistent_browser.is_process_alive", lambda pid: True)
-        monkeypatch.setattr(
-            "browser_tools.persistent_browser.find_chrome_debug_port", lambda pid: port
-        )
-        monkeypatch.setattr(
-            "browser_tools.persistent_browser.find_chrome_user_data_dir",
+            "browser_tools.process_utils.find_chrome_user_data_dir",
             lambda pid: profile_dir.resolve(),
         )
         return profile_dir
@@ -408,9 +404,7 @@ class TestAttachByProfile:
         """Profile dir present but no Chrome should hint at use_browser_session."""
         monkeypatch.setattr("browser_tools.session_layout.CACHE_DIR", tmp_path)
         (tmp_path / "profiles" / "dev").mkdir(parents=True)
-        monkeypatch.setattr(
-            "browser_tools.persistent_browser.read_singleton_lock_pid", lambda d: None
-        )
+        monkeypatch.setattr("browser_tools.process_utils.read_singleton_lock_pid", lambda d: None)
 
         response = handle_attach_browser([None], {"profile": "dev"})
 
@@ -425,19 +419,13 @@ class TestAttachByProfile:
         """Live process + unreachable DevTools should return E001 with recovery steps."""
         monkeypatch.setattr("browser_tools.session_layout.CACHE_DIR", tmp_path)
         (tmp_path / "profiles" / "dev").mkdir(parents=True)
-        monkeypatch.setattr(
-            "browser_tools.persistent_browser.read_singleton_lock_pid", lambda d: 4242
-        )
-        monkeypatch.setattr("browser_tools.persistent_browser.is_process_alive", lambda pid: True)
-        monkeypatch.setattr(
-            "browser_tools.persistent_browser.find_chrome_debug_port", lambda pid: 9222
-        )
+        monkeypatch.setattr("browser_tools.process_utils.read_singleton_lock_pid", lambda d: 4242)
+        monkeypatch.setattr("browser_tools.process_utils.is_process_alive", lambda pid: True)
+        monkeypatch.setattr("browser_tools.process_utils.find_chrome_debug_port", lambda pid: 9222)
         # is_devtools_available returns False — port is dead.
+        monkeypatch.setattr("browser_tools.process_utils.is_devtools_available", lambda url: False)
         monkeypatch.setattr(
-            "browser_tools.persistent_browser.is_devtools_available", lambda url: False
-        )
-        monkeypatch.setattr(
-            "browser_tools.persistent_browser.find_listeners_on_port", lambda p: [11111, 22222]
+            "browser_tools.process_utils.find_listeners_on_port", lambda p: [11111, 22222]
         )
 
         response = handle_attach_browser([None], {"profile": "dev"})
@@ -460,11 +448,9 @@ class TestAttachByProfile:
         (tmp_path / "profiles" / "dev").mkdir(parents=True)
         port = urlparse(fake_chrome).port
         # Listener on the endpoint port returns a PID running a *different* dir.
+        monkeypatch.setattr("browser_tools.process_utils.find_listeners_on_port", lambda p: [7777])
         monkeypatch.setattr(
-            "browser_tools.persistent_browser.find_listeners_on_port", lambda p: [7777]
-        )
-        monkeypatch.setattr(
-            "browser_tools.persistent_browser.find_chrome_user_data_dir",
+            "browser_tools.process_utils.find_chrome_user_data_dir",
             lambda pid: (tmp_path / "profiles" / "other-profile").resolve(),
         )
 
@@ -495,11 +481,9 @@ class TestListProfilesStatus:
         def fake_lock(profile_dir):
             return 6414 if profile_dir.name == "live-app" else None
 
-        monkeypatch.setattr("browser_tools.profile_catalog.read_singleton_lock_pid", fake_lock)
-        monkeypatch.setattr("browser_tools.profile_catalog.is_process_alive", lambda pid: True)
-        monkeypatch.setattr(
-            "browser_tools.profile_catalog.find_chrome_debug_port", lambda pid: port
-        )
+        monkeypatch.setattr("browser_tools.process_utils.read_singleton_lock_pid", fake_lock)
+        monkeypatch.setattr("browser_tools.process_utils.is_process_alive", lambda pid: True)
+        monkeypatch.setattr("browser_tools.process_utils.find_chrome_debug_port", lambda pid: port)
 
         response = handle_list_profiles({})
         payload = json.loads(response["result"]["content"][0]["text"])
@@ -552,10 +536,10 @@ class TestLiveProfileFallback:
         def fake_lock(profile_dir):
             return name_to_pid.get(profile_dir.name) if profiles.get(profile_dir.name) else None
 
-        monkeypatch.setattr("browser_tools.profile_catalog.read_singleton_lock_pid", fake_lock)
-        monkeypatch.setattr("browser_tools.profile_catalog.is_process_alive", lambda pid: True)
+        monkeypatch.setattr("browser_tools.process_utils.read_singleton_lock_pid", fake_lock)
+        monkeypatch.setattr("browser_tools.process_utils.is_process_alive", lambda pid: True)
         monkeypatch.setattr(
-            "browser_tools.profile_catalog.find_chrome_debug_port",
+            "browser_tools.process_utils.find_chrome_debug_port",
             lambda pid: pid_to_port.get(pid),
         )
 

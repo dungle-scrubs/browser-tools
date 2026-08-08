@@ -9,10 +9,9 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import contextlib
-import json
 import logging
 import threading
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -20,26 +19,32 @@ logger = logging.getLogger(__name__)
 
 try:
     from .cdp_constants import (
-        INTERSTITIAL_AUTO_RETRY_TYPES,
-        INTERSTITIAL_MAX_RETRIES,
-        INTERSTITIAL_RETRY_DELAY_SECONDS,
         REQUEST_TIMEOUT_SECONDS,
         SCREENSHOT_PAINT_READY_TIMEOUT_MS,
     )
+    from .interstitial import (
+        DETECT_TOTAL_TIMEOUT_SECONDS,
+        detect_interstitials_async,
+        detect_with_retry,
+    )
     from .mcp_response import make_error, make_text
+    from .screencast import ScreencastRecorder
     from .tool_registry import CDP_TOOLS
 except ImportError:
     from cdp_constants import (  # type: ignore[import-untyped,no-redef]
-        INTERSTITIAL_AUTO_RETRY_TYPES,
-        INTERSTITIAL_MAX_RETRIES,
-        INTERSTITIAL_RETRY_DELAY_SECONDS,
         REQUEST_TIMEOUT_SECONDS,
         SCREENSHOT_PAINT_READY_TIMEOUT_MS,
+    )
+    from interstitial import (  # type: ignore[import-untyped,no-redef]
+        DETECT_TOTAL_TIMEOUT_SECONDS,
+        detect_interstitials_async,
+        detect_with_retry,
     )
     from mcp_response import (  # type: ignore[import-untyped,no-redef]
         make_error,
         make_text,
     )
+    from screencast import ScreencastRecorder  # type: ignore[import-untyped,no-redef]
     from tool_registry import CDP_TOOLS  # type: ignore[import-untyped,no-redef]
 
 
@@ -145,6 +150,92 @@ async def _cdp_call(
         raise CdpToolError(label) from None
 
 
+@dataclass
+class ElementEvalResult:
+    """Result of evaluating a JS expression against a CSS-selected element.
+
+    ``found`` is True only when the selector matched an element; ``value``
+    holds the expression's return value, which may be None when the expression
+    itself yields null (for example an absent attribute on a present element).
+    Element-not-found is reported as ``found=False`` so callers never overload
+    a null value to mean "missing element" - the bug that previously forced
+    each handler to invent its own sentinel string.
+    """
+
+    found: bool
+    value: Any
+
+
+# The querySelector + not-found wrapper shared by every element-reading tool.
+# Uses a namespaced ``__found__`` key so a returned object that happens to have
+# a ``found`` field cannot be misread as the protocol envelope.
+_ELEM_NOT_FOUND_JS = "return {__found__: false};"
+
+# element_visible: evaluated against the matched element (``el``) via
+# eval_on_element. A selector that matches nothing never reaches this - it is
+# reported as found=False upstream - so the expression assumes a real element.
+_VISIBILITY_EXPR = """(function (el) {
+    const style = window.getComputedStyle(el);
+    if (style.display === 'none') return false;
+    if (style.visibility === 'hidden') return false;
+    if (parseFloat(style.opacity) === 0) return false;
+    const rect = el.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+})(el)"""
+
+
+def _element_eval_js(selector: str, expression: str) -> str:
+    """Build the IIFE that resolves ``selector`` and evaluates ``expression``.
+
+    ``expression`` runs with ``el`` bound to the matched element and may return
+    any JSON-serializable value, including null.
+    """
+    return f"""
+    (() => {{
+        const el = document.querySelector({selector!r});
+        if (!el) {{ {_ELEM_NOT_FOUND_JS} }}
+        return {{__found__: true, value: ({expression})}};
+    }})()
+    """
+
+
+async def eval_on_element(
+    cdp: Any, selector: str, expression: str, *, label: str
+) -> ElementEvalResult:
+    """Evaluate ``expression`` against the element matching ``selector``.
+
+    Single owner of the querySelector wrapper, the Runtime.evaluate call, and
+    the not-found contract. Before this, six handlers reimplemented the same
+    idea in three incompatible styles: a None return, sentinel strings
+    (``__ELEMENT_NOT_FOUND__`` / ``__ATTR_NULL__``), and inline JS returning
+    ``false`` / ``0``. One interface here replaces all three.
+
+    Args:
+        cdp: Connected CDPClient.
+        selector: CSS selector string.
+        expression: JS expression evaluated with ``el`` bound to the matched
+            element. May return any JSON-serializable value, including null.
+        label: Error-mapping label forwarded to :func:`_cdp_call`.
+
+    Returns:
+        ``ElementEvalResult`` with ``found=False`` when the selector matched
+        nothing, otherwise ``found=True`` and the expression's value.
+
+    Raises:
+        CdpToolError: on CDP protocol failure (mapped by ``_cdp_call``).
+    """
+    result = await _cdp_call(
+        cdp,
+        "Runtime.evaluate",
+        {"expression": _element_eval_js(selector, expression), "returnByValue": True},
+        label=label,
+    )
+    val = result.get("result", {}).get("value")
+    if isinstance(val, dict) and val.get("__found__") is True:
+        return ElementEvalResult(found=True, value=val.get("value"))
+    return ElementEvalResult(found=False, value=None)
+
+
 # Tool name -> handler method name. This is the single binding of CDP tool name
 # to handler; it is parity-checked against tool_registry.CDP_TOOLS so the
 # registry remains the single source of which tools are CDP-routed. Adding a
@@ -205,11 +296,10 @@ class CDPHandler:
         self._stop_event: asyncio.Event | None = None
         self._cdp_client: Any = None
         self._frame_manager: Any = None
-        # Screencast capture state (Page.startScreencast → Page.screencastFrame).
-        self._screencast_active: bool = False
-        self._screencast_frames: list[dict[str, Any]] = []
-        self._screencast_max_frames: int = 600
-        self._screencast_format: str = "jpeg"
+        # Screencast capture state machine (Page.startScreencast buffer, ack,
+        # write-to-dir). Owned by ScreencastRecorder so the handlers below stay
+        # two-line delegators.
+        self._screencast = ScreencastRecorder()
         # Tool name -> bound handler. Built from the class-level _CDP_HANDLERS
         # table, which is parity-checked against tool_registry.CDP_TOOLS below.
         self._handlers: dict[str, Any] = {
@@ -690,7 +780,6 @@ class CDPHandler:
         Returns:
             JSON-RPC style response dict with output file path.
         """
-        import base64
         import time
 
         cdp, err = self._cdp_or_error()
@@ -738,7 +827,6 @@ class CDPHandler:
         Returns:
             JSON-RPC style response dict with base64 image and optional file path.
         """
-        import base64
 
         cdp, err = self._cdp_or_error()
         if err is not None:
@@ -813,139 +901,19 @@ class CDPHandler:
     # Screencast capture (catches transient states like loading spinners) #
     # ------------------------------------------------------------------ #
 
-    def _on_screencast_frame(self, params: dict[str, Any]) -> None:
-        """Buffer a screencast frame and ack it so the stream continues.
-
-        Called from the CDP read loop, so this stays synchronous: the ack is
-        scheduled with ``ensure_future`` rather than awaited here, because the
-        read loop is what resolves the ack's response -- awaiting it inline would
-        deadlock. Once the buffer is full we stop acking, which pauses the stream
-        (CDP flow control) instead of growing memory without bound.
-        """
-        if not self._screencast_active:
-            return
-        if len(self._screencast_frames) >= self._screencast_max_frames:
-            return
-        self._screencast_frames.append(
-            {
-                "data": params.get("data", ""),
-                "timestamp": params.get("metadata", {}).get("timestamp"),
-            }
-        )
-        session_id = params.get("sessionId")
-        cdp = self._cdp_client
-        if session_id is not None and cdp is not None:
-            _ = asyncio.ensure_future(  # noqa: RUF006
-                _safe_cdp_send(cdp, "Page.screencastFrameAck", {"sessionId": session_id})
-            )
-
     async def _handle_screencast_start(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        """Start buffering every painted frame via Page.startScreencast.
-
-        Drive the UI with the normal click/fill/navigate tools between
-        screencast_start and screencast_stop; transient states (loading spinners,
-        skeletons, flashes) that a discrete take_screenshot would miss are captured.
-
-        Args:
-            arguments: Optional 'format' (jpeg|png), 'quality' (0-100),
-                'every_nth_frame', 'max_frames', 'max_width', 'max_height'.
-
-        Returns:
-            JSON-RPC style response dict.
-        """
+        """Begin screencast capture; delegates to :class:`ScreencastRecorder`."""
         cdp, err = self._cdp_or_error()
         if err is not None:
             return err
-        if self._screencast_active:
-            return make_error("screencast already recording; call screencast_stop first")
-
-        fmt = str(arguments.get("format", "jpeg")).lower()
-        if fmt not in ("jpeg", "png"):
-            return make_error("format must be 'jpeg' or 'png'")
-
-        self._screencast_frames = []
-        self._screencast_format = fmt
-        self._screencast_max_frames = max(1, int(arguments.get("max_frames", 600)))
-        self._screencast_active = True
-        cdp.on("Page.screencastFrame", self._on_screencast_frame)
-
-        params: dict[str, Any] = {
-            "format": fmt,
-            "everyNthFrame": max(1, int(arguments.get("every_nth_frame", 1))),
-        }
-        if fmt == "jpeg":
-            params["quality"] = int(arguments.get("quality", 80))
-        if arguments.get("max_width"):
-            params["maxWidth"] = int(arguments["max_width"])
-        if arguments.get("max_height"):
-            params["maxHeight"] = int(arguments["max_height"])
-
-        try:
-            await _safe_cdp_send(cdp, "Page.startScreencast", params)
-        except ToolInvocationError as exc:
-            self._screencast_active = False
-            cdp.off("Page.screencastFrame", self._on_screencast_frame)
-            return make_error(f"Page.startScreencast failed: {exc.cause}")
-        except Exception:
-            self._screencast_active = False
-            cdp.off("Page.screencastFrame", self._on_screencast_frame)
-            logger.exception("Unexpected error in Page.startScreencast")
-            return make_error("Page.startScreencast failed")
-        return make_text(
-            "Screencast recording. Drive the UI with click/fill/navigate, "
-            "then call screencast_stop to write the frames."
-        )
+        return await self._screencast.start(cdp, arguments)
 
     async def _handle_screencast_stop(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        """Stop the screencast and write buffered frames to a directory.
-
-        Args:
-            arguments: 'dir' (required) -- directory to write timestamped frames
-                plus a frames.json manifest.
-
-        Returns:
-            JSON-RPC style response dict.
-        """
+        """Stop screencast capture and write frames; delegates to the recorder."""
         cdp, err = self._cdp_or_error()
         if err is not None:
             return err
-        if not self._screencast_active:
-            return make_error("no screencast in progress; call screencast_start first")
-
-        self._screencast_active = False
-        with contextlib.suppress(Exception):
-            await _safe_cdp_send(cdp, "Page.stopScreencast")  # best-effort
-        cdp.off("Page.screencastFrame", self._on_screencast_frame)
-
-        frames = self._screencast_frames
-        self._screencast_frames = []
-        truncated = len(frames) >= self._screencast_max_frames
-        ext = "jpg" if self._screencast_format == "jpeg" else "png"
-
-        lines = [f"Captured {len(frames)} frames."]
-        if truncated:
-            lines.append(
-                f"Note: hit max_frames={self._screencast_max_frames}; "
-                "capture may be truncated (raise max_frames or every_nth_frame)."
-            )
-
-        out_dir = str(arguments.get("dir", "")).strip()
-        if not out_dir:
-            return make_error("dir is required to write screencast frames")
-        try:
-            base = Path(out_dir).resolve()
-            base.mkdir(parents=True, exist_ok=True)
-            manifest = []
-            for i, frame in enumerate(frames):
-                fname = f"frame_{i:05d}.{ext}"
-                (base / fname).write_bytes(base64.b64decode(frame["data"]))
-                manifest.append({"file": fname, "timestamp": frame["timestamp"]})
-            (base / "frames.json").write_text(json.dumps(manifest, indent=2))
-            lines.append(f"Wrote {len(frames)} frames + frames.json to {base}")
-        except Exception:
-            logger.exception("could not write screencast frames")
-            return make_error("could not write frames")
-        return make_text("\n".join(lines))
+        return await self._screencast.stop(cdp, arguments)
 
     # ------------------------------------------------------------------ #
     # Semantic wait tools                                                  #
@@ -1106,39 +1074,6 @@ class CDPHandler:
     # Content extraction tools                                             #
     # ------------------------------------------------------------------ #
 
-    async def _query_element_js(
-        self, cdp: Any, selector: str, expression: str, *, label: str
-    ) -> dict[str, Any] | None:
-        """Evaluate a JS expression on a queried element.
-
-        Args:
-            cdp: Connected CDPClient instance.
-            selector: CSS selector string.
-            expression: JS expression using 'el' as the element variable.
-                Must return the desired value or null if element not found.
-            label: Error-mapping label forwarded to :func:`_cdp_call`.
-
-        Returns:
-            The CDP result dict on success, or None if the element was not
-            found. Raises :class:`CdpToolError` on CDP failure.
-        """
-        js = f"""
-        (() => {{
-            const el = document.querySelector({selector!r});
-            if (!el) return null;
-            return {expression};
-        }})()
-        """
-        result = await _cdp_call(
-            cdp,
-            "Runtime.evaluate",
-            {"expression": js, "returnByValue": True},
-            label=label,
-        )
-        val = result.get("result", {}).get("value")
-        # None (Python) means JS returned null (element not found)
-        return result if val is not None else None
-
     async def _handle_get_text(self, arguments: dict[str, Any]) -> dict[str, Any]:
         """Get text content of element by CSS selector.
 
@@ -1156,13 +1091,10 @@ class CDPHandler:
         if not selector:
             return make_error("selector is required")
 
-        result = await self._query_element_js(cdp, selector, "el.textContent", label="get_text")
-
-        if result is None:
+        res = await eval_on_element(cdp, selector, "el.textContent", label="get_text")
+        if not res.found:
             return make_error(f"E006: No element found matching selector '{selector}'")
-
-        text = result.get("result", {}).get("value", "")
-        return make_text(str(text))
+        return make_text("" if res.value is None else str(res.value))
 
     async def _handle_get_html(self, arguments: dict[str, Any]) -> dict[str, Any]:
         """Get outer HTML of element by CSS selector.
@@ -1181,18 +1113,18 @@ class CDPHandler:
         if not selector:
             return make_error("selector is required")
 
-        result = await self._query_element_js(cdp, selector, "el.outerHTML", label="get_html")
-
-        if result is None:
+        res = await eval_on_element(cdp, selector, "el.outerHTML", label="get_html")
+        if not res.found:
             return make_error(f"E006: No element found matching selector '{selector}'")
-
-        html = result.get("result", {}).get("value", "")
-        return make_text(str(html))
+        return make_text("" if res.value is None else str(res.value))
 
     async def _handle_get_attr(self, arguments: dict[str, Any]) -> dict[str, Any]:
         """Get attribute value of element by CSS selector.
 
-        Returns null (not an error) if element exists but attribute is absent.
+        Returns null (not an error) if element exists but attribute is absent:
+        a present element with an absent attribute yields a null value through
+        :func:`eval_on_element`, distinct from the ``found=False`` an unmatched
+        selector produces, so the two cases no longer need sentinel strings.
 
         Args:
             arguments: Tool arguments with 'selector' and 'attribute' keys.
@@ -1211,27 +1143,14 @@ class CDPHandler:
         if not attribute:
             return make_error("attribute is required")
 
-        js = f"""
-        (() => {{
-            const el = document.querySelector({selector!r});
-            if (!el) return '__ELEMENT_NOT_FOUND__';
-            const val = el.getAttribute({attribute!r});
-            return val === null ? '__ATTR_NULL__' : val;
-        }})()
-        """
-        result = await _cdp_call(
-            cdp,
-            "Runtime.evaluate",
-            {"expression": js, "returnByValue": True},
-            label="get_attr",
+        res = await eval_on_element(
+            cdp, selector, f"el.getAttribute({attribute!r})", label="get_attr"
         )
-
-        val = result.get("result", {}).get("value", "__ELEMENT_NOT_FOUND__")
-        if val == "__ELEMENT_NOT_FOUND__":
+        if not res.found:
             return make_error(f"E006: No element found matching selector '{selector}'")
-        if val == "__ATTR_NULL__":
+        if res.value is None:
             return make_text(f"null (element exists but '{attribute}' attribute is not present)")
-        return make_text(str(val))
+        return make_text(str(res.value))
 
     # ------------------------------------------------------------------ #
     # Element query tools                                                  #
@@ -1278,7 +1197,10 @@ class CDPHandler:
         """Check if an element is visible (rendered, non-zero size, not CSS-hidden).
 
         Visibility: element exists AND has non-zero bounding rect AND
-        display != none AND visibility != hidden AND opacity > 0.
+        display != none AND visibility != hidden AND opacity > 0. A selector
+        that matches nothing is reported as not visible rather than an error,
+        so the not-found contract from :func:`eval_on_element` maps cleanly to
+        ``visible=False``.
 
         Args:
             arguments: Tool arguments with 'selector' key.
@@ -1294,26 +1216,8 @@ class CDPHandler:
         if not selector:
             return make_error("selector is required")
 
-        js = f"""
-        (() => {{
-            const el = document.querySelector({selector!r});
-            if (!el) return false;
-            const style = window.getComputedStyle(el);
-            if (style.display === 'none') return false;
-            if (style.visibility === 'hidden') return false;
-            if (parseFloat(style.opacity) === 0) return false;
-            const rect = el.getBoundingClientRect();
-            return rect.width > 0 && rect.height > 0;
-        }})()
-        """
-        result = await _cdp_call(
-            cdp,
-            "Runtime.evaluate",
-            {"expression": js, "returnByValue": True},
-            label="element_visible",
-        )
-
-        visible = result.get("result", {}).get("value", False)
+        res = await eval_on_element(cdp, selector, _VISIBILITY_EXPR, label="element_visible")
+        visible = res.found and bool(res.value)
         return make_text(f'{{"visible": {str(visible).lower()}}}')
 
     async def _refresh_frame_tree(self) -> None:
@@ -1383,82 +1287,31 @@ class CDPHandler:
             return False
 
     def run_post_navigation_detection(self) -> dict[str, Any] | None:
-        """Run interstitial detection with auto-retry for JS-solvable challenges.
+        """Run post-navigation interstitial detection (thread-safe).
 
-        For challenges that can auto-solve (e.g., Cloudflare JS challenge),
-        waits and re-checks up to INTERSTITIAL_MAX_RETRIES times before
-        reporting the interstitial. Human-interaction challenges (CAPTCHA,
-        auth walls) are reported immediately.
+        Delegates the detect-and-retry policy to :mod:`interstitial`; this
+        method only marshals that coroutine onto the CDP event loop and enforces
+        the outer timeout. The retry tuning and the single-shot detection both
+        live in the interstitial module, so the whole challenge-response policy
+        has one home rather than being smeared across CDPHandler, interstitial,
+        and cdp_constants.
 
         Returns:
-            Dict with 'detections' list and 'auto_retried' bool,
-            or None if CDP unavailable.
+            Dict with 'detections', 'auto_retried', 'retries_used', or None if
+            CDP is unavailable.
         """
         if not self._loop or not self._cdp_client or not self._cdp_client.connected:
             return None
 
-        future = asyncio.run_coroutine_threadsafe(self._detect_with_retry(), self._loop)
+        async def _detect_once() -> list[dict[str, Any]]:
+            return await detect_interstitials_async(self._cdp_client)
+
+        async def _run() -> dict[str, Any]:
+            return await detect_with_retry(_detect_once)
+
+        future = asyncio.run_coroutine_threadsafe(_run(), self._loop)
         try:
-            # Total timeout: initial detect + (retries * delay) + buffer
-            timeout = 10 + (INTERSTITIAL_MAX_RETRIES * (INTERSTITIAL_RETRY_DELAY_SECONDS + 2))
-            return future.result(timeout=timeout)
+            return future.result(timeout=DETECT_TOTAL_TIMEOUT_SECONDS)
         except Exception:
             logger.debug("run_post_navigation_detection failed", exc_info=True)
             return None
-
-    async def _detect_with_retry(self) -> dict[str, Any]:
-        """Detect interstitials and auto-retry JS-solvable challenges.
-
-        Returns:
-            Dict with 'detections' (list) and 'auto_retried' (bool)
-            and 'retries_used' (int).
-        """
-
-        detections = await self._detect_interstitials()
-        if not detections:
-            return {"detections": [], "auto_retried": False, "retries_used": 0}
-
-        # Split into auto-retryable vs. immediate-report
-        retryable = [d for d in detections if d.get("type") in INTERSTITIAL_AUTO_RETRY_TYPES]
-        non_retryable = [
-            d for d in detections if d.get("type") not in INTERSTITIAL_AUTO_RETRY_TYPES
-        ]
-
-        # If nothing is retryable, report immediately
-        if not retryable:
-            return {"detections": detections, "auto_retried": False, "retries_used": 0}
-
-        # Auto-retry: wait for JS challenge to self-solve
-        for attempt in range(INTERSTITIAL_MAX_RETRIES):
-            await asyncio.sleep(INTERSTITIAL_RETRY_DELAY_SECONDS)
-            detections = await self._detect_interstitials()
-
-            if not detections:
-                # Challenge cleared
-                return {"detections": [], "auto_retried": True, "retries_used": attempt + 1}
-
-            retryable = [d for d in detections if d.get("type") in INTERSTITIAL_AUTO_RETRY_TYPES]
-            if not retryable:
-                # Only non-retryable left (or all cleared)
-                return {
-                    "detections": detections,
-                    "auto_retried": True,
-                    "retries_used": attempt + 1,
-                }
-
-        # Exhausted retries -- report whatever remains plus any non-retryable
-        return {
-            "detections": detections + non_retryable,
-            "auto_retried": True,
-            "retries_used": INTERSTITIAL_MAX_RETRIES,
-        }
-
-    async def _detect_interstitials(self) -> list[dict[str, Any]]:
-        """Run interstitial detection via CDP."""
-        try:
-            from .interstitial import detect_interstitials_async
-
-            return await detect_interstitials_async(self._cdp_client)
-        except Exception:
-            logger.debug("Interstitial detection failed", exc_info=True)
-            return []

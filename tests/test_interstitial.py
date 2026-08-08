@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from browser_tools.interstitial import (
     _deduplicate,
+    detect_with_retry,
     format_interstitials,
     get_detection_script,
     parse_detection_result,
@@ -277,7 +277,7 @@ class TestAutoRetryConstants:
 
     def test_retry_types_are_js_solvable(self) -> None:
         """Only JS-solvable challenge types should be in auto-retry set."""
-        from browser_tools.mcp_daemon import INTERSTITIAL_AUTO_RETRY_TYPES
+        from browser_tools.interstitial import INTERSTITIAL_AUTO_RETRY_TYPES
 
         assert "cloudflare_challenge" in INTERSTITIAL_AUTO_RETRY_TYPES
         assert "access_denied" in INTERSTITIAL_AUTO_RETRY_TYPES
@@ -288,19 +288,19 @@ class TestAutoRetryConstants:
 
     def test_retry_delay_is_reasonable(self) -> None:
         """Retry delay should be between 1-10 seconds."""
-        from browser_tools.mcp_daemon import INTERSTITIAL_RETRY_DELAY_SECONDS
+        from browser_tools.interstitial import INTERSTITIAL_RETRY_DELAY_SECONDS
 
         assert 1.0 <= INTERSTITIAL_RETRY_DELAY_SECONDS <= 10.0
 
     def test_max_retries_is_bounded(self) -> None:
         """Max retries should be small to keep navigation responsive."""
-        from browser_tools.mcp_daemon import INTERSTITIAL_MAX_RETRIES
+        from browser_tools.interstitial import INTERSTITIAL_MAX_RETRIES
 
         assert 1 <= INTERSTITIAL_MAX_RETRIES <= 5
 
     def test_total_wait_time_under_20s(self) -> None:
         """Total auto-retry wait must not exceed 20s to keep UX responsive."""
-        from browser_tools.mcp_daemon import (
+        from browser_tools.interstitial import (
             INTERSTITIAL_MAX_RETRIES,
             INTERSTITIAL_RETRY_DELAY_SECONDS,
         )
@@ -310,76 +310,66 @@ class TestAutoRetryConstants:
 
 
 class TestDetectWithRetry:
-    """Tests for CDPHandler._detect_with_retry logic."""
+    """Tests for interstitial.detect_with_retry policy.
 
-    @pytest.fixture
-    def handler(self) -> Any:
-        """Create a CDPHandler with mocked internals."""
-        from browser_tools.mcp_daemon import CDPHandler
-
-        h = CDPHandler.__new__(CDPHandler)
-        h._browser_url = None
-        h._mode = "full"
-        h._loop = None
-        h._cdp_client = None
-        h._frame_manager = None
-        return h
+    The retry policy now has its own interface (detect_with_retry, taking a
+    single-shot detection callable), so these tests exercise it directly
+    instead of poking private methods off a half-built CDPHandler.
+    """
 
     @pytest.mark.asyncio
-    async def test_no_detections_returns_empty(self, handler: Any) -> None:
+    async def test_no_detections_returns_empty(self) -> None:
         """When no interstitial detected, return empty with no retry."""
-        handler._detect_interstitials = AsyncMock(return_value=[])
+        detect_once = AsyncMock(return_value=[])
 
-        result = await handler._detect_with_retry()
+        result = await detect_with_retry(detect_once)
 
         assert result["detections"] == []
         assert result["auto_retried"] is False
         assert result["retries_used"] == 0
-        handler._detect_interstitials.assert_called_once()
+        detect_once.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_non_retryable_reported_immediately(self, handler: Any) -> None:
+    async def test_non_retryable_reported_immediately(self) -> None:
         """CAPTCHA/auth_wall should be reported without retry."""
         captcha = [{"type": "captcha", "confidence": "medium", "signal": "css"}]
-        handler._detect_interstitials = AsyncMock(return_value=captcha)
+        detect_once = AsyncMock(return_value=captcha)
 
-        result = await handler._detect_with_retry()
+        result = await detect_with_retry(detect_once)
 
         assert result["detections"] == captcha
         assert result["auto_retried"] is False
         # Only the initial detection call, no retries
-        assert handler._detect_interstitials.call_count == 1
+        assert detect_once.call_count == 1
 
     @pytest.mark.asyncio
-    async def test_cloudflare_clears_on_first_retry(self, handler: Any) -> None:
+    async def test_cloudflare_clears_on_first_retry(self) -> None:
         """JS challenge that clears after one retry should report success."""
         cloudflare = [{"type": "cloudflare_challenge", "confidence": "high", "signal": "title"}]
-        handler._detect_interstitials = AsyncMock(
-            side_effect=[cloudflare, []]  # Initial detection, then cleared
-        )
+        detect_once = AsyncMock(side_effect=[cloudflare, []])  # Initial, then cleared
 
-        with patch("browser_tools.mcp_daemon.INTERSTITIAL_RETRY_DELAY_SECONDS", 0.01):
-            result = await handler._detect_with_retry()
+        with patch("browser_tools.interstitial.INTERSTITIAL_RETRY_DELAY_SECONDS", 0.01):
+            result = await detect_with_retry(detect_once)
 
         assert result["detections"] == []
         assert result["auto_retried"] is True
         assert result["retries_used"] == 1
 
     @pytest.mark.asyncio
-    async def test_cloudflare_persists_exhausts_retries(self, handler: Any) -> None:
+    async def test_cloudflare_persists_exhausts_retries(self) -> None:
         """JS challenge that never clears should exhaust retries and report."""
         cloudflare = [{"type": "cloudflare_challenge", "confidence": "high", "signal": "title"}]
-        handler._detect_interstitials = AsyncMock(return_value=cloudflare)
+        detect_once = AsyncMock(return_value=cloudflare)
 
-        with patch("browser_tools.mcp_daemon.INTERSTITIAL_RETRY_DELAY_SECONDS", 0.01):
-            result = await handler._detect_with_retry()
+        with patch("browser_tools.interstitial.INTERSTITIAL_RETRY_DELAY_SECONDS", 0.01):
+            result = await detect_with_retry(detect_once)
 
         assert len(result["detections"]) > 0
         assert result["auto_retried"] is True
         assert result["retries_used"] == 3  # INTERSTITIAL_MAX_RETRIES
 
     @pytest.mark.asyncio
-    async def test_mixed_retryable_and_non_retryable(self, handler: Any) -> None:
+    async def test_mixed_retryable_and_non_retryable(self) -> None:
         """Mixed types: retry for JS challenge, report CAPTCHA immediately."""
         mixed = [
             {"type": "cloudflare_challenge", "confidence": "high", "signal": "title"},
@@ -387,10 +377,10 @@ class TestDetectWithRetry:
         ]
         # After retry, only captcha remains (cloudflare cleared)
         captcha_only = [{"type": "captcha", "confidence": "medium", "signal": "css"}]
-        handler._detect_interstitials = AsyncMock(side_effect=[mixed, captcha_only])
+        detect_once = AsyncMock(side_effect=[mixed, captcha_only])
 
-        with patch("browser_tools.mcp_daemon.INTERSTITIAL_RETRY_DELAY_SECONDS", 0.01):
-            result = await handler._detect_with_retry()
+        with patch("browser_tools.interstitial.INTERSTITIAL_RETRY_DELAY_SECONDS", 0.01):
+            result = await detect_with_retry(detect_once)
 
         assert result["auto_retried"] is True
         assert result["retries_used"] == 1
@@ -398,15 +388,13 @@ class TestDetectWithRetry:
         assert any(d["type"] == "captcha" for d in result["detections"])
 
     @pytest.mark.asyncio
-    async def test_access_denied_is_retryable(self, handler: Any) -> None:
+    async def test_access_denied_is_retryable(self) -> None:
         """access_denied type should trigger auto-retry."""
         denied = [{"type": "access_denied", "confidence": "medium", "signal": "title"}]
-        handler._detect_interstitials = AsyncMock(
-            side_effect=[denied, []]  # Clears on retry
-        )
+        detect_once = AsyncMock(side_effect=[denied, []])  # Clears on retry
 
-        with patch("browser_tools.mcp_daemon.INTERSTITIAL_RETRY_DELAY_SECONDS", 0.01):
-            result = await handler._detect_with_retry()
+        with patch("browser_tools.interstitial.INTERSTITIAL_RETRY_DELAY_SECONDS", 0.01):
+            result = await detect_with_retry(detect_once)
 
         assert result["detections"] == []
         assert result["auto_retried"] is True
@@ -481,7 +469,7 @@ class TestStealthDaemonWiring:
 
     def test_enterprise_detections_not_auto_retried(self) -> None:
         """Enterprise bot protections should not be in auto-retry set."""
-        from browser_tools.mcp_daemon import INTERSTITIAL_AUTO_RETRY_TYPES
+        from browser_tools.interstitial import INTERSTITIAL_AUTO_RETRY_TYPES
 
         enterprise_types = {"datadome", "akamai_bot_manager", "perimeterx", "imperva", "aws_waf"}
         for t in enterprise_types:
