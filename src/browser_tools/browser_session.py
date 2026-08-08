@@ -11,6 +11,7 @@ from __future__ import annotations
 import contextlib
 import json
 import sys
+from dataclasses import dataclass
 from typing import Any
 
 from . import persistent_browser, process_utils
@@ -41,6 +42,7 @@ from .session_store import (
     save_active_attach_config,
     save_session_override,
 )
+from .tool_registry import NAVIGATION_TOOLS, SINGLE_TAB_TOOLS
 
 
 def handle_attach_browser(controller_ref: list[Any], args: Any) -> dict[str, Any]:
@@ -506,6 +508,56 @@ def select_default_controller() -> tuple[PersistentChromeController, list[dict[s
     return default, conflict
 
 
+@dataclass
+class SessionResolution:
+    """The controller this project should use, and why.
+
+    Returned by :func:`resolve_session_controller` and consumed by both the
+    session bootstrap (``create_session``) and status reporting
+    (:func:`session_store.get_browser_session_status`) so the two report the
+    same choice instead of re-deriving the priority order independently.
+    """
+
+    controller: PersistentChromeController
+    source: str
+    conflict: list[dict[str, Any]] | None
+
+
+def resolve_session_controller() -> SessionResolution:
+    """Resolve which controller this project should use, in priority order.
+
+    Single owner of the Active-Session resolution priority:
+
+    1. explicit session override
+    2. project preference (``.browser-tools.json``)
+    3. recent external attach (live and within TTL)
+    4. default selection - this project's own live session, else a sole live
+       named profile, else a fresh headless Chrome - with a ``conflict``
+       descriptor when several named profiles are live and none is picked.
+
+    Returns:
+        The chosen controller, the source label, and any live-profile conflict.
+    """
+    override = create_session_override_controller()
+    if override is not None:
+        return SessionResolution(override, "override", None)
+
+    preferred = create_project_preferred_controller()
+    if preferred is not None:
+        return SessionResolution(preferred, "project", None)
+
+    attached = load_active_attach_controller()
+    if attached is not None:
+        return SessionResolution(attached, "active_attach", None)
+
+    default, conflict = select_default_controller()
+    if conflict is not None:
+        return SessionResolution(default, "default_headless", conflict)
+    if not default.isolated and default.profile:
+        return SessionResolution(default, "live_profile_fallback", None)
+    return SessionResolution(default, "default_headless", None)
+
+
 # ---------------------------------------------------------------------------
 # Session lifecycle: single-tab navigation, close_browser, auth promotion
 # ---------------------------------------------------------------------------
@@ -697,21 +749,132 @@ def _promote_headless_to_headed(
     return headed
 
 
+@dataclass
+class SessionDispatchContext:
+    """Collaborators for session-adapter tool dispatch.
+
+    Holds the mutable controller / Camoufox / conflict state that
+    :func:`create_session` populates and :func:`dispatch_session_tool` reads.
+    Built once per tool-proxy session. Passing it explicitly (rather than
+    closing over it) gives dispatch a test seam: tests build a context with
+    fakes and call ``dispatch_session_tool`` directly, the session-adapter
+    sibling of the Daemon's ``DispatchContext``.
+    """
+
+    controller_ref: list[Any]
+    camoufox_ref: list[Any]
+    live_profile_conflict: list[Any]
+
+
+def dispatch_session_tool(
+    ctx: SessionDispatchContext,
+    controller: PersistentChromeController,
+    tool: str,
+    args: Any,
+) -> dict[str, Any]:
+    """Route one tool call to the active backend, applying cross-cutting policy.
+
+    The session-adapter counterpart of the Daemon's ``dispatch_tool``. Routing
+    order is load-bearing (see ``automation_backend``): Camoufox automation
+    tools resolve before the session-management tools and the live-profile-
+    conflict gate, while Chrome's navigation hooks run after them. Within the
+    Chrome path the two cross-cutting policies are registry-driven instead of
+    inline branches:
+
+    - ``SINGLE_TAB_TOOLS`` - ``new_page`` reuses the one active tab.
+    - ``NAVIGATION_TOOLS`` - a URL navigation may trigger headless-to-headed
+      auth-wall promotion.
+
+    Args:
+        ctx: Mutable dispatch collaborators (controller / Camoufox / conflict).
+        controller: Controller in force when the tool-proxy adapter built this
+            session; superseded by ``ctx.controller_ref`` when an
+            ``attach_browser`` / ``use_browser_session`` call swapped it.
+        tool: browser-tools tool name.
+        args: Tool arguments.
+
+    Returns:
+        MCP JSON-RPC response dict.
+    """
+    # --- Camoufox-exclusive lifecycle tools ---
+    if tool == "launch_camoufox":
+        return _handle_launch_camoufox(ctx.camoufox_ref, args)
+    if tool == "close_camoufox":
+        return _handle_close_camoufox(ctx.camoufox_ref)
+    if tool in ("wait_for_human", "get_cookies"):
+        cfox = ctx.camoufox_ref[0]
+        if cfox is None:
+            return error_response(
+                f"Error: {tool} requires an active Camoufox session. "
+                "Call launch_camoufox first."
+            )
+        return CamoufoxBackend(cfox).invoke(tool, args)
+
+    # --- Standard tools routed through Camoufox when active ---
+    cfox = ctx.camoufox_ref[0]
+    if cfox is not None and tool in CAMOUFOX_TOOL_MAP:
+        return CamoufoxBackend(cfox).invoke(tool, args)
+
+    # --- Session-management tools (swap the controller / override) ---
+    if tool == "attach_browser":
+        return handle_attach_browser(ctx.controller_ref, args)
+    if tool == "use_browser_session":
+        return handle_use_browser_session(ctx.controller_ref, args)
+    if tool == "browser_session_status":
+        return handle_browser_session_status(args)
+    if tool == "close_browser":
+        return handle_close_browser(ctx.controller_ref, controller, args)
+    if tool == "list_profiles":
+        return handle_list_profiles(args)
+    if tool == "delete_profile":
+        return handle_delete_profile(args)
+
+    # If multiple live profiles were detected at session creation and the agent
+    # hasn't picked one yet (attach_browser / use_browser_session would have
+    # cleared the conflict by swapping controller_ref or saving an override),
+    # refuse non-session tools rather than silently spawning a new headless
+    # Chrome.
+    if ctx.live_profile_conflict[0] is not None and ctx.controller_ref[0] is controller:
+        return _format_live_profile_conflict_error(ctx.live_profile_conflict[0])
+
+    # Use latest controller (may have been swapped by attach_browser).
+    active = ctx.controller_ref[0] or controller
+    chrome = ChromeBackend(active)
+    url = args.get("url")
+
+    # Single active tab: new_page reuses the one tab instead of stacking.
+    if tool in SINGLE_TAB_TOOLS:
+        response = _handle_new_page_single_tab(active, url)
+    else:
+        response = chrome.invoke(tool, args)
+
+    # Headless -> headed auto-promotion when a URL navigation hits an auth wall.
+    # new_page always navigates to a URL; navigate_page only when type=url (the
+    # default). back/forward/reload re-auth is not a fresh login-wall event.
+    if tool in NAVIGATION_TOOLS and (tool in SINGLE_TAB_TOOLS or args.get("type", "url") == "url"):
+        response = _maybe_promote_on_auth_wall(ctx.controller_ref, active, response, url)
+
+    return response
+
+
 def create_tool_proxy_handlers():
     """Create stateful handlers for a tool-proxy protocol adapter.
+
+    Returns a ``(create_session, call_tool)`` pair sharing one
+    :class:`SessionDispatchContext`. ``call_tool`` is a thin closure over the
+    context that delegates to :func:`dispatch_session_tool`, so the routing
+    policy lives in one testable place rather than in the closure body.
 
     The standalone package intentionally does not import py_utils. The
     tool-proxy app adapter owns protocol I/O and calls these handlers.
     """
-    # Mutable ref so attach_browser can swap the controller
-    controller_ref: list[Any] = [None]
-    # Camoufox session ref — when not None, standard tools route through it
-    camoufox_ref: list[Any] = [None]
-    # Populated when multiple profiles are live and no session is configured.
-    # Non-session tools fail loudly until the agent picks one.
-    live_profile_conflict: list[Any] = [None]
+    ctx = SessionDispatchContext(
+        controller_ref=[None],
+        camoufox_ref=[None],
+        live_profile_conflict=[None],
+    )
 
-    def create_session():
+    def create_session() -> PersistentChromeController:
         # Quit automation Chromes left behind by daemons that died without
         # running their own teardown, before deciding what is live.
         for orphan in reap_orphaned_sessions():
@@ -721,88 +884,22 @@ def create_tool_proxy_handlers():
                 file=sys.stderr,
             )
 
-        override = create_session_override_controller()
-        if override is not None:
-            controller_ref[0] = override
-            return override
-
-        preferred = create_project_preferred_controller()
-        if preferred is not None:
-            controller_ref[0] = preferred
-            return preferred
-
-        attached = load_active_attach_controller()
-        if attached is not None:
-            controller_ref[0] = attached
-            return attached
-
-        c, conflict = select_default_controller()
-        controller_ref[0] = c
-        if conflict is not None:
-            live_profile_conflict[0] = conflict
-        elif not c.isolated and c.profile:
+        # One owner of the resolution priority (see resolve_session_controller),
+        # so the bootstrap and browser_session_status cannot drift apart.
+        resolution = resolve_session_controller()
+        ctx.controller_ref[0] = resolution.controller
+        if resolution.conflict is not None:
+            ctx.live_profile_conflict[0] = resolution.conflict
+        elif resolution.source == "live_profile_fallback":
             print(
-                f"[browser-tools] Auto-attached to sole live profile '{c.profile}'",
+                f"[browser-tools] Auto-attached to sole live profile "
+                f"'{resolution.controller.profile}'",
                 file=sys.stderr,
             )
-        return c
+        return resolution.controller
 
     def call_tool(controller: PersistentChromeController, tool: str, args: Any) -> dict[str, Any]:
-        # --- Camoufox-exclusive tools ---
-        if tool == "launch_camoufox":
-            return _handle_launch_camoufox(camoufox_ref, args)
-        if tool == "close_camoufox":
-            return _handle_close_camoufox(camoufox_ref)
-        if tool in ("wait_for_human", "get_cookies"):
-            cfox = camoufox_ref[0]
-            if cfox is None:
-                return error_response(
-                    f"Error: {tool} requires an active Camoufox session. "
-                    "Call launch_camoufox first."
-                )
-            return CamoufoxBackend(cfox).invoke(tool, args)
-
-        # --- Standard tools routed through Camoufox when active ---
-        cfox = camoufox_ref[0]
-        if cfox is not None and tool in CAMOUFOX_TOOL_MAP:
-            return CamoufoxBackend(cfox).invoke(tool, args)
-
-        # --- Chrome/CDP tools (original path) ---
-        if tool == "attach_browser":
-            return handle_attach_browser(controller_ref, args)
-        if tool == "use_browser_session":
-            return handle_use_browser_session(controller_ref, args)
-        if tool == "browser_session_status":
-            return handle_browser_session_status(args)
-        if tool == "close_browser":
-            return handle_close_browser(controller_ref, controller, args)
-        if tool == "list_profiles":
-            return handle_list_profiles(args)
-        if tool == "delete_profile":
-            return handle_delete_profile(args)
-        # If we detected multiple live profiles at session creation and the
-        # agent hasn't picked one yet (attach_browser/use_browser_session would
-        # have cleared the conflict by swapping controller_ref or saving an
-        # override), refuse non-session tools rather than silently spawning a
-        # new headless Chrome.
-        if live_profile_conflict[0] is not None and controller_ref[0] is controller:
-            return _format_live_profile_conflict_error(live_profile_conflict[0])
-        # Use latest controller (may have been swapped by attach_browser)
-        active = controller_ref[0] or controller
-        chrome = ChromeBackend(active)
-
-        # Single active tab: new_page reuses the one tab instead of stacking.
-        if tool == "new_page":
-            url = args.get("url")
-            response = _handle_new_page_single_tab(active, url)
-            return _maybe_promote_on_auth_wall(controller_ref, active, response, url)
-
-        # Headless -> headed auto-promotion when a navigation hits an auth wall.
-        if tool == "navigate_page" and args.get("type", "url") == "url":
-            response = chrome.invoke(tool, args)
-            return _maybe_promote_on_auth_wall(controller_ref, active, response, args.get("url"))
-
-        return chrome.invoke(tool, args)
+        return dispatch_session_tool(ctx, controller, tool, args)
 
     return create_session, call_tool
 

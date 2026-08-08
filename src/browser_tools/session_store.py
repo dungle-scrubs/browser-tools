@@ -245,15 +245,16 @@ def get_browser_session_status() -> dict[str, Any]:
     project = load_project_browser_config()
     active = ActiveAttachConfig.from_path(get_active_attach_config_path())
     active_live = active is not None and is_devtools_available(active.browser_url)
-    selected_source = (
-        "override"
-        if override
-        else "project"
-        if project
-        else "active_attach"
-        if active_live
-        else "default_headless"
-    )
+    # selected_source comes from the single resolution owner so status and the
+    # session bootstrap cannot drift. Defensive: a project config that cannot
+    # build (e.g. mode='real' on an unsupported channel) must not break a
+    # diagnostic, so fall back to the default label instead of raising.
+    try:
+        from .browser_session import resolve_session_controller
+
+        selected_source = resolve_session_controller().source
+    except Exception:
+        selected_source = "default_headless"
     return {
         "selected_source": selected_source,
         "override": asdict(override) if override else None,

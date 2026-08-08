@@ -27,6 +27,9 @@ Flag meanings:
 - ``screenshot_gate``: forwarded to the MCP subprocess like a default tool,
   but wrapped with a paint-ready gate and blank-frame retry so the captured
   image is not a mid-animation / mid-hydration frame (``take_screenshot``).
+- ``single_tab``: the session adapter reuses the single active tab instead of
+  stacking a new one (``new_page``). A session-adapter behavior flag, like
+  ``page_selecting`` is a controller flag; the Daemon does not consume it.
 
 Tools absent from ``TOOLS`` are not CDP-routed and fall through to the default
 path: forwarded unchanged to the chrome-devtools-mcp subprocess.
@@ -51,6 +54,7 @@ class ToolFlags:
     inspect_warn: bool = False
     page_selecting: bool = False
     screenshot_gate: bool = False
+    single_tab: bool = False
 
 
 # name -> flags. Only tools with at least one True flag need to be listed;
@@ -58,7 +62,7 @@ class ToolFlags:
 TOOLS: dict[str, ToolFlags] = {
     # --- Navigation (triggers interstitial detection) ---
     "navigate_page": ToolFlags(navigation=True, inspect_warn=True),
-    "new_page": ToolFlags(navigation=True, inspect_warn=True, page_selecting=True),
+    "new_page": ToolFlags(navigation=True, inspect_warn=True, page_selecting=True, single_tab=True),
     "close_page": ToolFlags(inspect_warn=True),
     # --- Page-selection tools: choose the active tab themselves, so they skip
     # the controller's restore-before-call step. select_page is a default-
@@ -119,6 +123,7 @@ NAVIGATION_TOOLS = _names("navigation")
 INSPECT_WARN_TOOLS = _names("inspect_warn")
 PAGE_SELECTING_TOOLS = _names("page_selecting")
 SCREENSHOT_GATE_TOOLS = _names("screenshot_gate")
+SINGLE_TAB_TOOLS = _names("single_tab")
 
 
 __all__ = [
@@ -129,6 +134,7 @@ __all__ = [
     "NAVIGATION_TOOLS",
     "PAGE_SELECTING_TOOLS",
     "SCREENSHOT_GATE_TOOLS",
+    "SINGLE_TAB_TOOLS",
     "TOOLS",
     "ToolFlags",
 ]
