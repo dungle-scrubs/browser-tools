@@ -1,8 +1,12 @@
-"""Interstitial detection for browser-tools.
+"""Post-navigation interstitial detection for browser-tools.
 
-Detects challenge pages, auth walls, and interstitials after navigation
-using a two-pass approach: immediate detection + delayed detection for
-late-injected DOM content (D-003).
+Single owner of the challenge-response policy: loads the detection script,
+runs a two-pass single-shot detect (immediate + delayed for late-injected
+DOM, D-003), auto-retries JS-solvable challenges, deduplicates, and formats
+the result. The retry tuning (delay, max retries, retryable types) lives here
+next to the loop that reads it; CDPHandler exposes only a thread-safe
+``run_post_navigation_detection`` that marshals :func:`detect_with_retry` onto
+its event loop.
 
 Supports project-specific overrides via:
     ~/.config/tool-proxy/browser-tools/detect-interstitial.js
@@ -10,16 +14,35 @@ Supports project-specific overrides via:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
 
 logger = logging.getLogger(__name__)
 
 # Built-in detection script
 _BUILTIN_SCRIPT = Path(__file__).parent / "detect_interstitial.js"
 _OVERRIDE_PATH = Path.home() / ".config" / "tool-proxy" / "browser-tools" / "detect-interstitial.js"
+
+# Auto-retry tuning for JS-solvable challenges (Cloudflare JS challenge,
+# access-denied pages). Human-interaction challenges (CAPTCHA, auth walls,
+# ngrok warnings, enterprise bot managers) are reported immediately. Kept here,
+# next to detect_with_retry, the only reader.
+INTERSTITIAL_RETRY_DELAY_SECONDS = 3.0
+INTERSTITIAL_MAX_RETRIES = 3
+INTERSTITIAL_AUTO_RETRY_TYPES = frozenset({"cloudflare_challenge", "access_denied"})
+
+# Outer timeout for the whole detect-and-retry sequence, used by the thread-safe
+# marshaler in CDPHandler.run_post_navigation_detection. Generous buffer over
+# (initial detect + retries * delay) so a slow page cannot hang the daemon.
+DETECT_TOTAL_TIMEOUT_SECONDS = 10 + (
+    INTERSTITIAL_MAX_RETRIES * (INTERSTITIAL_RETRY_DELAY_SECONDS + 2)
+)
 
 
 def get_detection_script() -> str:
@@ -92,6 +115,56 @@ def format_interstitials(
     return "\n".join(lines)
 
 
+async def detect_with_retry(
+    detect_once: Callable[[], Awaitable[list[dict[str, Any]]]],
+) -> dict[str, Any]:
+    """Run interstitial detection with auto-retry for JS-solvable challenges.
+
+    The retry policy: call ``detect_once``; if only non-retryable types remain,
+    report immediately; if any retryable type is present, wait
+    :data:`INTERSTITIAL_RETRY_DELAY_SECONDS` and re-check, up to
+    :data:`INTERSTITIAL_MAX_RETRIES` times. A challenge that clears returns an
+    empty detection list with ``auto_retried=True``.
+
+    Args:
+        detect_once: A single-shot detection pass returning a list of detection
+            dicts (typically :func:`detect_interstitials_async` bound to a CDP
+            client). Passed in so this module owns the policy without owning
+            the CDP client or the event loop.
+
+    Returns:
+        Dict with ``detections`` (list), ``auto_retried`` (bool), and
+        ``retries_used`` (int).
+    """
+    detections = await detect_once()
+    if not detections:
+        return {"detections": [], "auto_retried": False, "retries_used": 0}
+
+    retryable = [d for d in detections if d.get("type") in INTERSTITIAL_AUTO_RETRY_TYPES]
+    non_retryable = [d for d in detections if d.get("type") not in INTERSTITIAL_AUTO_RETRY_TYPES]
+
+    if not retryable:
+        return {"detections": detections, "auto_retried": False, "retries_used": 0}
+
+    for attempt in range(INTERSTITIAL_MAX_RETRIES):
+        await asyncio.sleep(INTERSTITIAL_RETRY_DELAY_SECONDS)
+        detections = await detect_once()
+
+        if not detections:
+            return {"detections": [], "auto_retried": True, "retries_used": attempt + 1}
+
+        retryable = [d for d in detections if d.get("type") in INTERSTITIAL_AUTO_RETRY_TYPES]
+        if not retryable:
+            return {"detections": detections, "auto_retried": True, "retries_used": attempt + 1}
+
+    # Exhausted retries -- report whatever remains plus any non-retryable.
+    return {
+        "detections": detections + non_retryable,
+        "auto_retried": True,
+        "retries_used": INTERSTITIAL_MAX_RETRIES,
+    }
+
+
 async def detect_interstitials_async(
     cdp_client: Any, context_id: int | None = None
 ) -> list[dict[str, Any]]:
@@ -106,8 +179,6 @@ async def detect_interstitials_async(
     Returns:
         Deduplicated list of detection results.
     """
-    import asyncio
-
     script = get_detection_script()
     all_results: list[dict[str, Any]] = []
 
@@ -174,3 +245,16 @@ def _deduplicate(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
         ):
             seen[type_name] = r
     return list(seen.values())
+
+
+__all__ = [
+    "DETECT_TOTAL_TIMEOUT_SECONDS",
+    "INTERSTITIAL_AUTO_RETRY_TYPES",
+    "INTERSTITIAL_MAX_RETRIES",
+    "INTERSTITIAL_RETRY_DELAY_SECONDS",
+    "detect_interstitials_async",
+    "detect_with_retry",
+    "format_interstitials",
+    "get_detection_script",
+    "parse_detection_result",
+]

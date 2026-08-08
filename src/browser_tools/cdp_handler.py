@@ -19,22 +19,26 @@ logger = logging.getLogger(__name__)
 
 try:
     from .cdp_constants import (
-        INTERSTITIAL_AUTO_RETRY_TYPES,
-        INTERSTITIAL_MAX_RETRIES,
-        INTERSTITIAL_RETRY_DELAY_SECONDS,
         REQUEST_TIMEOUT_SECONDS,
         SCREENSHOT_PAINT_READY_TIMEOUT_MS,
+    )
+    from .interstitial import (
+        DETECT_TOTAL_TIMEOUT_SECONDS,
+        detect_interstitials_async,
+        detect_with_retry,
     )
     from .mcp_response import make_error, make_text
     from .screencast import ScreencastRecorder
     from .tool_registry import CDP_TOOLS
 except ImportError:
     from cdp_constants import (  # type: ignore[import-untyped,no-redef]
-        INTERSTITIAL_AUTO_RETRY_TYPES,
-        INTERSTITIAL_MAX_RETRIES,
-        INTERSTITIAL_RETRY_DELAY_SECONDS,
         REQUEST_TIMEOUT_SECONDS,
         SCREENSHOT_PAINT_READY_TIMEOUT_MS,
+    )
+    from interstitial import (  # type: ignore[import-untyped,no-redef]
+        DETECT_TOTAL_TIMEOUT_SECONDS,
+        detect_interstitials_async,
+        detect_with_retry,
     )
     from mcp_response import (  # type: ignore[import-untyped,no-redef]
         make_error,
@@ -1283,82 +1287,31 @@ class CDPHandler:
             return False
 
     def run_post_navigation_detection(self) -> dict[str, Any] | None:
-        """Run interstitial detection with auto-retry for JS-solvable challenges.
+        """Run post-navigation interstitial detection (thread-safe).
 
-        For challenges that can auto-solve (e.g., Cloudflare JS challenge),
-        waits and re-checks up to INTERSTITIAL_MAX_RETRIES times before
-        reporting the interstitial. Human-interaction challenges (CAPTCHA,
-        auth walls) are reported immediately.
+        Delegates the detect-and-retry policy to :mod:`interstitial`; this
+        method only marshals that coroutine onto the CDP event loop and enforces
+        the outer timeout. The retry tuning and the single-shot detection both
+        live in the interstitial module, so the whole challenge-response policy
+        has one home rather than being smeared across CDPHandler, interstitial,
+        and cdp_constants.
 
         Returns:
-            Dict with 'detections' list and 'auto_retried' bool,
-            or None if CDP unavailable.
+            Dict with 'detections', 'auto_retried', 'retries_used', or None if
+            CDP is unavailable.
         """
         if not self._loop or not self._cdp_client or not self._cdp_client.connected:
             return None
 
-        future = asyncio.run_coroutine_threadsafe(self._detect_with_retry(), self._loop)
+        async def _detect_once() -> list[dict[str, Any]]:
+            return await detect_interstitials_async(self._cdp_client)
+
+        async def _run() -> dict[str, Any]:
+            return await detect_with_retry(_detect_once)
+
+        future = asyncio.run_coroutine_threadsafe(_run(), self._loop)
         try:
-            # Total timeout: initial detect + (retries * delay) + buffer
-            timeout = 10 + (INTERSTITIAL_MAX_RETRIES * (INTERSTITIAL_RETRY_DELAY_SECONDS + 2))
-            return future.result(timeout=timeout)
+            return future.result(timeout=DETECT_TOTAL_TIMEOUT_SECONDS)
         except Exception:
             logger.debug("run_post_navigation_detection failed", exc_info=True)
             return None
-
-    async def _detect_with_retry(self) -> dict[str, Any]:
-        """Detect interstitials and auto-retry JS-solvable challenges.
-
-        Returns:
-            Dict with 'detections' (list) and 'auto_retried' (bool)
-            and 'retries_used' (int).
-        """
-
-        detections = await self._detect_interstitials()
-        if not detections:
-            return {"detections": [], "auto_retried": False, "retries_used": 0}
-
-        # Split into auto-retryable vs. immediate-report
-        retryable = [d for d in detections if d.get("type") in INTERSTITIAL_AUTO_RETRY_TYPES]
-        non_retryable = [
-            d for d in detections if d.get("type") not in INTERSTITIAL_AUTO_RETRY_TYPES
-        ]
-
-        # If nothing is retryable, report immediately
-        if not retryable:
-            return {"detections": detections, "auto_retried": False, "retries_used": 0}
-
-        # Auto-retry: wait for JS challenge to self-solve
-        for attempt in range(INTERSTITIAL_MAX_RETRIES):
-            await asyncio.sleep(INTERSTITIAL_RETRY_DELAY_SECONDS)
-            detections = await self._detect_interstitials()
-
-            if not detections:
-                # Challenge cleared
-                return {"detections": [], "auto_retried": True, "retries_used": attempt + 1}
-
-            retryable = [d for d in detections if d.get("type") in INTERSTITIAL_AUTO_RETRY_TYPES]
-            if not retryable:
-                # Only non-retryable left (or all cleared)
-                return {
-                    "detections": detections,
-                    "auto_retried": True,
-                    "retries_used": attempt + 1,
-                }
-
-        # Exhausted retries -- report whatever remains plus any non-retryable
-        return {
-            "detections": detections + non_retryable,
-            "auto_retried": True,
-            "retries_used": INTERSTITIAL_MAX_RETRIES,
-        }
-
-    async def _detect_interstitials(self) -> list[dict[str, Any]]:
-        """Run interstitial detection via CDP."""
-        try:
-            from .interstitial import detect_interstitials_async
-
-            return await detect_interstitials_async(self._cdp_client)
-        except Exception:
-            logger.debug("Interstitial detection failed", exc_info=True)
-            return []

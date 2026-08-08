@@ -41,9 +41,6 @@ logger = logging.getLogger(__name__)
 
 try:
     from .cdp_constants import (
-        INTERSTITIAL_AUTO_RETRY_TYPES,  # type: ignore[import-untyped]
-        INTERSTITIAL_MAX_RETRIES,  # type: ignore[import-untyped]
-        INTERSTITIAL_RETRY_DELAY_SECONDS,  # type: ignore[import-untyped]
         REQUEST_TIMEOUT_SECONDS,
         SCREENSHOT_BLANK_MAX_RETRIES,
         SCREENSHOT_BLANK_RETRY_DELAY_SECONDS,
@@ -64,9 +61,6 @@ try:
     )
 except ImportError:
     from cdp_constants import (  # type: ignore[import-untyped,no-redef]
-        INTERSTITIAL_AUTO_RETRY_TYPES,  # type: ignore[import-untyped]  # noqa: F401
-        INTERSTITIAL_MAX_RETRIES,  # type: ignore[import-untyped]  # noqa: F401
-        INTERSTITIAL_RETRY_DELAY_SECONDS,  # type: ignore[import-untyped]  # noqa: F401
         REQUEST_TIMEOUT_SECONDS,
         SCREENSHOT_BLANK_MAX_RETRIES,
         SCREENSHOT_BLANK_RETRY_DELAY_SECONDS,
