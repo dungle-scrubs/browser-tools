@@ -268,11 +268,17 @@ assert set(_CDP_HANDLERS) == CDP_TOOLS, (
 )
 
 
-class CDPHandler:
-    """Manages CDP client and frame manager in a dedicated asyncio event loop.
+class CDPRuntime:
+    """Owns the CDP background thread, event loop, WebSocket connection, frame
+    manager, screencast recorder, and the thread-safe marshal methods the Daemon
+    calls (``await_paint_ready``, ``run_post_navigation_detection``).
 
-    Runs in a background thread with its own event loop. Tool calls from
-    the main thread are dispatched via thread-safe call_tool().
+    The deep half of the CDP layer: a lot of machinery (thread + loop +
+    WebSocket connection + frame-tree subscriptions + stealth injection + two
+    marshal hooks) behind a small surface. :class:`CDPHandler` sits above it and
+    reaches the browser through ``client`` / ``frame_manager`` / ``screencast``
+    rather than owning them, so the two depths - runtime versus tool handlers -
+    have a seam instead of sharing one class.
     """
 
     def __init__(
@@ -281,7 +287,7 @@ class CDPHandler:
         mode: str = "full",
         stealth: bool = False,
     ) -> None:
-        """Initialize the CDP handler.
+        """Initialize the CDP runtime.
 
         Args:
             browser_url: Chrome remote debugging URL.
@@ -297,14 +303,9 @@ class CDPHandler:
         self._cdp_client: Any = None
         self._frame_manager: Any = None
         # Screencast capture state machine (Page.startScreencast buffer, ack,
-        # write-to-dir). Owned by ScreencastRecorder so the handlers below stay
+        # write-to-dir). Owned here so the screencast tool handlers stay
         # two-line delegators.
         self._screencast = ScreencastRecorder()
-        # Tool name -> bound handler. Built from the class-level _CDP_HANDLERS
-        # table, which is parity-checked against tool_registry.CDP_TOOLS below.
-        self._handlers: dict[str, Any] = {
-            name: getattr(self, method) for name, method in _CDP_HANDLERS.items()
-        }
 
     @property
     def available(self) -> bool:
@@ -316,11 +317,31 @@ class CDPHandler:
         """Current access mode ('full' or 'inspect')."""
         return self._mode
 
-    def _cdp_or_error(self) -> tuple[Any, dict[str, Any] | None]:
+    @property
+    def client(self) -> Any:
+        """The connected CDP client (or None), exposed for the tool handlers."""
+        return self._cdp_client
+
+    @property
+    def frame_manager(self) -> Any:
+        """The frame manager, exposed for the frame tool handlers."""
+        return self._frame_manager
+
+    @property
+    def screencast(self) -> ScreencastRecorder:
+        """The screencast recorder, exposed for the screencast tool handlers."""
+        return self._screencast
+
+    @property
+    def loop(self) -> asyncio.AbstractEventLoop | None:
+        """The background event loop, exposed for thread-safe dispatch."""
+        return self._loop
+
+    def cdp_or_error(self) -> tuple[Any, dict[str, Any] | None]:
         """Return the connected CDP client, or an error response if down.
 
-        Replaces the 15 hand-copied ``if cdp is None or not cdp.connected``
-        guards. Returns ``(cdp_client, None)`` when connected, otherwise
+        Replaces the hand-copied ``if cdp is None or not cdp.connected`` guards.
+        Returns ``(cdp_client, None)`` when connected, otherwise
         ``(None, make_error(...))``.
         """
         cdp = self._cdp_client
@@ -421,6 +442,174 @@ class CDPHandler:
         """Signal the background loop to stop."""
         if self._loop and self._stop_event:
             self._loop.call_soon_threadsafe(self._stop_event.set)
+
+    def await_paint_ready(self, timeout_ms: int = SCREENSHOT_PAINT_READY_TIMEOUT_MS) -> bool:
+        """Block until Chrome has painted at least one stable frame.
+
+        Used as a pre-capture gate for take_screenshot. Waits for two
+        requestAnimationFrame ticks (one to flush the current frame, one to
+        confirm the next frame committed) plus document.fonts.ready, so any
+        in-flight CSS transition / font swap / layout reflow has reached
+        the compositor before we capture.
+
+        DOM-mutation waits (wait_stable) miss this case because CSS
+        transform/opacity animations don't fire MutationObserver callbacks
+        -- the DOM looks settled while pixels are still moving.
+
+        Returns:
+            True if the gate completed; False if CDP is unavailable or the
+            evaluate timed out. Never raises -- screenshot must still proceed
+            on a best-effort basis if this gate fails.
+        """
+        if not self._loop or not self._cdp_client or not self._cdp_client.connected:
+            return False
+
+        future = asyncio.run_coroutine_threadsafe(
+            self._await_paint_ready_async(timeout_ms), self._loop
+        )
+        try:
+            return future.result(timeout=(timeout_ms / 1000.0) + 2.0)
+        except Exception:
+            logger.debug("await_paint_ready timed out or failed", exc_info=True)
+            return False
+
+    async def _await_paint_ready_async(self, timeout_ms: int) -> bool:
+        """Run the rAF + fonts.ready gate via Runtime.evaluate.
+
+        The JS resolves once the next frame after the current one has been
+        scheduled by the compositor, with a hard timeout safety net so a
+        broken page (background tab, no rAF firing) can't hang the daemon.
+        """
+        js = f"""
+        (async () => {{
+            const timeout = new Promise(r => setTimeout(() => r('timeout'), {int(timeout_ms)}));
+            const paint = new Promise(r => requestAnimationFrame(() => requestAnimationFrame(() => r('paint'))));
+            const fonts = (document.fonts && document.fonts.ready) ? document.fonts.ready : Promise.resolve();
+            await Promise.race([Promise.all([paint, fonts]), timeout]);
+            return true;
+        }})()
+        """
+        try:
+            await self._cdp_client.send(
+                "Runtime.evaluate",
+                {"expression": js, "awaitPromise": True, "returnByValue": True},
+            )
+            return True
+        except Exception:
+            logger.debug("_await_paint_ready_async failed", exc_info=True)
+            return False
+
+    def run_post_navigation_detection(self) -> dict[str, Any] | None:
+        """Run post-navigation interstitial detection (thread-safe).
+
+        Delegates the detect-and-retry policy to :mod:`interstitial`; this
+        method only marshals that coroutine onto the CDP event loop and enforces
+        the outer timeout. The retry tuning and the single-shot detection both
+        live in the interstitial module, so the whole challenge-response policy
+        has one home rather than being smeared across the runtime, interstitial,
+        and cdp_constants.
+
+        Returns:
+            Dict with 'detections', 'auto_retried', 'retries_used', or None if
+            CDP is unavailable.
+        """
+        if not self._loop or not self._cdp_client or not self._cdp_client.connected:
+            return None
+
+        async def _detect_once() -> list[dict[str, Any]]:
+            return await detect_interstitials_async(self._cdp_client)
+
+        async def _run() -> dict[str, Any]:
+            return await detect_with_retry(_detect_once)
+
+        future = asyncio.run_coroutine_threadsafe(_run(), self._loop)
+        try:
+            return future.result(timeout=DETECT_TOTAL_TIMEOUT_SECONDS)
+        except Exception:
+            logger.debug("run_post_navigation_detection failed", exc_info=True)
+            return None
+
+
+class CDPHandler:
+    """CDP tool handler registry: routes the 18 CDP tools to their handlers, each
+    executed on the :class:`CDPRuntime` event loop.
+
+    Owns no connection state itself - the runtime does - and reaches the browser
+    through the runtime's ``client`` / ``frame_manager`` / ``screencast`` seam.
+    The Daemon constructs this, threads ``run``, and calls the two cross-cutting
+    hooks (``await_paint_ready``, ``run_post_navigation_detection``), all of which
+    delegate to the runtime, their natural owner.
+    """
+
+    def __init__(
+        self,
+        browser_url: str | None,
+        mode: str = "full",
+        stealth: bool = False,
+    ) -> None:
+        """Initialize the handler registry over a fresh CDP runtime.
+
+        Args:
+            browser_url: Chrome remote debugging URL.
+            mode: Access mode ('full' or 'inspect').
+            stealth: Whether to inject stealth patches to reduce automation fingerprinting.
+        """
+        self._rt = CDPRuntime(browser_url, mode, stealth=stealth)
+        # Tool name -> bound handler. Built from the class-level _CDP_HANDLERS
+        # table, which is parity-checked against tool_registry.CDP_TOOLS above.
+        self._handlers: dict[str, Any] = {
+            name: getattr(self, method) for name, method in _CDP_HANDLERS.items()
+        }
+
+    # --- Daemon-facing surface: delegate to the runtime ---
+    @property
+    def available(self) -> bool:
+        """Whether the runtime's CDP client is connected and ready."""
+        return self._rt.available
+
+    @property
+    def mode(self) -> str:
+        """Current access mode ('full' or 'inspect')."""
+        return self._rt.mode
+
+    def run(self) -> None:
+        """Run the CDP runtime's event loop (called in a background thread)."""
+        self._rt.run()
+
+    def stop(self) -> None:
+        """Signal the CDP runtime's background loop to stop."""
+        self._rt.stop()
+
+    def await_paint_ready(self, timeout_ms: int = SCREENSHOT_PAINT_READY_TIMEOUT_MS) -> bool:
+        """Block until Chrome has painted a stable frame (delegates to runtime)."""
+        return self._rt.await_paint_ready(timeout_ms)
+
+    def run_post_navigation_detection(self) -> dict[str, Any] | None:
+        """Run post-navigation interstitial detection (delegates to runtime)."""
+        return self._rt.run_post_navigation_detection()
+
+    # --- Runtime state, exposed to the handlers as a documented seam. These
+    #     read through to the runtime so the handlers access the browser via a
+    #     stable surface instead of owning connection state. ---
+    @property
+    def _cdp_client(self) -> Any:
+        return self._rt.client
+
+    @property
+    def _frame_manager(self) -> Any:
+        return self._rt.frame_manager
+
+    @property
+    def _screencast(self) -> ScreencastRecorder:
+        return self._rt.screencast
+
+    @property
+    def _loop(self) -> asyncio.AbstractEventLoop | None:
+        return self._rt.loop
+
+    def _cdp_or_error(self) -> tuple[Any, dict[str, Any] | None]:
+        """Return the connected CDP client, or an error response if down."""
+        return self._rt.cdp_or_error()
 
     def call_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         """Execute a CDP/frame tool (thread-safe, blocks until complete).
@@ -1229,89 +1418,3 @@ class CDPHandler:
                     self._frame_manager.update_from_frame_tree(result["frameTree"])
             except Exception:
                 logger.debug("Failed to refresh frame tree", exc_info=True)
-
-    def await_paint_ready(self, timeout_ms: int = SCREENSHOT_PAINT_READY_TIMEOUT_MS) -> bool:
-        """Block until Chrome has painted at least one stable frame.
-
-        Used as a pre-capture gate for take_screenshot. Waits for two
-        requestAnimationFrame ticks (one to flush the current frame, one to
-        confirm the next frame committed) plus document.fonts.ready, so any
-        in-flight CSS transition / font swap / layout reflow has reached
-        the compositor before we capture.
-
-        DOM-mutation waits (wait_stable) miss this case because CSS
-        transform/opacity animations don't fire MutationObserver callbacks
-        -- the DOM looks settled while pixels are still moving.
-
-        Returns:
-            True if the gate completed; False if CDP is unavailable or the
-            evaluate timed out. Never raises -- screenshot must still proceed
-            on a best-effort basis if this gate fails.
-        """
-        if not self._loop or not self._cdp_client or not self._cdp_client.connected:
-            return False
-
-        future = asyncio.run_coroutine_threadsafe(
-            self._await_paint_ready_async(timeout_ms), self._loop
-        )
-        try:
-            return future.result(timeout=(timeout_ms / 1000.0) + 2.0)
-        except Exception:
-            logger.debug("await_paint_ready timed out or failed", exc_info=True)
-            return False
-
-    async def _await_paint_ready_async(self, timeout_ms: int) -> bool:
-        """Run the rAF + fonts.ready gate via Runtime.evaluate.
-
-        The JS resolves once the next frame after the current one has been
-        scheduled by the compositor, with a hard timeout safety net so a
-        broken page (background tab, no rAF firing) can't hang the daemon.
-        """
-        js = f"""
-        (async () => {{
-            const timeout = new Promise(r => setTimeout(() => r('timeout'), {int(timeout_ms)}));
-            const paint = new Promise(r => requestAnimationFrame(() => requestAnimationFrame(() => r('paint'))));
-            const fonts = (document.fonts && document.fonts.ready) ? document.fonts.ready : Promise.resolve();
-            await Promise.race([Promise.all([paint, fonts]), timeout]);
-            return true;
-        }})()
-        """
-        try:
-            await self._cdp_client.send(
-                "Runtime.evaluate",
-                {"expression": js, "awaitPromise": True, "returnByValue": True},
-            )
-            return True
-        except Exception:
-            logger.debug("_await_paint_ready_async failed", exc_info=True)
-            return False
-
-    def run_post_navigation_detection(self) -> dict[str, Any] | None:
-        """Run post-navigation interstitial detection (thread-safe).
-
-        Delegates the detect-and-retry policy to :mod:`interstitial`; this
-        method only marshals that coroutine onto the CDP event loop and enforces
-        the outer timeout. The retry tuning and the single-shot detection both
-        live in the interstitial module, so the whole challenge-response policy
-        has one home rather than being smeared across CDPHandler, interstitial,
-        and cdp_constants.
-
-        Returns:
-            Dict with 'detections', 'auto_retried', 'retries_used', or None if
-            CDP is unavailable.
-        """
-        if not self._loop or not self._cdp_client or not self._cdp_client.connected:
-            return None
-
-        async def _detect_once() -> list[dict[str, Any]]:
-            return await detect_interstitials_async(self._cdp_client)
-
-        async def _run() -> dict[str, Any]:
-            return await detect_with_retry(_detect_once)
-
-        future = asyncio.run_coroutine_threadsafe(_run(), self._loop)
-        try:
-            return future.result(timeout=DETECT_TOTAL_TIMEOUT_SECONDS)
-        except Exception:
-            logger.debug("run_post_navigation_detection failed", exc_info=True)
-            return None

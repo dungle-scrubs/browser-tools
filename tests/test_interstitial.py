@@ -454,18 +454,18 @@ class TestStealthDaemonWiring:
     """Tests for stealth flag propagation through daemon."""
 
     def test_cdp_handler_accepts_stealth_flag(self) -> None:
-        """CDPHandler should accept and store stealth flag."""
+        """CDPHandler should propagate the stealth flag to its CDP runtime."""
         from browser_tools.mcp_daemon import CDPHandler
 
         handler = CDPHandler(None, mode="full", stealth=True)
-        assert handler._stealth is True
+        assert handler._rt._stealth is True
 
     def test_cdp_handler_defaults_stealth_false(self) -> None:
-        """CDPHandler should default to stealth=False."""
+        """CDPHandler should default to stealth=False on its CDP runtime."""
         from browser_tools.mcp_daemon import CDPHandler
 
         handler = CDPHandler(None)
-        assert handler._stealth is False
+        assert handler._rt._stealth is False
 
     def test_enterprise_detections_not_auto_retried(self) -> None:
         """Enterprise bot protections should not be in auto-retry set."""
