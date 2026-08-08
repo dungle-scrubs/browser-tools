@@ -7,6 +7,7 @@ Simplified CLI for Chrome DevTools MCP with snapshot-based architecture
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import sys
 from typing import Any
@@ -25,6 +26,7 @@ from .chrome_utils import (
     invoke_mcp_tool,
     success_output,
 )
+from .mcp_response import error_response, extract_text_items, text_response
 from .persistent_browser import (
     PersistentChromeController,
     ProjectBrowserConfig,
@@ -41,18 +43,6 @@ from .persistent_browser import (
     save_session_override,
 )
 from .process_utils import validate_local_endpoint
-
-
-def _tool_error(text: str) -> dict[str, Any]:
-    """Build a JSON-RPC error response with a single text block.
-
-    Args:
-        text: Human-readable error message.
-
-    Returns:
-        JSON-RPC response dict flagged as an error.
-    """
-    return {"result": {"content": [{"type": "text", "text": text}], "isError": True}}
 
 
 def create_parser():
@@ -195,7 +185,7 @@ def create_parser():
 
     # profiler_watch - Wait for CPU spike then capture
     profiler_watch = subparsers.add_parser("profiler-watch", help="Profile on CPU spike")
-    profiler_watch.add_argument("--threshold", type=float, default=80.0, help="CPU threshold %")
+    profiler_watch.add_argument("--threshold", type=float, default=80.0, help="CPU threshold percentage")
     profiler_watch.add_argument("--timeout", type=float, default=60.0, help="Max wait seconds")
     profiler_watch.add_argument("--window", type=float, default=3.0, help="Capture window seconds")
     profiler_watch.add_argument("--port", type=int, default=9222, help="Chrome debug port")
@@ -234,8 +224,6 @@ def execute_screenshot_url(args: argparse.Namespace) -> int:
         controller.invoke_tool("new_page", {"url": args.url})
 
         # Step 2: Wait for page to load (wait for common text)
-        import contextlib
-
         with contextlib.suppress(BrowserToolsError):
             controller.invoke_tool("wait_for", {"text": "html"})
 
@@ -347,7 +335,7 @@ def handle_attach_browser(controller_ref: list[Any], args: Any) -> dict[str, Any
     if endpoint is not None:
         endpoint_error = validate_local_endpoint(endpoint)
         if endpoint_error:
-            return _tool_error(f"Error: {endpoint_error}")
+            return error_response(f"Error: {endpoint_error}")
     tab_url = args.get("tab_url")
     profile = args.get("profile")
     mode = args.get("mode", "full")
@@ -356,86 +344,36 @@ def handle_attach_browser(controller_ref: list[Any], args: Any) -> dict[str, Any
     discovered_pid: int | None = None
     if endpoint is None:
         if not profile:
-            return {
-                "result": {
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": (
-                                "Error: pass either 'endpoint' (e.g. http://127.0.0.1:9222) or "
-                                "'profile' (a named profile from list_profiles). With profile alone, "
-                                "browser-tools discovers the running Chrome's debug port automatically."
-                            ),
-                        }
-                    ],
-                    "isError": True,
-                }
-            }
+            return error_response(
+                "Error: pass either 'endpoint' (e.g. http://127.0.0.1:9222) or "
+                "'profile' (a named profile from list_profiles). With profile alone, "
+                "browser-tools discovers the running Chrome's debug port automatically."
+            )
         profile_dir = CACHE_DIR / "profiles" / profile
         if not profile_dir.exists():
-            return {
-                "result": {
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": (
-                                f"Error: profile '{profile}' not found at {profile_dir}. "
-                                "Call list_profiles to see available profiles."
-                            ),
-                        }
-                    ],
-                    "isError": True,
-                }
-            }
+            return error_response(
+                f"Error: profile '{profile}' not found at {profile_dir}. "
+                "Call list_profiles to see available profiles."
+            )
         lock_pid = read_singleton_lock_pid(profile_dir)
         if lock_pid is None or not is_process_alive(lock_pid):
-            return {
-                "result": {
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": (
-                                f"Error: profile '{profile}' has no running Chrome. "
-                                f"Either launch Chrome on this profile and retry, or call "
-                                f"use_browser_session(mode='headed-auth', profile='{profile}') to launch one."
-                            ),
-                        }
-                    ],
-                    "isError": True,
-                }
-            }
+            return error_response(
+                f"Error: profile '{profile}' has no running Chrome. "
+                f"Either launch Chrome on this profile and retry, or call "
+                f"use_browser_session(mode='headed-auth', profile='{profile}') to launch one."
+            )
         port = find_chrome_debug_port(lock_pid)
         if port is None:
-            return {
-                "result": {
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": (
-                                f"Error: Chrome (pid {lock_pid}) holding profile '{profile}' has no "
-                                "--remote-debugging-port flag. Restart it with that flag, or kill it "
-                                f"and call use_browser_session(mode='headed-auth', profile='{profile}')."
-                            ),
-                        }
-                    ],
-                    "isError": True,
-                }
-            }
+            return error_response(
+                f"Error: Chrome (pid {lock_pid}) holding profile '{profile}' has no "
+                "--remote-debugging-port flag. Restart it with that flag, or kill it "
+                f"and call use_browser_session(mode='headed-auth', profile='{profile}')."
+            )
         candidate = f"http://127.0.0.1:{port}"
         if not is_devtools_available(candidate):
             from .persistent_browser import format_dead_port_error
 
-            return {
-                "result": {
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": format_dead_port_error(profile, profile_dir, lock_pid),
-                        }
-                    ],
-                    "isError": True,
-                }
-            }
+            return error_response(format_dead_port_error(profile, profile_dir, lock_pid))
         endpoint = candidate
         discovered_pid = lock_pid
 
@@ -455,22 +393,12 @@ def handle_attach_browser(controller_ref: list[Any], args: Any) -> dict[str, Any
             if actual_dir is not None:
                 break
         if actual_dir is not None and actual_dir != expected_dir:
-            return {
-                "result": {
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": (
-                                f"Error: the Chrome at {endpoint} is running user-data-dir "
-                                f"{actual_dir} (pid {actual_pid}), not the requested profile "
-                                f"'{profile}' ({expected_dir}). Drop the explicit endpoint and call "
-                                f"attach_browser(profile='{profile}') to auto-discover the right port."
-                            ),
-                        }
-                    ],
-                    "isError": True,
-                }
-            }
+            return error_response(
+                f"Error: the Chrome at {endpoint} is running user-data-dir "
+                f"{actual_dir} (pid {actual_pid}), not the requested profile "
+                f"'{profile}' ({expected_dir}). Drop the explicit endpoint and call "
+                f"attach_browser(profile='{profile}') to auto-discover the right port."
+            )
 
     # Create a new controller configured for the external browser
     new_controller = PersistentChromeController(
@@ -494,17 +422,10 @@ def handle_attach_browser(controller_ref: list[Any], args: Any) -> dict[str, Any
     # Enumerate tabs
     tabs = enumerate_tabs(endpoint)
     if not tabs:
-        return {
-            "result": {
-                "content": [
-                    {
-                        "type": "text",
-                        "text": f"Error: E001 - Could not connect to Chrome at {endpoint}. Launch Chrome with --remote-debugging-port=9222",
-                    }
-                ],
-                "isError": True,
-            }
-        }
+        return error_response(
+            f"Error: E001 - Could not connect to Chrome at {endpoint}. "
+            "Launch Chrome with --remote-debugging-port=9222"
+        )
 
     # Auto-select tab if pattern provided
     selected_tab = None
@@ -530,7 +451,7 @@ def handle_attach_browser(controller_ref: list[Any], args: Any) -> dict[str, Any
     if profile and discovered_pid is None:
         lines.append(f"\nProfile: {profile}")
 
-    return {"result": {"content": [{"type": "text", "text": "\n".join(lines)}]}}
+    return text_response("\n".join(lines))
 
 
 def find_listeners_on_endpoint(endpoint: str) -> list[int]:
@@ -574,7 +495,7 @@ def handle_list_profiles(args: Any) -> dict[str, Any]:
 
     profiles = list_profiles()
     if not profiles:
-        return {"result": {"content": [{"type": "text", "text": "No named profiles found."}]}}
+        return text_response("No named profiles found.")
 
     statuses = [describe_profile_runtime(name) for name in profiles]
     lines = ["Named profiles:"]
@@ -605,11 +526,7 @@ def handle_list_profiles(args: Any) -> dict[str, Any]:
             )
 
     payload = {"profiles": statuses, "summary": "\n".join(lines)}
-    return {
-        "result": {
-            "content": [{"type": "text", "text": json.dumps(payload, indent=2, sort_keys=True)}]
-        }
-    }
+    return text_response(json.dumps(payload, indent=2, sort_keys=True))
 
 
 def handle_delete_profile(args: Any) -> dict[str, Any]:
@@ -625,21 +542,11 @@ def handle_delete_profile(args: Any) -> dict[str, Any]:
 
     name = args.get("name", "")
     if not name:
-        return {
-            "result": {
-                "content": [{"type": "text", "text": "Error: profile name is required"}],
-                "isError": True,
-            }
-        }
+        return error_response("Error: profile name is required")
 
     if delete_profile(name):
-        return {"result": {"content": [{"type": "text", "text": f"Profile '{name}' deleted."}]}}
-    return {
-        "result": {
-            "content": [{"type": "text", "text": f"Error: Profile '{name}' not found."}],
-            "isError": True,
-        }
-    }
+        return text_response(f"Profile '{name}' deleted.")
+    return error_response(f"Error: Profile '{name}' not found.")
 
 
 def handle_browser_session_status(args: Any) -> dict[str, Any]:
@@ -653,7 +560,7 @@ def handle_browser_session_status(args: Any) -> dict[str, Any]:
     """
     del args
     text = json.dumps(get_browser_session_status(), indent=2, sort_keys=True)
-    return {"result": {"content": [{"type": "text", "text": text}]}}
+    return text_response(text)
 
 
 def handle_use_browser_session(controller_ref: list[Any], args: Any) -> dict[str, Any]:
@@ -672,16 +579,9 @@ def handle_use_browser_session(controller_ref: list[Any], args: Any) -> dict[str
         if args.get("clear_active_attach", False):
             clear_active_attach_config()
         controller_ref[0] = None
-        return {
-            "result": {
-                "content": [
-                    {
-                        "type": "text",
-                        "text": "Browser session override cleared; project preference will be used.",
-                    }
-                ]
-            }
-        }
+        return text_response(
+            "Browser session override cleared; project preference will be used."
+        )
 
     project_config = load_project_browser_config()
     profile = args.get("profile")
@@ -695,15 +595,17 @@ def handle_use_browser_session(controller_ref: list[Any], args: Any) -> dict[str
             profile = project_config.profile
         if endpoint is None and project_config is not None and mode not in HEADLESS_AUTH_MODES:
             endpoint = project_config.endpoint or project_config.browser_url
-        if profile is None and endpoint is None:
-            profile = "google-auth"
+        # When neither a profile nor an endpoint is given, auth now lands in
+        # this project's own bucket (profile=None) rather than a shared global
+        # "google-auth" named profile, so each project keeps its own login and
+        # the default headless session reuses the same cookies.
 
     # Validate the resolved endpoint (whether from args or the project config)
     # before it is persisted and later dialed.
     if endpoint is not None:
         endpoint_error = validate_local_endpoint(endpoint)
         if endpoint_error:
-            return _tool_error(f"Error: {endpoint_error}")
+            return error_response(f"Error: {endpoint_error}")
 
     config = ProjectBrowserConfig(
         mode=mode,
@@ -736,7 +638,7 @@ def handle_use_browser_session(controller_ref: list[Any], args: Any) -> dict[str
             "without --remote-debugging-port, quit it first so browser-tools can relaunch it with "
             "debugging enabled. Call close_browser to detach; it will not force-quit your browser."
         )
-    return {"result": {"content": [{"type": "text", "text": "\n".join(lines)}]}}
+    return text_response("\n".join(lines))
 
 
 def handle_close_browser(controller_ref: list[Any], fallback: Any, args: Any) -> dict[str, Any]:
@@ -858,17 +760,10 @@ def _camoufox_result_to_mcp(result: dict[str, Any]) -> dict[str, Any]:
     Returns:
         MCP-style response with content array.
     """
-    import json as _json
-
     if "error" in result:
-        return {
-            "result": {
-                "content": [{"type": "text", "text": f"Error: {result['error']}"}],
-                "isError": True,
-            }
-        }
-    text = _json.dumps(result.get("result", result), indent=2)
-    return {"result": {"content": [{"type": "text", "text": text}]}}
+        return error_response(f"Error: {result['error']}")
+    text = json.dumps(result.get("result", result), indent=2)
+    return text_response(text)
 
 
 def choose_live_profile_fallback(
@@ -902,7 +797,7 @@ def choose_live_profile_fallback(
 
 
 def select_default_controller() -> tuple[PersistentChromeController, list[dict[str, Any]] | None]:
-    """Pick a controller when no explicit session is configured.
+    """Pick the controller when no explicit session is configured.
 
     Prefers reusing a browser that is already open over launching another one,
     in priority order: this project's own live session, then a sole live named
@@ -932,7 +827,6 @@ def select_default_controller() -> tuple[PersistentChromeController, list[dict[s
     """
     default = PersistentChromeController(
         headless=True,
-        isolated=True,
         channel="canary",
         force_persistent=True,
     )
@@ -948,6 +842,131 @@ def select_default_controller() -> tuple[PersistentChromeController, list[dict[s
 
     conflict = others if sum(1 for info in others if info.get("named")) > 1 else None
     return default, conflict
+
+
+# ---------------------------------------------------------------------------
+# Session lifecycle: single-tab navigation, close_browser, auth promotion
+# ---------------------------------------------------------------------------
+
+
+def _extract_page_ids(list_response: dict[str, Any]) -> list[int]:
+    """Extract page ids (in listed order) from a list_pages response.
+
+    Args:
+        list_response: Raw JSON-RPC response from list_pages.
+
+    Returns:
+        Ordered list of integer page ids.
+    """
+    from .persistent_browser import PAGE_LINE_PATTERN
+
+    ids: list[int] = []
+    for text in extract_text_items(list_response):
+        for match in PAGE_LINE_PATTERN.finditer(text):
+            try:
+                ids.append(int(match.group(1)))
+            except ValueError:
+                continue
+    return ids
+
+
+def _handle_new_page_single_tab(
+    controller: PersistentChromeController, url: Any
+) -> dict[str, Any]:
+    """Open ``url`` in the single active tab instead of stacking a new one.
+
+    Navigates the existing first tab to the URL, then closes every other tab
+    so the browser holds exactly one page. This is the single-tab model that
+    stops the accumulation the agent otherwise causes by calling new_page.
+
+    Args:
+        controller: Active persistent controller.
+        url: URL to load.
+
+    Returns:
+        The navigate_page response for the reused tab (or a fresh list_pages
+        response if extra tabs were closed).
+    """
+    ids = _extract_page_ids(controller.invoke_tool("list_pages", {}))
+    if not ids:
+        # No tab at all (launch normally opens about:blank); create one.
+        return controller.invoke_tool("new_page", {"url": url})
+
+    controller.invoke_tool("select_page", {"pageId": ids[0]})
+    response = controller.invoke_tool("navigate_page", {"type": "url", "url": url})
+
+    # Close any remaining tabs. Re-list each iteration: closing a page can
+    # renumber the rest, so a stale id list would miss or mis-target one.
+    closed_any = False
+    for _ in range(20):  # hard cap to avoid an infinite loop on misbehavior
+        current = _extract_page_ids(controller.invoke_tool("list_pages", {}))
+        extras = current[1:] if len(current) > 1 else []
+        if not extras:
+            break
+        try:
+            controller.invoke_tool("close_page", {"pageId": extras[0]})
+            closed_any = True
+        except BrowserToolsError:
+            break
+    if closed_any:
+        response = controller.invoke_tool("list_pages", {})
+    return response
+
+
+def _response_signals_auth_wall(response: dict[str, Any]) -> bool:
+    """Return whether a navigation response carries an auth-wall interstitial.
+
+    The daemon appends an interstitial summary to navigation responses; the
+    auth_wall detector fires on login forms and sign-in page titles.
+
+    Args:
+        response: Raw JSON-RPC response from a navigation tool.
+
+    Returns:
+        True when an auth_wall signal is present in the response text.
+    """
+    return any("auth_wall" in text for text in extract_text_items(response))
+
+
+def _maybe_promote_on_auth_wall(
+    controller_ref: list[Any],
+    controller: PersistentChromeController,
+    response: dict[str, Any],
+    url: Any,
+) -> dict[str, Any]:
+    """Promote a headless session to headed when a navigation hits auth.
+
+    Headless Chrome cannot complete an OAuth/login handshake, so when the
+    interstitial detector reports an auth wall on a headless session the
+    headless Chrome is torn down and a headed one is launched on the same
+    profile dir (cookies survive on disk). The caller is told to finish
+    sign-in; future headless calls then reuse the authenticated profile.
+
+    Args:
+        controller_ref: Single-element list holding the active controller.
+        controller: Controller used for the navigation.
+        response: Navigation response to inspect.
+        url: URL to re-navigate in the headed window.
+
+    Returns:
+        The original response, or a promotion notice when promoted.
+    """
+    if not getattr(controller, "headless", False):
+        return response
+    if not _response_signals_auth_wall(response):
+        return response
+    headed = _promote_headless_to_headed(controller, url if isinstance(url, str) else None)
+    if headed is None:
+        return response
+    controller_ref[0] = headed
+    target = url if isinstance(url, str) else "the page"
+    notice = (
+        "Auth required — switched from headless to a headed window on the same "
+        f"profile at {target}. Complete sign-in there, then re-run the action. "
+        "Login persists on disk, so future headless sessions reuse it without "
+        "re-auth."
+    )
+    return text_response(notice)
 
 
 def _format_live_profile_conflict_error(live: list[dict[str, Any]]) -> dict[str, Any]:
@@ -983,12 +1002,39 @@ def _format_live_profile_conflict_error(live: list[dict[str, Any]]) -> dict[str,
             "Or call use_browser_session(mode='headless') to opt into a fresh isolated session.",
         ]
     )
-    return {
-        "result": {
-            "content": [{"type": "text", "text": "\n".join(lines)}],
-            "isError": True,
-        }
-    }
+    return error_response("\n".join(lines))
+
+
+def _promote_headless_to_headed(
+    controller: PersistentChromeController, url: str | None
+) -> PersistentChromeController | None:
+    """Tear down the headless Chrome and relaunch headed on the same profile.
+
+    Args:
+        controller: Headless controller to replace.
+        url: Optional URL to navigate in the headed window.
+
+    Returns:
+        A new headed controller, or None if relaunch failed.
+    """
+    # Quit the headless Chrome + daemon but keep the user-data-dir (cookies).
+    controller.close_owned_browser()
+    headed = PersistentChromeController(
+        headless=False,
+        channel=controller.channel,
+        profile=controller.profile,
+        browser_url=None,
+        force_persistent=True,
+    )
+    headed.mode = controller.mode or "full"
+    try:
+        headed.ensure_browser_state()
+    except BrowserToolsError:
+        return None
+    if url:
+        with contextlib.suppress(BrowserToolsError):
+            headed.invoke_tool("navigate_page", {"type": "url", "url": url})
+    return headed
 
 
 def create_tool_proxy_handlers():
@@ -1050,17 +1096,10 @@ def create_tool_proxy_handlers():
         if tool in ("wait_for_human", "get_cookies"):
             cfox = camoufox_ref[0]
             if cfox is None:
-                return {
-                    "result": {
-                        "content": [
-                            {
-                                "type": "text",
-                                "text": f"Error: {tool} requires an active Camoufox session. Call launch_camoufox first.",
-                            }
-                        ],
-                        "isError": True,
-                    }
-                }
+                return error_response(
+                    f"Error: {tool} requires an active Camoufox session. "
+                    "Call launch_camoufox first."
+                )
             return _camoufox_result_to_mcp(cfox.call_tool(tool, args))
 
         # --- Standard tools routed through Camoufox when active ---
@@ -1068,17 +1107,10 @@ def create_tool_proxy_handlers():
         if cfox is not None and tool in _CAMOUFOX_TOOL_MAP:
             mapped = _CAMOUFOX_TOOL_MAP[tool]
             if mapped is None:
-                return {
-                    "result": {
-                        "content": [
-                            {
-                                "type": "text",
-                                "text": f"Tool '{tool}' is not supported in Camoufox mode. Use the camoufox-specific equivalent.",
-                            }
-                        ],
-                        "isError": True,
-                    }
-                }
+                return error_response(
+                    f"Error: Tool '{tool}' is not supported in Camoufox mode. "
+                    "Use the camoufox-specific equivalent."
+                )
             translated = _translate_args_for_camoufox(tool, args)
             return _camoufox_result_to_mcp(cfox.call_tool(mapped, translated))
 
@@ -1104,6 +1136,18 @@ def create_tool_proxy_handlers():
             return _format_live_profile_conflict_error(live_profile_conflict[0])
         # Use latest controller (may have been swapped by attach_browser)
         active = controller_ref[0] or controller
+
+        # Single active tab: new_page reuses the one tab instead of stacking.
+        if tool == "new_page":
+            url = args.get("url")
+            response = _handle_new_page_single_tab(active, url)
+            return _maybe_promote_on_auth_wall(controller_ref, active, response, url)
+
+        # Headless -> headed auto-promotion when a navigation hits an auth wall.
+        if tool == "navigate_page" and args.get("type", "url") == "url":
+            response = active.invoke_tool(tool, args)
+            return _maybe_promote_on_auth_wall(controller_ref, active, response, args.get("url"))
+
         return active.invoke_tool(tool, args)  # type: ignore[arg-type]
 
     return create_session, call_tool
@@ -1198,29 +1242,15 @@ def _handle_launch_camoufox(camoufox_ref: list[Any], args: Any) -> dict[str, Any
     from .camoufox_session import CamoufoxSession
 
     if camoufox_ref[0] is not None:
-        return {
-            "result": {
-                "content": [
-                    {
-                        "type": "text",
-                        "text": "Camoufox is already running. Call close_camoufox first to restart.",
-                    }
-                ]
-            }
-        }
+        return text_response(
+            "Camoufox is already running. Call close_camoufox first to restart."
+        )
 
     session = CamoufoxSession()
     result = session.call_tool("launch_browser", args)
 
     if "error" in result:
-        return {
-            "result": {
-                "content": [
-                    {"type": "text", "text": f"Error launching Camoufox: {result['error']}"}
-                ],
-                "isError": True,
-            }
-        }
+        return error_response(f"Error launching Camoufox: {result['error']}")
 
     camoufox_ref[0] = session
 
@@ -1233,7 +1263,7 @@ def _handle_launch_camoufox(camoufox_ref: list[Any], args: Any) -> dict[str, Any
         "",
         "Call close_camoufox to switch back to Chrome.",
     ]
-    return {"result": {"content": [{"type": "text", "text": "\n".join(lines)}]}}
+    return text_response("\n".join(lines))
 
 
 def _handle_close_camoufox(camoufox_ref: list[Any]) -> dict[str, Any]:
@@ -1247,21 +1277,12 @@ def _handle_close_camoufox(camoufox_ref: list[Any]) -> dict[str, Any]:
     """
     session = camoufox_ref[0]
     if session is None:
-        return {"result": {"content": [{"type": "text", "text": "No Camoufox session is active."}]}}
+        return text_response("No Camoufox session is active.")
 
     session.call_tool("close_browser", {})
     camoufox_ref[0] = None
 
-    return {
-        "result": {
-            "content": [
-                {
-                    "type": "text",
-                    "text": "Camoufox closed. Standard tools now route through Chrome again.",
-                }
-            ]
-        }
-    }
+    return text_response("Camoufox closed. Standard tools now route through Chrome again.")
 
 
 if __name__ == "__main__":

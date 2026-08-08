@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-# Import the sets from mcp_daemon for testing
-from browser_tools.mcp_daemon import (
+# Import the sets from the tool registry (single source of truth)
+from browser_tools.tool_registry import (
     CDP_TOOLS,
     INSPECT_BLOCKED_TOOLS,
     INSPECT_WARN_TOOLS,

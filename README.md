@@ -75,6 +75,8 @@ browser_tools_session.py     CLI entry point
         |
         +-- chrome_config.py          Tool schemas & validation
         +-- chrome_utils.py           MCP subprocess invocation, formatting
+        +-- mcp_response.py           Single owner of MCP response envelopes
+        +-- tool_registry.py          Single source of truth for tool routing flags
         +-- persistent_browser.py     Chrome lifecycle, daemon, profiles
         |       +-- browser_state.py     Persisted state dataclasses
         |       +-- mcp_session.py       Short-lived MCP session wrapper
@@ -82,7 +84,7 @@ browser_tools_session.py     CLI entry point
         |       +-- process_utils.py      Chrome process/port utilities
         |       +-- mcp_daemon.py         Long-lived MCP daemon
         |               +-- cdp_handler.py     CDP tool implementations
-        |               +-- cdp_constants.py   CDP toolset definitions
+        |               +-- cdp_constants.py   Tuning constants (timeouts, thresholds)
         |               +-- cdp_client.py      CDP WebSocket client
         |               +-- frame_manager.py   Frame tree management
         |               +-- interstitial.py    Challenge detection

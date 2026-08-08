@@ -42,49 +42,51 @@ logger = logging.getLogger(__name__)
 
 try:
     from .cdp_constants import (
-        CDP_TOOLS,
-        INSPECT_BLOCKED_TOOLS,
-        INSPECT_WARN_TOOLS,  # type: ignore[import-untyped]
         INTERSTITIAL_AUTO_RETRY_TYPES,  # type: ignore[import-untyped]
         INTERSTITIAL_MAX_RETRIES,  # type: ignore[import-untyped]
         INTERSTITIAL_RETRY_DELAY_SECONDS,  # type: ignore[import-untyped]
-        LOCAL_TOOLS,
-        NAVIGATION_TOOLS,
         REQUEST_TIMEOUT_SECONDS,
         SCREENSHOT_BLANK_MAX_RETRIES,
         SCREENSHOT_BLANK_RETRY_DELAY_SECONDS,
     )
-    from .cdp_handler import (
-        CDPHandler,
-        make_error,
-        make_text,
-    )
+    from .cdp_handler import CDPHandler
+    from .mcp_response import append_text, make_error, make_text
     from .screenshot_utils import (
         extract_screenshot_png_b64,
         screenshot_looks_blank,
     )
-except ImportError:
-    from cdp_constants import (  # type: ignore[import-untyped,no-redef]
+    from .tool_registry import (
         CDP_TOOLS,
         INSPECT_BLOCKED_TOOLS,
-        INSPECT_WARN_TOOLS,  # type: ignore[import-untyped]  # noqa: F401
+        LOCAL_TOOLS,
+        NAVIGATION_TOOLS,
+    )
+except ImportError:
+    from cdp_constants import (  # type: ignore[import-untyped,no-redef]
         INTERSTITIAL_AUTO_RETRY_TYPES,  # type: ignore[import-untyped]  # noqa: F401
         INTERSTITIAL_MAX_RETRIES,  # type: ignore[import-untyped]  # noqa: F401
         INTERSTITIAL_RETRY_DELAY_SECONDS,  # type: ignore[import-untyped]  # noqa: F401
-        LOCAL_TOOLS,
-        NAVIGATION_TOOLS,
         REQUEST_TIMEOUT_SECONDS,
         SCREENSHOT_BLANK_MAX_RETRIES,
         SCREENSHOT_BLANK_RETRY_DELAY_SECONDS,
     )
     from cdp_handler import (  # type: ignore[import-untyped,no-redef]
         CDPHandler,
+    )
+    from mcp_response import (  # type: ignore[import-untyped,no-redef]
+        append_text,
         make_error,
         make_text,
     )
     from screenshot_utils import (  # type: ignore[import-untyped,no-redef]
         extract_screenshot_png_b64,
         screenshot_looks_blank,
+    )
+    from tool_registry import (  # type: ignore[import-untyped,no-redef]
+        CDP_TOOLS,
+        INSPECT_BLOCKED_TOOLS,
+        LOCAL_TOOLS,
+        NAVIGATION_TOOLS,
     )
 
 IDLE_TIMEOUT_SECONDS = 30 * 60  # 30 minutes
@@ -469,11 +471,11 @@ def _handle_client(
                         retries_used=retries_used,
                     )
                     if warning:
-                        _append_text_to_response(response, f"\n\n{warning}")
+                        append_text(response, f"\n\n{warning}")
                 elif detection_result and detection_result.get("auto_retried"):
                     # Challenge was detected but auto-cleared
                     retries_used = detection_result.get("retries_used", 0)
-                    _append_text_to_response(
+                    append_text(
                         response,
                         f"\n\n✅ Anti-bot challenge detected and auto-cleared "
                         f"after {retries_used} retry(ies).",
@@ -587,7 +589,7 @@ def _take_screenshot_with_paint_gate(
 
     # Exhausted retries — return the last attempt with a diagnostic note
     # so the caller knows the daemon already tried to wait through this.
-    _append_text_to_response(
+    append_text(
         last_response,
         "\n\n⚠️ Screenshot looked near-uniform after "
         f"{SCREENSHOT_BLANK_MAX_RETRIES + 1} attempts with paint-ready waits. "
@@ -633,21 +635,6 @@ def _handle_local_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         return make_text("attach_browser handled by session wrapper")
 
     return make_error(f"Unknown local tool: {name}")
-
-
-def _append_text_to_response(response: dict[str, Any], text: str) -> None:
-    """Append text content to an existing JSON-RPC response.
-
-    Args:
-        response: JSON-RPC response dict to mutate.
-        text: Text to append.
-    """
-    result = response.get("result", {})
-    content = result.get("content", [])
-    if isinstance(content, list):
-        content.append({"type": "text", "text": text})
-        result["content"] = content
-        response["result"] = result
 
 
 def _cleanup_files(socket_path: str, pid_file: str) -> None:

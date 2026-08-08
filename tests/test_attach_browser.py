@@ -291,22 +291,27 @@ class TestAttachBrowserTool:
         assert controller is not None
         assert controller.profile == "google-auth"
 
-    def test_use_browser_session_headed_defaults_to_google_auth(
+    def test_use_browser_session_headed_defaults_to_project_bucket(
         self,
         monkeypatch,
         tmp_path: Path,
     ) -> None:
-        """Explicit headed mode should default to the google-auth profile."""
+        """Explicit headed mode with no profile uses this project's own bucket.
+
+        Auth lands per-project (not a shared global "google-auth" named
+        profile) so each project keeps its own login and the default headless
+        session reuses the same cookies.
+        """
         monkeypatch.setattr("browser_tools.persistent_browser.CACHE_DIR", tmp_path / "cache")
         monkeypatch.setenv("CLAUDE_CWD", str(tmp_path))
 
         response = handle_use_browser_session([None], {"mode": "headed"})
         override = load_session_override()
 
-        assert "Profile: google-auth" in response["result"]["content"][0]["text"]
+        assert "Browser session override set: headed" in response["result"]["content"][0]["text"]
         assert override is not None
         assert override.mode == "headed"
-        assert override.profile == "google-auth"
+        assert override.profile is None
 
     def test_use_browser_session_headless_auth_uses_project_profile(
         self,

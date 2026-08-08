@@ -35,6 +35,7 @@ from .browser_state import (  # re-exported for consumers
 from .chrome_config import get_mcp_command
 from .chrome_utils import MCPInvocationError
 from .daemon_client import DaemonClient
+from .mcp_response import extract_text_items  # re-exported for consumers
 from .mcp_session import ChromeMcpSession  # noqa: TC001  # re-exported + used in type annotation
 from .process_utils import (
     build_browser_command,
@@ -53,8 +54,15 @@ from .process_utils import (
     resolve_system_profile_dir,
     select_tab_by_url,  # type: ignore[reportUnusedImport]  # noqa: F401  # re-exported for tests
     terminate_process,
+    terminate_process_and_wait,
     wait_for_devtools,
 )
+from .project_identity import (
+    get_project_dir,
+    get_project_id,
+    resolve_project_root,
+)
+from .tool_registry import INTERACTION_TOOLS
 
 CACHE_DIR = Path.home() / ".cache" / "tool-proxy" / "browser-tools"
 DEFAULT_BROWSER_TIMEOUT_SECONDS = 60
@@ -666,6 +674,56 @@ class PersistentChromeController:
         for suffix in (".sock", ".daemon.pid"):
             (CACHE_DIR / f"{self.session_key}{suffix}").unlink(missing_ok=True)
 
+    def stop_daemon_only(self) -> bool:
+        """Stop the MCP daemon for this session, leaving the browser running.
+
+        Used by ``close_browser`` when detaching from an externally attached
+        browser (one browser-tools did not launch): the daemon is ours, the
+        Chrome is the user's.
+
+        Returns:
+            True when a daemon was found and stopped.
+        """
+        state = BrowserState.from_path(self.state_path)
+        stopped = False
+        if state is not None and state.daemon_pid is not None and is_process_alive(state.daemon_pid):
+            terminate_process_and_wait(state.daemon_pid, timeout=5)
+            stopped = True
+            state.daemon_pid = None
+            state.daemon_socket = None
+            state.save(self.state_path)
+        for suffix in (".sock", ".daemon.pid"):
+            (CACHE_DIR / f"{self.session_key}{suffix}").unlink(missing_ok=True)
+        return stopped
+
+    def close_owned_browser(self) -> dict[str, Any]:
+        """Quit a tool-launched Chrome and stop its daemon, keeping the profile.
+
+        Used by ``close_browser`` (owned teardown) and by the headless-to-
+        headed promotion. Cookies and login state survive on disk because the
+        user-data-dir is left intact; only the running processes and their
+        lock/state artifacts are cleared so the next call relaunches cleanly
+        into the same profile (no re-auth).
+
+        Returns:
+            Dict with ``daemon_stopped`` and ``chrome_quit`` booleans.
+        """
+        state = BrowserState.from_path(self.state_path)
+        result: dict[str, Any] = {"daemon_stopped": False, "chrome_quit": False}
+        if state is not None:
+            if state.daemon_pid is not None and is_process_alive(state.daemon_pid):
+                terminate_process_and_wait(state.daemon_pid, timeout=5)
+                result["daemon_stopped"] = True
+            if state.pid is not None and is_process_alive(state.pid):
+                terminate_process_and_wait(state.pid, timeout=5)
+                result["chrome_quit"] = True
+            if state.user_data_dir:
+                clean_stale_singleton_lock(Path(state.user_data_dir))
+        self.state_path.unlink(missing_ok=True)
+        for suffix in (".sock", ".daemon.pid", ".lock"):
+            (CACHE_DIR / f"{self.session_key}{suffix}").unlink(missing_ok=True)
+        return result
+
     def _spawn_daemon(self, state: BrowserState, mcp_command: list[str]) -> None:
         """Spawn a new MCP daemon broker process.
 
@@ -748,6 +806,32 @@ class PersistentChromeController:
         state.daemon_socket = socket_path
         state.save(self.state_path)
 
+    def find_live_state(self) -> BrowserState | None:
+        """Return a reachable browser state for this controller, or None.
+
+        Checks, in order and without launching anything: the saved state
+        file (when it still describes a live browser), a live Chrome holding
+        this controller's user-data-dir (discovered via the singleton lock),
+        and an external attach endpoint. Used both as the fast path inside
+        :meth:`ensure_browser_state` and by the session selector to decide
+        whether this project already has a running browser to reuse.
+
+        Returns:
+            A usable BrowserState, or None when nothing live is reachable.
+        """
+        state = BrowserState.from_path(self.state_path)
+        if state and self._is_state_usable(state):
+            return state
+
+        if self.browser_url:
+            if is_devtools_available(self.browser_url):
+                return self._make_state(
+                    browser_url=self.browser_url, pid=None, user_data_dir=None
+                )
+            return None
+
+        return self._try_reuse_existing_chrome(self.user_data_dir)
+
     def ensure_browser_state(self) -> BrowserState:
         """Return a live browser state, relaunching if necessary.
 
@@ -782,20 +866,17 @@ class PersistentChromeController:
         Raises:
             MCPInvocationError: If no browser can be launched or connected.
         """
-        state = BrowserState.from_path(self.state_path)
-        if state and self._is_state_usable(state):
-            state.last_used_at = time.time()
-            state.save(self.state_path)
-            return state
+        live = self.find_live_state()
+        if live is not None:
+            live.last_used_at = time.time()
+            live.save(self.state_path)
+            return live
 
         if self.browser_url:
-            state = self._make_state(browser_url=self.browser_url, pid=None, user_data_dir=None)
-            if not is_devtools_available(state.browser_url):
-                raise MCPInvocationError(
-                    f"Chrome remote debugging endpoint is unavailable: {state.browser_url}"
-                )
-            state.save(self.state_path)
-            return state
+            # External endpoint that is not reachable: nothing to launch.
+            raise MCPInvocationError(
+                f"Chrome remote debugging endpoint is unavailable: {self.browser_url}"
+            )
 
         executable = resolve_chrome_executable(self.channel)
         if executable is None:
@@ -805,16 +886,6 @@ class PersistentChromeController:
 
         user_data_dir = self.user_data_dir
         user_data_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-
-        # If a live Chrome already holds this user-data-dir, reuse it instead
-        # of trying to launch a second instance (which would fail since Chrome
-        # enforces single-instance per profile). This commonly happens when a
-        # prior wrapper invocation's saved state was invalidated but its Chrome
-        # is still running.
-        reused = self._try_reuse_existing_chrome(user_data_dir)
-        if reused is not None:
-            reused.save(self.state_path)
-            return reused
 
         # If a Chrome process holds this profile but its debug port isn't
         # reachable, refuse to launch a second instance (Chrome's
@@ -1004,10 +1075,12 @@ class PersistentChromeController:
         """
         if state.browser_url != (self.browser_url or state.browser_url):
             return False
-        # channel/isolated select the on-disk profile dir, so a mismatch means
-        # a different bucket; headless/viewport are presentation-only and must
-        # NOT force a relaunch (that would abandon the logged-in profile).
-        if state.channel != self.channel or state.isolated != self.isolated:
+        # channel selects the on-disk profile dir, so a mismatch means a
+        # different bucket. ``isolated`` no longer participates (one bucket
+        # per project regardless of isolated/headed/headless), and headless /
+        # viewport are presentation-only and must NOT force a relaunch (that
+        # would abandon the logged-in profile).
+        if state.channel != self.channel:
             return False
         # For auto-managed browsers, confirm the saved state still describes the
         # profile dir this controller resolves to, so recorded state can't
@@ -1121,19 +1194,6 @@ def normalize_tool_params(tool_name: str, params: dict[str, Any]) -> dict[str, A
     return normalized
 
 
-INTERACTION_TOOLS = frozenset(
-    {
-        "click",
-        "hover",
-        "fill",
-        "fill_form",
-        "drag",
-        "press_key",
-        "upload_file",
-    }
-)
-
-
 def needs_pre_snapshot(tool_name: str) -> bool:
     """Decide whether a snapshot should be taken before the tool runs.
 
@@ -1216,30 +1276,6 @@ def resolve_page_id_by_url(response: dict[str, Any], target_url: str) -> int | N
     return None
 
 
-def extract_text_items(response: dict[str, Any]) -> list[str]:
-    """Extract all text content items from an MCP response.
-
-    Args:
-        response: Raw JSON-RPC response.
-
-    Returns:
-        List of text strings from the response content array.
-    """
-    result = response.get("result")
-    if not isinstance(result, dict):
-        return []
-    content = result.get("content")
-    if not isinstance(content, list):
-        return []
-    texts: list[str] = []
-    for item in content:
-        if isinstance(item, dict) and item.get("type") == "text":
-            text = item.get("text")
-            if isinstance(text, str):
-                texts.append(text)
-    return texts
-
-
 def is_recoverable_daemon_error(exc: MCPInvocationError) -> bool:
     """Return whether a daemon transport failure is safe to retry once.
 
@@ -1292,21 +1328,27 @@ def build_daemon_command(
 def get_project_cwd() -> Path:
     """Return the project working directory used for browser preferences.
 
+    Reads the harness-provided project directory (new canonical
+    ``TOOL_PROXY_PROJECT_DIR`` name first, legacy ``CLAUDE_CWD`` as fallback)
+    so browser-tools is not coupled to one harness's env var name.
+
     Returns:
         Absolute project working directory path.
     """
-    return Path(os.environ.get("CLAUDE_CWD") or os.getcwd()).expanduser().resolve()
+    return get_project_dir()
 
 
 def _project_key_suffix() -> str:
     """Return the short hash identifying the current project's config files.
 
+    Keyed on the resolved project root (git root, else cwd) rather than the
+    raw working directory so config/state files stay stable as the agent
+    moves between subdirectories of one repository.
+
     Returns:
-        16-char hex suffix derived from CLAUDE_PROJECT_ID and the project cwd.
+        16-char hex suffix derived from CLAUDE_PROJECT_ID and the project root.
     """
-    project_id = os.environ.get("CLAUDE_PROJECT_ID") or ""
-    project_cwd = str(get_project_cwd())
-    raw_key = f"{project_id}|{project_cwd}"
+    raw_key = f"{get_project_id()}|{resolve_project_root()}"
     return hashlib.sha1(raw_key.encode("utf-8")).hexdigest()[:16]
 
 
@@ -1635,31 +1677,34 @@ def build_session_key(
 ) -> str:
     """Build a stable key for the on-disk profile of a non-named session.
 
-    The key deliberately excludes presentation-only settings (``headless``,
-    ``viewport``): a headed and a headless call from the same project must
-    resolve to the same ``user-data-dir`` so cookies and login state survive
-    when a consumer switches between them. ``channel`` is included because
-    different Chrome channels are different binaries that should not share a
-    profile directory, and ``isolated`` is included because throwaway sessions
-    must not collide with the persistent default bucket.
+    One repository is one project is one browser: the key is derived from
+    the resolved project root (git root, else cwd) and channel only, so a
+    headed and a headless call - or an isolated and a persistent call - from
+    the same project resolve to the same user-data-dir and reuse one Chrome
+    instead of fragmenting into several and losing login state.
+
+    ``isolated`` is accepted for backward compatibility but no longer
+    participates in the key: throwaway and persistent sessions share the
+    project bucket so auth survives. ``browser_url`` still partitions,
+    because an externally attached Chrome is genuinely a different browser.
+    ``channel`` partitions because different Chrome channels are different
+    binaries that must not share a profile directory.
 
     Args:
         browser_url: Explicit remote debugging endpoint, if any.
-        isolated: Whether the browser uses a dedicated throwaway profile.
+        isolated: Ignored (kept for call-site compatibility).
         channel: Chrome channel.
 
     Returns:
         Deterministic short hash identifying the browser session bucket.
     """
-    project_id = os.environ.get("CLAUDE_PROJECT_ID") or ""
-    project_cwd = os.environ.get("CLAUDE_CWD") or os.getcwd()
+    del isolated  # See docstring: no longer fragments the per-project bucket.
     raw_key = "|".join(
         [
             browser_url or "auto",
-            project_id,
-            project_cwd,
+            get_project_id(),
+            str(resolve_project_root()),
             channel,
-            str(isolated),
         ]
     )
     return hashlib.sha1(raw_key.encode("utf-8")).hexdigest()[:16]
@@ -1905,6 +1950,22 @@ def delete_profile(name: str) -> bool:
         return False
     if not profile_dir.exists() or not profile_dir.is_dir():
         return False
+
+    # Quit the Chrome process holding this profile before removing the
+    # directory; otherwise delete_profile leaves an orphaned Chrome running on
+    # a now-deleted user-data-dir (the exact "can't close them" accumulation
+    # this fixes). Also stop its MCP daemon if one is recorded.
+    lock_pid = read_singleton_lock_pid(profile_dir)
+    if lock_pid is not None and is_process_alive(lock_pid):
+        terminate_process_and_wait(lock_pid, timeout=5)
+    session_key = f"profile_{name}"
+    daemon_pid_file = CACHE_DIR / f"{session_key}.daemon.pid"
+    try:
+        daemon_pid = int(daemon_pid_file.read_text().strip())
+    except (OSError, ValueError):
+        daemon_pid = None
+    if daemon_pid is not None and is_process_alive(daemon_pid):
+        terminate_process_and_wait(daemon_pid, timeout=5)
 
     # Remove the profile directory
     shutil.rmtree(profile_dir, ignore_errors=True)

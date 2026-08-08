@@ -63,86 +63,14 @@ SCREENSHOT_BLANK_MAX_RETRIES = _blank_max_retries
 SCREENSHOT_BLANK_BYTES_PER_PIXEL_THRESHOLD = _blank_bpp
 SCREENSHOT_BLANK_LUMINANCE_STDDEV_THRESHOLD = _blank_stddev
 
-# Frame-aware tools handled by CDP client, not MCP subprocess
-CDP_TOOLS = frozenset(
-    {
-        "list_frames",
-        "select_frame",
-        "reset_frame",
-        "get_frame_storage",
-        "get_frame_events",
-        # Accessibility tools (Accessibility CDP domain)
-        "ax_find",
-        "ax_node",
-        # Page export/capture tools (Page CDP domain)
-        "export_pdf",
-        "screenshot_element",
-        "screencast_start",
-        "screencast_stop",
-        # Semantic wait tools (Runtime.evaluate -- needs async CDP, D-006)
-        "wait_idle",
-        "wait_stable",
-        # Content extraction tools (Runtime.evaluate -- needs async CDP, D-006)
-        "get_text",
-        "get_html",
-        "get_attr",
-        # Element query tools (Runtime.evaluate)
-        "element_exists",
-        "element_visible",
-    }
-)
-
-# Tools handled locally by the daemon (no MCP or CDP needed)
-LOCAL_TOOLS = frozenset(
-    {
-        "attach_browser",
-        "list_profiles",
-        "delete_profile",
-    }
-)
-
-# Interaction tools blocked in inspect mode
-INSPECT_BLOCKED_TOOLS = frozenset(
-    {
-        "click",
-        "hover",
-        "fill",
-        "fill_form",
-        "drag",
-        "press_key",
-        "upload_file",
-        "handle_dialog",
-        "type_text",
-    }
-)
-
-# Navigation tools that trigger interstitial detection
-NAVIGATION_TOOLS = frozenset(
-    {
-        "navigate_page",
-        "new_page",
-    }
-)
-
-# Navigation tools that get a warning in inspect mode
-INSPECT_WARN_TOOLS = frozenset(
-    {
-        "navigate_page",
-        "new_page",
-        "close_page",
-    }
-)
-
+# Tool routing and behavior sets (CDP_TOOLS, LOCAL_TOOLS, INSPECT_BLOCKED_TOOLS,
+# NAVIGATION_TOOLS, INSPECT_WARN_TOOLS, INTERACTION_TOOLS) now live in
+# tool_registry.py as the single source of truth. Import them from there.
 
 __all__ = [
-    "CDP_TOOLS",
-    "INSPECT_BLOCKED_TOOLS",
-    "INSPECT_WARN_TOOLS",
     "INTERSTITIAL_AUTO_RETRY_TYPES",
     "INTERSTITIAL_MAX_RETRIES",
     "INTERSTITIAL_RETRY_DELAY_SECONDS",
-    "LOCAL_TOOLS",
-    "NAVIGATION_TOOLS",
     "REQUEST_TIMEOUT_SECONDS",
     "SCREENSHOT_BLANK_BYTES_PER_PIXEL_THRESHOLD",
     "SCREENSHOT_BLANK_LUMINANCE_STDDEV_THRESHOLD",

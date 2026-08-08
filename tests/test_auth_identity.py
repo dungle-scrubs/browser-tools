@@ -28,7 +28,7 @@ from browser_tools.process_utils import validate_local_endpoint
 
 
 class TestBuildSessionKey:
-    """build_session_key must key only on durable identity inputs."""
+    """build_session_key must key only on durable project identity."""
 
     def test_headed_and_headless_share_a_bucket(self) -> None:
         """Presentation flags must not change the profile directory."""
@@ -42,11 +42,25 @@ class TestBuildSessionKey:
         b = build_session_key(browser_url=None, isolated=False, channel="stable")
         assert a != b
 
-    def test_isolated_changes_bucket(self) -> None:
-        """Throwaway sessions must not collide with the persistent default."""
+    def test_isolated_does_not_fragment_a_project(self) -> None:
+        """One project is one bucket regardless of the isolated flag.
+
+        Collapsing isolated out of the key is what stops a project from
+        spawning a second Chrome and losing its login when a headed-auth call
+        (isolated=False) and a default headless call (isolated=True) land in
+        different directories.
+        """
         default = build_session_key(browser_url=None, isolated=False, channel="canary")
         isolated = build_session_key(browser_url=None, isolated=True, channel="canary")
-        assert default != isolated
+        assert default == isolated
+
+    def test_external_endpoint_changes_bucket(self) -> None:
+        """An explicitly attached browser is a different browser."""
+        auto = build_session_key(browser_url=None, isolated=False, channel="canary")
+        attached = build_session_key(
+            browser_url="http://127.0.0.1:9222", isolated=False, channel="canary"
+        )
+        assert auto != attached
 
 
 class TestControllerProfileDir:

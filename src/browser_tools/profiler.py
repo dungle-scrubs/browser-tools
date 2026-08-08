@@ -261,7 +261,7 @@ def main():
 
     # Wait for high CPU
     watch = subparsers.add_parser("watch", help="Wait for high CPU then capture")
-    watch.add_argument("--threshold", type=float, default=80.0, help="CPU threshold %")
+    watch.add_argument("--threshold", type=float, default=80.0, help="CPU threshold percentage")
     watch.add_argument("--timeout", type=float, default=60.0, help="Max wait time")
     watch.add_argument("--window", type=float, default=3.0, help="Capture window after spike")
 
