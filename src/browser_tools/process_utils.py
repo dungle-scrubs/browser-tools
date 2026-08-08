@@ -16,6 +16,7 @@ import shutil
 import signal
 import socket
 import subprocess
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -114,6 +115,41 @@ def resolve_chrome_executable(channel: str) -> str | None:
     return None
 
 
+def resolve_system_profile_dir(channel: str) -> Path | None:
+    """Locate the user's everyday Chrome profile directory for a channel.
+
+    This is the real profile the user browses with day to day (cookies,
+    extensions, history), NOT one of browser-tools' private automation
+    profiles. Used by ``mode='real'`` so automation drives the same Chrome
+    the user already has, giving a single dock icon that closes normally.
+
+    Args:
+        channel: Requested Chrome channel.
+
+    Returns:
+        Path to the real user-data-dir, or None on an unsupported platform
+        or channel.
+    """
+    home = Path.home()
+    if sys.platform == "darwin":
+        mac_dirs = {
+            "canary": "Google/Chrome Canary",
+            "stable": "Google/Chrome",
+            "beta": "Google/Chrome Beta",
+            "dev": "Google/Chrome Dev",
+        }
+        rel = mac_dirs.get(channel)
+        return home / "Library" / "Application Support" / rel if rel else None
+    linux_dirs = {
+        "canary": ".config/google-chrome-unstable",
+        "stable": ".config/google-chrome",
+        "beta": ".config/google-chrome-beta",
+        "dev": ".config/google-chrome-unstable",
+    }
+    rel = linux_dirs.get(channel)
+    return home / rel if rel else None
+
+
 def build_browser_command(
     *,
     executable: str,
@@ -121,6 +157,7 @@ def build_browser_command(
     user_data_dir: Path,
     headless: bool,
     viewport: str | None,
+    system_profile: bool = False,
 ) -> list[str]:
     """Build the Chrome launch command for a persistent remote-debugging session.
 
@@ -130,6 +167,9 @@ def build_browser_command(
         user_data_dir: Dedicated browser profile directory.
         headless: Whether to launch headless.
         viewport: Initial window size formatted as WIDTHxHEIGHT.
+        system_profile: When True the user-data-dir is the user's real everyday
+            profile (mode='real'); ``--disable-sync`` is omitted so Google sign-in
+            and sync keep working as they do in the user's normal browser.
 
     Returns:
         Command list for subprocess.Popen.
@@ -140,8 +180,9 @@ def build_browser_command(
         f"--user-data-dir={user_data_dir}",
         "--no-first-run",
         "--no-default-browser-check",
-        "--disable-sync",
     ]
+    if not system_profile:
+        command.append("--disable-sync")
     if headless:
         command.append("--headless=new")
     if viewport:
@@ -381,6 +422,36 @@ def find_listeners_on_port(port: int) -> list[int]:
         if pid not in pids:
             pids.append(pid)
     return pids
+
+
+def read_process_start_time(pid: int) -> str | None:
+    """Read a process's start time, used as an identity token across signals.
+
+    A PID alone is not an identity: the kernel recycles it, so a PID that was
+    Chrome a moment ago can be an unrelated process by the time a signal is
+    sent. The (pid, start time) pair is stable for the lifetime of a process and
+    is not reused, so it is safe to compare before signalling.
+
+    Args:
+        pid: PID to inspect.
+
+    Returns:
+        The ``ps`` start-time string, or None when the process is gone or
+        unreadable.
+    """
+    try:
+        result = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "lstart="],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return None
+    if result.returncode != 0:
+        return None
+    token = result.stdout.strip()
+    return token or None
 
 
 def is_process_alive(pid: int) -> bool:

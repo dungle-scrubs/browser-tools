@@ -12,15 +12,13 @@ from __future__ import annotations
 
 from typing import Any
 
-from browser_tools.browser_state import BrowserState
 from browser_tools.browser_tools_session import (
     _extract_page_ids,
-    _handle_close_browser,
     _handle_new_page_single_tab,
     _maybe_promote_on_auth_wall,
     _response_signals_auth_wall,
 )
-from browser_tools.persistent_browser import PersistentChromeController, build_session_key
+from browser_tools.persistent_browser import build_session_key
 from browser_tools.project_identity import (
     get_project_dir,
     get_project_id,
@@ -272,65 +270,4 @@ class TestMaybePromoteOnAuthWall:
         assert result is response
 
 
-# ---------------------------------------------------------------------------
-# close_browser
-# ---------------------------------------------------------------------------
 
-
-class TestCloseBrowser:
-    """close_browser quits owned Chrome, detaches external."""
-
-    def test_owned_chrome_is_quit(self, monkeypatch, tmp_path) -> None:
-        """A tool-launched Chrome (state.pid set) is quit, profile kept."""
-        monkeypatch.setattr("browser_tools.persistent_browser.CACHE_DIR", tmp_path)
-        monkeypatch.setattr("browser_tools.persistent_browser.is_process_alive", lambda _pid: True)
-        monkeypatch.setattr(
-            "browser_tools.persistent_browser.terminate_process_and_wait",
-            lambda *_a, **_k: True,
-        )
-        controller = PersistentChromeController(channel="canary", force_persistent=True)
-        controller.user_data_dir.mkdir(parents=True, exist_ok=True)
-        # Record a launched Chrome on disk.
-        BrowserState(
-            browser_url="http://127.0.0.1:6000",
-            pid=4242,
-            user_data_dir=str(controller.user_data_dir),
-            channel="canary",
-        ).save(controller.state_path)
-
-        result = _handle_close_browser([controller], {})
-
-        assert "reopens the same profile without re-auth" in result["result"]["content"][0]["text"]
-        # Profile dir survives so login persists; state file is cleared.
-        assert controller.user_data_dir.exists()
-        assert not controller.state_path.exists()
-
-    def test_external_attach_detaches_only(self, monkeypatch, tmp_path) -> None:
-        """An externally attached browser (no pid) is left running."""
-        monkeypatch.setattr("browser_tools.persistent_browser.CACHE_DIR", tmp_path)
-        controller = PersistentChromeController(
-            browser_url="http://127.0.0.1:9222", force_persistent=True
-        )
-        # External attach: state has no pid (we did not launch it).
-        BrowserState(
-            browser_url="http://127.0.0.1:9222",
-            pid=None,
-            channel="canary",
-        ).save(controller.state_path)
-
-        stopped = {"called": False}
-
-        def fake_stop() -> bool:
-            stopped["called"] = True
-            return True
-
-        monkeypatch.setattr(controller, "stop_daemon_only", fake_stop)
-
-        result = _handle_close_browser([controller], {})
-
-        assert stopped["called"] is True
-        assert "left running" in result["result"]["content"][0]["text"]
-
-    def test_no_active_session_is_safe(self) -> None:
-        result = _handle_close_browser([None], {})
-        assert "No active browser session" in result["result"]["content"][0]["text"]

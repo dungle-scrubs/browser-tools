@@ -93,6 +93,39 @@ IDLE_TIMEOUT_SECONDS = 30 * 60  # 30 minutes
 MCP_INIT_TIMEOUT_SECONDS = 60
 
 
+def _terminate_owned_chrome(chrome_pid: int | None, chrome_owned: bool) -> None:
+    """Quit the tool-launched Chrome when the daemon shuts down or idles out.
+
+    Only fires when browser-tools launched Chrome into a private automation
+    profile it owns; an externally attached or real-profile Chrome is never
+    touched. Sends SIGTERM, then SIGKILL if it does not exit promptly, so the
+    user never has to hunt for and kill an orphaned automation browser.
+
+    Args:
+        chrome_pid: PID of the tool-launched Chrome, if known.
+        chrome_owned: Whether that Chrome is a private profile safe to quit.
+
+    Returns:
+        None.
+    """
+    if not chrome_owned or chrome_pid is None:
+        return
+    try:
+        from .process_utils import is_process_alive, terminate_process
+    except ImportError:
+        from browser_tools.process_utils import is_process_alive, terminate_process
+
+    if not is_process_alive(chrome_pid):
+        return
+    terminate_process(chrome_pid)  # SIGTERM
+    deadline = time.time() + 5.0
+    while time.time() < deadline and is_process_alive(chrome_pid):
+        time.sleep(0.1)
+    if is_process_alive(chrome_pid):
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.kill(chrome_pid, signal.SIGKILL)
+
+
 def main(
     socket_path: str,
     pid_file: str,
@@ -100,6 +133,8 @@ def main(
     browser_url: str | None = None,
     mode: str = "full",
     stealth: bool = False,
+    chrome_pid: int | None = None,
+    chrome_owned: bool = False,
 ) -> None:
     """Run the MCP daemon broker.
 
@@ -114,6 +149,8 @@ def main(
         browser_url: Chrome remote debugging URL for CDP client.
         mode: Access mode ('full' or 'inspect').
         stealth: Whether to inject stealth patches to reduce automation fingerprinting.
+        chrome_pid: PID of the tool-launched Chrome to quit on idle/shutdown.
+        chrome_owned: Whether that Chrome is a private profile safe to quit.
 
     Returns:
         None.
@@ -236,6 +273,7 @@ def main(
             if time.time() - last_activity[0] > IDLE_TIMEOUT_SECONDS:
                 _reap_process(proc)
                 cdp_handler.stop()
+                _terminate_owned_chrome(chrome_pid, chrome_owned)
                 _cleanup_files(socket_path, pid_file)
                 os._exit(0)
 
@@ -265,6 +303,7 @@ def main(
         """
         _reap_process(proc)
         cdp_handler.stop()
+        _terminate_owned_chrome(chrome_pid, chrome_owned)
         server.close()
         _cleanup_files(socket_path, pid_file)
         sys.exit(0)
@@ -652,6 +691,17 @@ if __name__ == "__main__":
         action="store_true",
         help="Inject stealth patches to reduce automation fingerprinting",
     )
+    parser.add_argument(
+        "--chrome-pid",
+        type=int,
+        default=None,
+        help="PID of the tool-launched Chrome to quit on idle timeout / shutdown",
+    )
+    parser.add_argument(
+        "--chrome-owned",
+        action="store_true",
+        help="Whether the Chrome at --chrome-pid is a private profile safe to quit",
+    )
     args = parser.parse_args()
 
     try:
@@ -659,4 +709,13 @@ if __name__ == "__main__":
     except json.JSONDecodeError:
         sys.exit(1)
 
-    main(args.socket, args.pid_file, command, args.browser_url, args.mode, args.stealth)
+    main(
+        args.socket,
+        args.pid_file,
+        command,
+        args.browser_url,
+        args.mode,
+        args.stealth,
+        args.chrome_pid,
+        args.chrome_owned,
+    )

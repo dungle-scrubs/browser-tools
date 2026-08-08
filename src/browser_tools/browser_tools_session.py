@@ -16,7 +16,6 @@ from .browser_state import (
     AUTH_MODES,
     HEADED_AUTH_MODES,
     HEADLESS_AUTH_MODES,
-    BrowserState,
     normalize_mode,
 )
 from .chrome_config import get_mcp_command
@@ -35,9 +34,11 @@ from .persistent_browser import (
     clear_session_override,
     create_project_preferred_controller,
     create_session_override_controller,
+    find_live_profiles,
     get_browser_session_status,
     load_active_attach_controller,
     load_project_browser_config,
+    reap_orphaned_sessions,
     save_active_attach_config,
     save_session_override,
 )
@@ -630,7 +631,68 @@ def handle_use_browser_session(controller_ref: list[Any], args: Any) -> dict[str
         )
     if mode in HEADED_AUTH_MODES and endpoint is None:
         lines.append("A headed Chrome session will be launched/reused with the configured profile.")
+    if mode == "real":
+        lines.append(
+            "mode='real' drives your everyday Chrome profile (shared cookies/extensions/history), "
+            "so there is a single dock icon that closes normally. If that Chrome is already open "
+            "without --remote-debugging-port, quit it first so browser-tools can relaunch it with "
+            "debugging enabled. Call close_browser to detach; it will not force-quit your browser."
+        )
     return text_response("\n".join(lines))
+
+
+def handle_close_browser(controller_ref: list[Any], fallback: Any, args: Any) -> dict[str, Any]:
+    """Handle the close_browser tool: end the active browser session cleanly.
+
+    Stops the background MCP daemon and either quits the Chrome the tool
+    launched (private automation profile) or detaches from an external /
+    real-profile Chrome, leaving it running. This is the supported way to end
+    a session without hunting for and killing a process by hand.
+
+    Args:
+        controller_ref: Single-element list holding the active controller.
+        fallback: Controller to fall back to when none has been swapped in.
+        args: Tool arguments. ``reset_session`` (bool) also clears any explicit
+            session override so the next call falls back to project preference.
+
+    Returns:
+        JSON-RPC response dict.
+    """
+    from .persistent_browser import clear_session_override, close_active_session
+
+    active = controller_ref[0] or fallback
+    if active is None:
+        return {
+            "result": {"content": [{"type": "text", "text": "No active browser session to close."}]}
+        }
+
+    summary = close_active_session(active)
+    controller_ref[0] = None
+    if args.get("reset_session"):
+        clear_session_override()
+
+    if summary["quit_chrome"]:
+        text = (
+            f"Closed browser session: quit the tool-launched Chrome (pid {summary['pid']}) "
+            "and stopped its background daemon."
+        )
+    elif summary.get("quit_failed"):
+        text = (
+            f"Stopped the background daemon, but Chrome (pid {summary['pid']}) is still "
+            "running: the terminate signal did not take effect. Quit it manually with "
+            f"`kill -9 {summary['pid']}`."
+        )
+    elif summary["detached"]:
+        endpoint = summary["endpoint"] or "the attached browser"
+        text = (
+            f"Closed browser session: detached from {endpoint} and stopped the background daemon. "
+            "The browser itself was left running (external or mode='real')."
+        )
+    else:
+        text = "No running browser was found; cleared background session state."
+    if args.get("reset_session"):
+        text += " Session override cleared; project preference will be used next."
+    return {"result": {"content": [{"type": "text", "text": text}]}}
 
 
 # Session-level tools that don't need MCP daemon
@@ -640,6 +702,7 @@ SESSION_TOOLS = {
     "delete_profile",
     "use_browser_session",
     "browser_session_status",
+    "close_browser",
 }
 
 # Tools routed through Camoufox when active. Maps browser-tools names to
@@ -703,28 +766,82 @@ def _camoufox_result_to_mcp(result: dict[str, Any]) -> dict[str, Any]:
     return text_response(text)
 
 
+def choose_live_profile_fallback(
+    live: list[dict[str, Any]],
+) -> PersistentChromeController | None:
+    """Build a reuse controller when exactly one named profile is live.
+
+    Only human-named profiles are auto-attach candidates. A hashed session key
+    belongs to another project's default session — reusing it would hand this
+    project a throwaway browser that project is still driving.
+
+    Args:
+        live: ``describe_profile_runtime`` descriptors for live profiles,
+            excluding this project's own session.
+
+    Returns:
+        A controller configured to reuse the sole live named profile, or None.
+    """
+    named = [info for info in live if info.get("named")]
+    if len(named) != 1:
+        return None
+    controller = PersistentChromeController(
+        headless=False,
+        isolated=False,
+        channel="canary",
+        profile=named[0]["profile"],
+        force_persistent=True,
+    )
+    controller.mode = "full"
+    return controller
+
+
 def select_default_controller() -> tuple[PersistentChromeController, list[dict[str, Any]] | None]:
     """Pick the controller when no explicit session is configured.
 
-    Each project resolves to exactly one persistent bucket (keyed on its git
-    root), so the default is simply that bucket. A live Chrome already on it
-    is reused via :meth:`PersistentChromeController.ensure_browser_state`;
-    otherwise the first tool call launches a single headless instance that
-    every later call in the project shares. Per-project isolation is
-    preserved: another project's browser is never silently attached to.
+    Prefers reusing a browser that is already open over launching another one,
+    in priority order: this project's own live session, then a sole live named
+    profile, then a fresh headless-isolated Chrome.
+
+    Reusing this project's own session takes precedence because auto-attaching
+    elsewhere would abandon a Chrome this project launched, leaving it to idle
+    out as a second dock icon.
+
+    Other projects' hashed sessions are reported but deliberately do not raise a
+    conflict. Blocking here would stall every parallel agent whenever any other
+    project had a browser open, and it would not reduce the browser count: the
+    documented recovery, ``use_browser_session(mode='headless')``, resolves to
+    this project's own session key and launches exactly the same Chrome. Several
+    concurrent browsers is the correct state when several projects are active;
+    the accumulation this guards against is browsers outliving their session,
+    which ``reap_orphaned_sessions`` handles.
 
     Returns:
-        ``(controller, None)``. The second slot is retained for caller
-        compatibility and is always None now that the default never crosses
-        project boundaries.
+        ``(controller, conflict)``.
+
+        - ``conflict`` is None whenever a browser could be picked unambiguously.
+        - When several named profiles are live, returns the default
+          headless-isolated controller and the live list as ``conflict`` so the
+          caller can refuse non-session tools rather than launch yet another
+          Chrome.
     """
-    controller = PersistentChromeController(
+    default = PersistentChromeController(
         headless=True,
         channel="canary",
         force_persistent=True,
     )
-    controller.mode = "full"
-    return controller, None
+    live = find_live_profiles()
+    if any(info.get("profile") == default.session_key for info in live):
+        # This project's own session is already running — reuse it.
+        return default, None
+
+    others = [info for info in live if info.get("profile") != default.session_key]
+    fallback = choose_live_profile_fallback(others)
+    if fallback is not None:
+        return fallback, None
+
+    conflict = others if sum(1 for info in others if info.get("named")) > 1 else None
+    return default, conflict
 
 
 # ---------------------------------------------------------------------------
@@ -852,6 +969,42 @@ def _maybe_promote_on_auth_wall(
     return text_response(notice)
 
 
+def _format_live_profile_conflict_error(live: list[dict[str, Any]]) -> dict[str, Any]:
+    """Build a tool-proxy error response describing multiple live profiles.
+
+    Args:
+        live: ``describe_profile_runtime`` descriptors for live profiles.
+
+    Returns:
+        MCP-style error response telling the agent how to disambiguate.
+    """
+    lines = [
+        f"Multiple browsers are live ({len(live)}). Refusing to launch a new headless",
+        "Chrome that would ignore them. Pick one explicitly:",
+        "",
+    ]
+    for info in live:
+        name = info.get("profile", "?")
+        endpoint = info.get("endpoint") or "?"
+        url = info.get("current_url") or "(no active page)"
+        tabs = info.get("tab_count", 0)
+        # Hashed session keys have no addressable name: another project's
+        # default session is reachable by endpoint only.
+        suffix = "" if info.get("named") else "  [another project's session]"
+        lines.append(f"  - {name}: {endpoint} ({tabs} tab(s)) — {url}{suffix}")
+    lines.extend(
+        [
+            "",
+            "Recover with one of:",
+            "  use_browser_session(mode='headed-auth', profile='<name>')",
+            "  attach_browser(profile='<name>')",
+            "  attach_browser(endpoint='<endpoint>')  for a session with no name",
+            "Or call use_browser_session(mode='headless') to opt into a fresh isolated session.",
+        ]
+    )
+    return error_response("\n".join(lines))
+
+
 def _promote_headless_to_headed(
     controller: PersistentChromeController, url: str | None
 ) -> PersistentChromeController | None:
@@ -884,56 +1037,6 @@ def _promote_headless_to_headed(
     return headed
 
 
-def _handle_close_browser(controller_ref: list[Any], args: Any) -> dict[str, Any]:
-    """Handle the close_browser tool.
-
-    Stops the MCP daemon and then, by ownership: quits a tool-launched Chrome
-    (keeping its profile on disk so reopening does not re-auth), or detaches
-    from an externally attached browser and leaves it running.
-
-    Args:
-        controller_ref: Single-element list holding the active controller.
-        args: Tool arguments (``reset_session`` optional).
-
-    Returns:
-        JSON-RPC response dict describing what was torn down.
-    """
-    reset = bool(args.get("reset_session", False)) if isinstance(args, dict) else False
-    controller = controller_ref[0]
-    if controller is None:
-        controller = load_active_attach_controller()
-    if controller is None:
-        return text_response("No active browser session to close.")
-
-    state = BrowserState.from_path(controller.state_path)
-    owned = state is not None and state.pid is not None
-    if owned:
-        teardown = controller.close_owned_browser()
-        if teardown.get("chrome_quit"):
-            msg = (
-                "Tool-launched Chrome quit and MCP daemon stopped. Profile state "
-                "(cookies, login) is preserved on disk — the next call reopens the "
-                "same profile without re-auth."
-            )
-        else:
-            msg = (
-                "No live Chrome process found (already stopped); cleared its stale "
-                "session state. Profile dir is preserved on disk."
-            )
-    else:
-        controller.stop_daemon_only()
-        clear_active_attach_config()
-        msg = (
-            "Detached from the external browser (left running) and stopped the "
-            "browser-tools daemon."
-        )
-    if reset:
-        clear_session_override()
-        msg += " Session override cleared; project preference will be used next."
-    controller_ref[0] = None
-    return text_response(msg)
-
-
 def create_tool_proxy_handlers():
     """Create stateful handlers for a tool-proxy protocol adapter.
 
@@ -944,8 +1047,20 @@ def create_tool_proxy_handlers():
     controller_ref: list[Any] = [None]
     # Camoufox session ref — when not None, standard tools route through it
     camoufox_ref: list[Any] = [None]
+    # Populated when multiple profiles are live and no session is configured.
+    # Non-session tools fail loudly until the agent picks one.
+    live_profile_conflict: list[Any] = [None]
 
     def create_session():
+        # Quit automation Chromes left behind by daemons that died without
+        # running their own teardown, before deciding what is live.
+        for orphan in reap_orphaned_sessions():
+            print(
+                f"[browser-tools] Reaped orphaned Chrome (pid {orphan['pid']}, "
+                f"session {orphan['session_key']})",
+                file=sys.stderr,
+            )
+
         override = create_session_override_controller()
         if override is not None:
             controller_ref[0] = override
@@ -961,8 +1076,15 @@ def create_tool_proxy_handlers():
             controller_ref[0] = attached
             return attached
 
-        c, _conflict = select_default_controller()
+        c, conflict = select_default_controller()
         controller_ref[0] = c
+        if conflict is not None:
+            live_profile_conflict[0] = conflict
+        elif not c.isolated and c.profile:
+            print(
+                f"[browser-tools] Auto-attached to sole live profile '{c.profile}'",
+                file=sys.stderr,
+            )
         return c
 
     def call_tool(controller: PersistentChromeController, tool: str, args: Any) -> dict[str, Any]:
@@ -999,12 +1121,19 @@ def create_tool_proxy_handlers():
             return handle_use_browser_session(controller_ref, args)
         if tool == "browser_session_status":
             return handle_browser_session_status(args)
+        if tool == "close_browser":
+            return handle_close_browser(controller_ref, controller, args)
         if tool == "list_profiles":
             return handle_list_profiles(args)
         if tool == "delete_profile":
             return handle_delete_profile(args)
-        if tool == "close_browser":
-            return _handle_close_browser(controller_ref, args)
+        # If we detected multiple live profiles at session creation and the
+        # agent hasn't picked one yet (attach_browser/use_browser_session would
+        # have cleared the conflict by swapping controller_ref or saving an
+        # override), refuse non-session tools rather than silently spawning a
+        # new headless Chrome.
+        if live_profile_conflict[0] is not None and controller_ref[0] is controller:
+            return _format_live_profile_conflict_error(live_profile_conflict[0])
         # Use latest controller (may have been swapped by attach_browser)
         active = controller_ref[0] or controller
 

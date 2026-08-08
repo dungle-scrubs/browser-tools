@@ -115,8 +115,7 @@ class CamoufoxSession:
                 # Fail loudly rather than silently launching profile-less, which
                 # would discard the login the caller asked us to persist.
                 raise ValueError(
-                    f"Invalid profile name '{profile}': use only letters, digits, "
-                    "'.', '_', or '-'."
+                    f"Invalid profile name '{profile}': use only letters, digits, '.', '_', or '-'."
                 )
         else:
             self._storage_path = None
