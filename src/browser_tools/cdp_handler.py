@@ -13,6 +13,7 @@ import contextlib
 import json
 import logging
 import threading
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -143,6 +144,92 @@ async def _cdp_call(
     except Exception:
         logger.exception("Unexpected error in %s", label)
         raise CdpToolError(label) from None
+
+
+@dataclass
+class ElementEvalResult:
+    """Result of evaluating a JS expression against a CSS-selected element.
+
+    ``found`` is True only when the selector matched an element; ``value``
+    holds the expression's return value, which may be None when the expression
+    itself yields null (for example an absent attribute on a present element).
+    Element-not-found is reported as ``found=False`` so callers never overload
+    a null value to mean "missing element" - the bug that previously forced
+    each handler to invent its own sentinel string.
+    """
+
+    found: bool
+    value: Any
+
+
+# The querySelector + not-found wrapper shared by every element-reading tool.
+# Uses a namespaced ``__found__`` key so a returned object that happens to have
+# a ``found`` field cannot be misread as the protocol envelope.
+_ELEM_NOT_FOUND_JS = "return {__found__: false};"
+
+# element_visible: evaluated against the matched element (``el``) via
+# eval_on_element. A selector that matches nothing never reaches this - it is
+# reported as found=False upstream - so the expression assumes a real element.
+_VISIBILITY_EXPR = """(function (el) {
+    const style = window.getComputedStyle(el);
+    if (style.display === 'none') return false;
+    if (style.visibility === 'hidden') return false;
+    if (parseFloat(style.opacity) === 0) return false;
+    const rect = el.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+})(el)"""
+
+
+def _element_eval_js(selector: str, expression: str) -> str:
+    """Build the IIFE that resolves ``selector`` and evaluates ``expression``.
+
+    ``expression`` runs with ``el`` bound to the matched element and may return
+    any JSON-serializable value, including null.
+    """
+    return f"""
+    (() => {{
+        const el = document.querySelector({selector!r});
+        if (!el) {{ {_ELEM_NOT_FOUND_JS} }}
+        return {{__found__: true, value: ({expression})}};
+    }})()
+    """
+
+
+async def eval_on_element(
+    cdp: Any, selector: str, expression: str, *, label: str
+) -> ElementEvalResult:
+    """Evaluate ``expression`` against the element matching ``selector``.
+
+    Single owner of the querySelector wrapper, the Runtime.evaluate call, and
+    the not-found contract. Before this, six handlers reimplemented the same
+    idea in three incompatible styles: a None return, sentinel strings
+    (``__ELEMENT_NOT_FOUND__`` / ``__ATTR_NULL__``), and inline JS returning
+    ``false`` / ``0``. One interface here replaces all three.
+
+    Args:
+        cdp: Connected CDPClient.
+        selector: CSS selector string.
+        expression: JS expression evaluated with ``el`` bound to the matched
+            element. May return any JSON-serializable value, including null.
+        label: Error-mapping label forwarded to :func:`_cdp_call`.
+
+    Returns:
+        ``ElementEvalResult`` with ``found=False`` when the selector matched
+        nothing, otherwise ``found=True`` and the expression's value.
+
+    Raises:
+        CdpToolError: on CDP protocol failure (mapped by ``_cdp_call``).
+    """
+    result = await _cdp_call(
+        cdp,
+        "Runtime.evaluate",
+        {"expression": _element_eval_js(selector, expression), "returnByValue": True},
+        label=label,
+    )
+    val = result.get("result", {}).get("value")
+    if isinstance(val, dict) and val.get("__found__") is True:
+        return ElementEvalResult(found=True, value=val.get("value"))
+    return ElementEvalResult(found=False, value=None)
 
 
 # Tool name -> handler method name. This is the single binding of CDP tool name
@@ -1106,39 +1193,6 @@ class CDPHandler:
     # Content extraction tools                                             #
     # ------------------------------------------------------------------ #
 
-    async def _query_element_js(
-        self, cdp: Any, selector: str, expression: str, *, label: str
-    ) -> dict[str, Any] | None:
-        """Evaluate a JS expression on a queried element.
-
-        Args:
-            cdp: Connected CDPClient instance.
-            selector: CSS selector string.
-            expression: JS expression using 'el' as the element variable.
-                Must return the desired value or null if element not found.
-            label: Error-mapping label forwarded to :func:`_cdp_call`.
-
-        Returns:
-            The CDP result dict on success, or None if the element was not
-            found. Raises :class:`CdpToolError` on CDP failure.
-        """
-        js = f"""
-        (() => {{
-            const el = document.querySelector({selector!r});
-            if (!el) return null;
-            return {expression};
-        }})()
-        """
-        result = await _cdp_call(
-            cdp,
-            "Runtime.evaluate",
-            {"expression": js, "returnByValue": True},
-            label=label,
-        )
-        val = result.get("result", {}).get("value")
-        # None (Python) means JS returned null (element not found)
-        return result if val is not None else None
-
     async def _handle_get_text(self, arguments: dict[str, Any]) -> dict[str, Any]:
         """Get text content of element by CSS selector.
 
@@ -1156,13 +1210,10 @@ class CDPHandler:
         if not selector:
             return make_error("selector is required")
 
-        result = await self._query_element_js(cdp, selector, "el.textContent", label="get_text")
-
-        if result is None:
+        res = await eval_on_element(cdp, selector, "el.textContent", label="get_text")
+        if not res.found:
             return make_error(f"E006: No element found matching selector '{selector}'")
-
-        text = result.get("result", {}).get("value", "")
-        return make_text(str(text))
+        return make_text("" if res.value is None else str(res.value))
 
     async def _handle_get_html(self, arguments: dict[str, Any]) -> dict[str, Any]:
         """Get outer HTML of element by CSS selector.
@@ -1181,18 +1232,18 @@ class CDPHandler:
         if not selector:
             return make_error("selector is required")
 
-        result = await self._query_element_js(cdp, selector, "el.outerHTML", label="get_html")
-
-        if result is None:
+        res = await eval_on_element(cdp, selector, "el.outerHTML", label="get_html")
+        if not res.found:
             return make_error(f"E006: No element found matching selector '{selector}'")
-
-        html = result.get("result", {}).get("value", "")
-        return make_text(str(html))
+        return make_text("" if res.value is None else str(res.value))
 
     async def _handle_get_attr(self, arguments: dict[str, Any]) -> dict[str, Any]:
         """Get attribute value of element by CSS selector.
 
-        Returns null (not an error) if element exists but attribute is absent.
+        Returns null (not an error) if element exists but attribute is absent:
+        a present element with an absent attribute yields a null value through
+        :func:`eval_on_element`, distinct from the ``found=False`` an unmatched
+        selector produces, so the two cases no longer need sentinel strings.
 
         Args:
             arguments: Tool arguments with 'selector' and 'attribute' keys.
@@ -1211,27 +1262,14 @@ class CDPHandler:
         if not attribute:
             return make_error("attribute is required")
 
-        js = f"""
-        (() => {{
-            const el = document.querySelector({selector!r});
-            if (!el) return '__ELEMENT_NOT_FOUND__';
-            const val = el.getAttribute({attribute!r});
-            return val === null ? '__ATTR_NULL__' : val;
-        }})()
-        """
-        result = await _cdp_call(
-            cdp,
-            "Runtime.evaluate",
-            {"expression": js, "returnByValue": True},
-            label="get_attr",
+        res = await eval_on_element(
+            cdp, selector, f"el.getAttribute({attribute!r})", label="get_attr"
         )
-
-        val = result.get("result", {}).get("value", "__ELEMENT_NOT_FOUND__")
-        if val == "__ELEMENT_NOT_FOUND__":
+        if not res.found:
             return make_error(f"E006: No element found matching selector '{selector}'")
-        if val == "__ATTR_NULL__":
+        if res.value is None:
             return make_text(f"null (element exists but '{attribute}' attribute is not present)")
-        return make_text(str(val))
+        return make_text(str(res.value))
 
     # ------------------------------------------------------------------ #
     # Element query tools                                                  #
@@ -1278,7 +1316,10 @@ class CDPHandler:
         """Check if an element is visible (rendered, non-zero size, not CSS-hidden).
 
         Visibility: element exists AND has non-zero bounding rect AND
-        display != none AND visibility != hidden AND opacity > 0.
+        display != none AND visibility != hidden AND opacity > 0. A selector
+        that matches nothing is reported as not visible rather than an error,
+        so the not-found contract from :func:`eval_on_element` maps cleanly to
+        ``visible=False``.
 
         Args:
             arguments: Tool arguments with 'selector' key.
@@ -1294,26 +1335,8 @@ class CDPHandler:
         if not selector:
             return make_error("selector is required")
 
-        js = f"""
-        (() => {{
-            const el = document.querySelector({selector!r});
-            if (!el) return false;
-            const style = window.getComputedStyle(el);
-            if (style.display === 'none') return false;
-            if (style.visibility === 'hidden') return false;
-            if (parseFloat(style.opacity) === 0) return false;
-            const rect = el.getBoundingClientRect();
-            return rect.width > 0 && rect.height > 0;
-        }})()
-        """
-        result = await _cdp_call(
-            cdp,
-            "Runtime.evaluate",
-            {"expression": js, "returnByValue": True},
-            label="element_visible",
-        )
-
-        visible = result.get("result", {}).get("value", False)
+        res = await eval_on_element(cdp, selector, _VISIBILITY_EXPR, label="element_visible")
+        visible = res.found and bool(res.value)
         return make_text(f'{{"visible": {str(visible).lower()}}}')
 
     async def _refresh_frame_tree(self) -> None:

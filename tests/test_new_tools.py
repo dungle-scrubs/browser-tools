@@ -380,7 +380,7 @@ async def test_wait_stable_cleanup_called():
 @pytest.mark.asyncio
 async def test_get_text_returns_text_content():
     """get_text returns element's textContent."""
-    cdp = connected_cdp({"result": {"type": "string", "value": "Hello world"}})
+    cdp = connected_cdp({"result": {"value": {"__found__": True, "value": "Hello world"}}})
     handler = make_cdp_handler(cdp)
 
     result = await handler._handle_get_text({"selector": "h1"})
@@ -390,8 +390,8 @@ async def test_get_text_returns_text_content():
 @pytest.mark.asyncio
 async def test_get_text_e006_not_found():
     """get_text returns E006 when selector matches nothing."""
-    # null return from querySelector
-    cdp = connected_cdp({"result": {"type": "object", "subtype": "null", "value": None}})
+    # querySelector matched nothing: found flag is False.
+    cdp = connected_cdp({"result": {"value": {"__found__": False}}})
     handler = make_cdp_handler(cdp)
 
     result = await handler._handle_get_text({"selector": "#missing"})
@@ -407,7 +407,9 @@ async def test_get_text_e006_not_found():
 @pytest.mark.asyncio
 async def test_get_html_returns_outer_html():
     """get_html returns element's outerHTML."""
-    cdp = connected_cdp({"result": {"type": "string", "value": "<div class='x'>content</div>"}})
+    cdp = connected_cdp(
+        {"result": {"value": {"__found__": True, "value": "<div class='x'>content</div>"}}}
+    )
     handler = make_cdp_handler(cdp)
 
     result = await handler._handle_get_html({"selector": ".x"})
@@ -417,7 +419,7 @@ async def test_get_html_returns_outer_html():
 @pytest.mark.asyncio
 async def test_get_html_e006_not_found():
     """get_html returns E006 when selector matches nothing."""
-    cdp = connected_cdp({"result": {"type": "object", "subtype": "null", "value": None}})
+    cdp = connected_cdp({"result": {"value": {"__found__": False}}})
     handler = make_cdp_handler(cdp)
 
     result = await handler._handle_get_html({"selector": "#missing"})
@@ -432,7 +434,7 @@ async def test_get_html_e006_not_found():
 @pytest.mark.asyncio
 async def test_get_attr_returns_value():
     """get_attr returns attribute value."""
-    cdp = connected_cdp({"result": {"type": "string", "value": "https://example.com"}})
+    cdp = connected_cdp({"result": {"value": {"__found__": True, "value": "https://example.com"}}})
     handler = make_cdp_handler(cdp)
 
     result = await handler._handle_get_attr({"selector": "a", "attribute": "href"})
@@ -442,7 +444,8 @@ async def test_get_attr_returns_value():
 @pytest.mark.asyncio
 async def test_get_attr_null_when_absent():
     """get_attr returns null (not error) when element exists but attribute absent."""
-    cdp = connected_cdp({"result": {"type": "string", "value": "__ATTR_NULL__"}})
+    # Element found, but getAttribute returned null - distinct from not-found.
+    cdp = connected_cdp({"result": {"value": {"__found__": True, "value": None}}})
     handler = make_cdp_handler(cdp)
 
     result = await handler._handle_get_attr({"selector": "div", "attribute": "data-missing"})
@@ -453,7 +456,7 @@ async def test_get_attr_null_when_absent():
 @pytest.mark.asyncio
 async def test_get_attr_e006_no_element():
     """get_attr returns E006 when element not found."""
-    cdp = connected_cdp({"result": {"type": "string", "value": "__ELEMENT_NOT_FOUND__"}})
+    cdp = connected_cdp({"result": {"value": {"__found__": False}}})
     handler = make_cdp_handler(cdp)
 
     result = await handler._handle_get_attr({"selector": "#missing", "attribute": "href"})
@@ -661,7 +664,7 @@ async def test_element_exists_invalid_selector():
 @pytest.mark.asyncio
 async def test_element_visible_true():
     """element_visible returns visible=true for rendered element."""
-    cdp = connected_cdp({"result": {"type": "boolean", "value": True}})
+    cdp = connected_cdp({"result": {"value": {"__found__": True, "value": True}}})
     handler = make_cdp_handler(cdp)
 
     result = await handler._handle_element_visible({"selector": "#btn"})
@@ -671,7 +674,7 @@ async def test_element_visible_true():
 @pytest.mark.asyncio
 async def test_element_visible_false_display_none():
     """element_visible returns visible=false for display:none element."""
-    cdp = connected_cdp({"result": {"type": "boolean", "value": False}})
+    cdp = connected_cdp({"result": {"value": {"__found__": True, "value": False}}})
     handler = make_cdp_handler(cdp)
 
     result = await handler._handle_element_visible({"selector": ".hidden"})
@@ -679,9 +682,21 @@ async def test_element_visible_false_display_none():
 
 
 @pytest.mark.asyncio
+async def test_element_visible_not_found_is_false():
+    """element_visible returns visible=false (not an error) when selector absent."""
+    cdp = connected_cdp({"result": {"value": {"__found__": False}}})
+    handler = make_cdp_handler(cdp)
+
+    result = await handler._handle_element_visible({"selector": "#ghost"})
+    text = result["result"]["content"][0]["text"]
+    assert '"visible": false' in text
+    assert "E006" not in text
+
+
+@pytest.mark.asyncio
 async def test_element_visible_checks_css_properties():
     """element_visible JS checks display, visibility, opacity, and rect."""
-    cdp = connected_cdp({"result": {"type": "boolean", "value": True}})
+    cdp = connected_cdp({"result": {"value": {"__found__": True, "value": True}}})
     handler = make_cdp_handler(cdp)
 
     await handler._handle_element_visible({"selector": ".el"})
