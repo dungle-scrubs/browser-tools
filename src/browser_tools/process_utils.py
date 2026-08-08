@@ -383,6 +383,31 @@ def find_chrome_user_data_dir(pid: int) -> Path | None:
         return None
 
 
+def pid_holds_user_data_dir(pid: int, user_data_dir: Path) -> bool:
+    """Check whether a live PID is a Chrome holding the given profile dir.
+
+    Guards against a recycled SingletonLock PID (now an unrelated process) or a
+    Chrome running a different ``--user-data-dir``. Single source of truth:
+    both ``live_chrome`` (for resolve_live_chrome's verify step) and
+    ``persistent_browser`` (re-exported for the session reaper) import it from
+    here, so the PID-recycle guard is no longer re-derived in two places.
+
+    Args:
+        pid: Process ID recorded in the profile's SingletonLock.
+        user_data_dir: Profile directory the caller expects that PID to hold.
+
+    Returns:
+        True only when ``pid``'s command line resolves to ``user_data_dir``.
+    """
+    actual = find_chrome_user_data_dir(pid)
+    if actual is None:
+        return False
+    try:
+        return actual.resolve() == user_data_dir.resolve()
+    except OSError:
+        return False
+
+
 def find_listeners_on_port(port: int) -> list[int]:
     """Return PIDs holding TCP listeners on the given port.
 

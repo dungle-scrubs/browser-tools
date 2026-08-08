@@ -72,7 +72,9 @@ def resolve_live_chrome(
     if lock_pid is None or not process_utils.is_process_alive(lock_pid):
         return None
 
-    holds = _pid_holds_dir(lock_pid, user_data_dir) if verify_holds_dir else None
+    holds = (
+        process_utils.pid_holds_user_data_dir(lock_pid, user_data_dir) if verify_holds_dir else None
+    )
 
     intended = process_utils.find_chrome_debug_port(lock_pid)
     if intended is None:
@@ -100,22 +102,6 @@ def resolve_live_chrome(
         devtools_alive=alive,
         port_collision_pids=collisions,
     )
-
-
-def _pid_holds_dir(pid: int, user_data_dir: Path) -> bool:
-    """Confirm a PID's ``--user-data-dir`` resolves to ``user_data_dir``.
-
-    Mirrors :func:`persistent_browser.pid_holds_user_data_dir` (kept there for
-    the reaper's reuse) rather than importing it, to avoid a circular import
-    back into the controller module.
-    """
-    actual = process_utils.find_chrome_user_data_dir(pid)
-    if actual is None:
-        return False
-    try:
-        return actual.resolve() == user_data_dir.resolve()
-    except OSError:
-        return False
 
 
 __all__ = ["LiveChrome", "resolve_live_chrome"]
