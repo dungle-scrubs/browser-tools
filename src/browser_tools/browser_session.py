@@ -13,7 +13,7 @@ import json
 import sys
 from typing import Any
 
-from . import persistent_browser
+from . import persistent_browser, process_utils
 from . import session_layout as layout
 from .browser_state import (
     AUTH_MODES,
@@ -23,6 +23,7 @@ from .browser_state import (
     normalize_mode,
 )
 from .chrome_utils import BrowserToolsError
+from .live_chrome import resolve_live_chrome
 from .mcp_response import error_response, extract_text_items, text_response
 from .persistent_browser import PersistentChromeController, format_dead_port_error
 from .process_utils import validate_local_endpoint
@@ -81,25 +82,24 @@ def handle_attach_browser(controller_ref: list[Any], args: Any) -> dict[str, Any
                 f"Error: profile '{profile}' not found at {profile_dir}. "
                 "Call list_profiles to see available profiles."
             )
-        lock_pid = persistent_browser.read_singleton_lock_pid(profile_dir)
-        if lock_pid is None or not persistent_browser.is_process_alive(lock_pid):
+        chrome = resolve_live_chrome(profile_dir)
+        if chrome is None:
             return error_response(
                 f"Error: profile '{profile}' has no running Chrome. "
                 f"Either launch Chrome on this profile and retry, or call "
                 f"use_browser_session(mode='headed-auth', profile='{profile}') to launch one."
             )
-        port = persistent_browser.find_chrome_debug_port(lock_pid)
-        if port is None:
+        if chrome.intended_port is None:
             return error_response(
-                f"Error: Chrome (pid {lock_pid}) holding profile '{profile}' has no "
+                f"Error: Chrome (pid {chrome.pid}) holding profile '{profile}' has no "
                 "--remote-debugging-port flag. Restart it with that flag, or kill it "
                 f"and call use_browser_session(mode='headed-auth', profile='{profile}')."
             )
-        candidate = f"http://127.0.0.1:{port}"
-        if not persistent_browser.is_devtools_available(candidate):
-            return error_response(format_dead_port_error(profile, profile_dir, lock_pid))
-        endpoint = candidate
-        discovered_pid = lock_pid
+        if not chrome.devtools_alive:
+            return error_response(format_dead_port_error(profile, profile_dir, chrome))
+        assert chrome.endpoint is not None  # set iff devtools_alive
+        endpoint = chrome.endpoint
+        discovered_pid = chrome.pid
 
     # Validate profile/endpoint coherence: the Chrome at endpoint should be
     # running the requested profile's user-data-dir. Catches the case where
@@ -112,7 +112,7 @@ def handle_attach_browser(controller_ref: list[Any], args: Any) -> dict[str, Any
         actual_dir = None
         actual_pid = None
         for pid in listeners:
-            actual_dir = persistent_browser.find_chrome_user_data_dir(pid)
+            actual_dir = process_utils.find_chrome_user_data_dir(pid)
             actual_pid = pid
             if actual_dir is not None:
                 break
@@ -196,7 +196,7 @@ def find_listeners_on_endpoint(endpoint: str) -> list[int]:
         return []
     if port is None:
         return []
-    return persistent_browser.find_listeners_on_port(int(port))
+    return process_utils.find_listeners_on_port(int(port))
 
 
 def handle_list_profiles(args: Any) -> dict[str, Any]:

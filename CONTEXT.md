@@ -37,6 +37,12 @@ and code should use these terms, not ad-hoc synonyms.
 - **Tool Dispatch** - routing policy over `tool_registry`: inspect-gate,
   CDP/local/forward routing, screenshot paint-gate, post-navigation
   detection. Data lives in the registry; policy lives here. (Candidate C.)
+- **LiveChrome** - owns the resolution of the live Chrome backing a
+  user-data-dir: read the SingletonLock PID, confirm it is alive, confirm it
+  holds the directory (PID-recycle guard), find its debug port, confirm
+  DevTools answers. Returns one structured result consumed by
+  `PersistentChromeController`, `profile_catalog`, and `handle_attach_browser`.
+  The implementation module is `live_chrome`.
 
 ## Mode vocabulary
 

@@ -34,20 +34,18 @@ from .daemon_supervisor import (
     build_daemon_command,  # type: ignore[reportUnusedImport]  # noqa: F401  # re-exported
     is_recoverable_daemon_error,
 )
+from .live_chrome import LiveChrome, resolve_live_chrome
 from .page_selection import PageSelection
 from .process_utils import (
     build_browser_command,
     clean_stale_singleton_lock,
     enumerate_tabs,  # type: ignore[reportUnusedImport]  # noqa: F401  # re-exported for tests
-    find_chrome_debug_port,
     find_chrome_user_data_dir,  # type: ignore[reportUnusedImport]  # re-exported for tests
     find_free_port,
-    find_listeners_on_port,
     is_devtools_available,
     is_process_alive,
     read_process_command,  # type: ignore[reportUnusedImport]  # noqa: F401  # re-exported for tests
     read_process_start_time,
-    read_singleton_lock_pid,
     resolve_chrome_executable,
     resolve_system_profile_dir,
     select_tab_by_url,  # type: ignore[reportUnusedImport]  # noqa: F401  # re-exported for tests
@@ -544,24 +542,20 @@ class PersistentChromeController:
         # reachable, refuse to launch a second instance (Chrome's
         # single-instance check would fail) and surface what's wrong so the
         # caller can recover. Otherwise the agent loops on a silent failure.
-        lock_pid = read_singleton_lock_pid(user_data_dir)
-        if (
-            lock_pid is not None
-            and is_process_alive(lock_pid)
-            and pid_holds_user_data_dir(lock_pid, user_data_dir)
-        ):
+        chrome = resolve_live_chrome(user_data_dir, verify_holds_dir=True)
+        if chrome is not None and chrome.holds_dir is True:
             if self.system_profile:
                 # mode='real': the user's everyday Chrome is open but was not
                 # started with remote debugging, so we cannot attach and must
                 # not force-quit their browser. Tell them how to recover.
                 raise MCPInvocationError(
-                    f"Your everyday {self.channel} Chrome (pid {lock_pid}) is running "
+                    f"Your everyday {self.channel} Chrome (pid {chrome.pid}) is running "
                     "without --remote-debugging-port, so mode='real' cannot drive it. "
                     "Quit that Chrome and retry (browser-tools will relaunch it with "
                     "debugging enabled), or restart it yourself with "
                     "--remote-debugging-port=<port>."
                 )
-            raise MCPInvocationError(format_dead_port_error(self.profile, user_data_dir, lock_pid))
+            raise MCPInvocationError(format_dead_port_error(self.profile, user_data_dir, chrome))
 
         # Clean stale singleton lock files so Chrome can launch cleanly.
         clean_stale_singleton_lock(user_data_dir)
@@ -679,6 +673,11 @@ class PersistentChromeController:
     def _try_reuse_existing_chrome(self, user_data_dir: Path) -> BrowserState | None:
         """Reuse a Chrome already holding this user-data-dir, if one exists.
 
+        Delegates the lock -> alive -> holds-dir -> port -> DevTools resolution
+        to :func:`live_chrome.resolve_live_chrome`; only the ownership transfer
+        (carrying ``chrome_owned`` forward from the state being replaced) is
+        decided here.
+
         Args:
             user_data_dir: Profile directory the controller wants to launch into.
 
@@ -686,19 +685,13 @@ class PersistentChromeController:
             BrowserState pointing at the existing Chrome's debug port, or None
             when no usable live Chrome holds the directory.
         """
-        lock_pid = read_singleton_lock_pid(user_data_dir)
-        if lock_pid is None or not is_process_alive(lock_pid):
-            return None
-        # The SingletonLock PID may have been recycled by an unrelated process,
-        # or point at a Chrome running a different profile. Only reuse it when
-        # it actually holds this user-data-dir.
-        if not pid_holds_user_data_dir(lock_pid, user_data_dir):
-            return None
-        port = find_chrome_debug_port(lock_pid)
-        if port is None:
-            return None
-        browser_url = f"http://127.0.0.1:{port}"
-        if not is_devtools_available(browser_url):
+        chrome = resolve_live_chrome(user_data_dir, verify_holds_dir=True)
+        if (
+            chrome is None
+            or chrome.holds_dir is not True
+            or not chrome.devtools_alive
+            or chrome.endpoint is None
+        ):
             return None
         # Carry ownership forward from the state we are replacing rather than
         # re-deriving it: this path runs when a previous invocation's state was
@@ -706,10 +699,10 @@ class PersistentChromeController:
         # only if we launched it. A browser the user started on this directory
         # by hand stays unowned.
         previous = BrowserState.from_path(self.state_path)
-        inherited = previous is not None and previous.chrome_owned and previous.pid == lock_pid
+        inherited = previous is not None and previous.chrome_owned and previous.pid == chrome.pid
         state = self._make_state(
-            browser_url=browser_url,
-            pid=lock_pid,
+            browser_url=chrome.endpoint,
+            pid=chrome.pid,
             user_data_dir=str(user_data_dir),
             chrome_owned=inherited,
         )
@@ -792,23 +785,27 @@ def pid_holds_user_data_dir(pid: int, user_data_dir: Path) -> bool:
 def format_dead_port_error(
     profile: str | None,
     user_data_dir: Path,
-    lock_pid: int,
+    chrome: LiveChrome,
 ) -> str:
     """Build the user-facing error for a profile whose debug port is unusable.
+
+    Reads the already-resolved :class:`~browser_tools.live_chrome.LiveChrome`
+    (intended port, port collisions, holding PID) instead of re-deriving them,
+    so the lock -> port -> listeners sequence runs once per dead-port report.
 
     Args:
         profile: Named profile (None for ad-hoc launches).
         user_data_dir: Profile directory holding the singleton lock.
-        lock_pid: PID of the Chrome process holding the directory.
+        chrome: Resolved live-Chrome state for the holding process.
 
     Returns:
         Multi-line error string describing the dead-port state and the
         concrete steps to recover.
     """
-    intended = find_chrome_debug_port(lock_pid)
+    intended = chrome.intended_port
     target = f"profile '{profile}'" if profile else f"user-data-dir {user_data_dir}"
     lines = [
-        f"E001: Chrome (pid {lock_pid}) is holding {target} but its remote",
+        f"E001: Chrome (pid {chrome.pid}) is holding {target} but its remote",
         "debugging endpoint is unreachable. browser-tools refuses to launch a",
         "second Chrome on this profile because the singleton check would fail.",
     ]
@@ -819,7 +816,7 @@ def format_dead_port_error(
         endpoint = f"http://127.0.0.1:{intended}"
         lines.append("")
         lines.append(f"  - Intended debug port from cmdline: {intended} (endpoint {endpoint})")
-        collisions = [pid for pid in find_listeners_on_port(intended) if pid != lock_pid]
+        collisions = chrome.port_collision_pids
         if collisions:
             lines.append(
                 f"  - That port is currently bound by another process: pid(s) "
@@ -834,7 +831,7 @@ def format_dead_port_error(
         [
             "",
             "Recovery options:",
-            f"  1. kill {lock_pid} and call this tool again (it will relaunch on a free port).",
+            f"  1. kill {chrome.pid} and call this tool again (it will relaunch on a free port).",
             "  2. Quit the conflicting Chrome window manually, then retry.",
             "  3. Restart the profile with an explicit free port and re-attach.",
         ]

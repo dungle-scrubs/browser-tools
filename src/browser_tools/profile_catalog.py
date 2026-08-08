@@ -14,13 +14,10 @@ import shutil
 from typing import Any
 
 from . import session_layout as layout
+from .live_chrome import resolve_live_chrome
 from .process_utils import (
     enumerate_tabs,
-    find_chrome_debug_port,
-    find_listeners_on_port,
-    is_devtools_available,
     is_process_alive,
-    read_singleton_lock_pid,
     terminate_process_and_wait,
 )
 
@@ -121,18 +118,17 @@ def describe_profile_runtime(profile_name: str) -> dict[str, Any]:
     if not profile_dir.exists():
         return info
 
-    lock_pid = read_singleton_lock_pid(profile_dir)
-    if lock_pid is None or not is_process_alive(lock_pid):
+    chrome = resolve_live_chrome(profile_dir)
+    if chrome is None:
         return info
-    info["pid"] = lock_pid
+    info["pid"] = chrome.pid
+    info["intended_port"] = chrome.intended_port
 
-    intended = find_chrome_debug_port(lock_pid)
-    info["intended_port"] = intended
-
-    if intended is not None:
-        endpoint = f"http://127.0.0.1:{intended}"
-        if is_devtools_available(endpoint):
-            info["port"] = intended
+    if chrome.intended_port is not None:
+        if chrome.devtools_alive:
+            assert chrome.endpoint is not None  # set iff devtools_alive
+            endpoint = chrome.endpoint
+            info["port"] = chrome.port
             info["endpoint"] = endpoint
             info["devtools_alive"] = True
             tabs = enumerate_tabs(endpoint)
@@ -143,8 +139,7 @@ def describe_profile_runtime(profile_name: str) -> dict[str, Any]:
                     info["current_url"] = url
                     break
         else:
-            others = [pid for pid in find_listeners_on_port(intended) if pid != lock_pid]
-            info["port_collision_pids"] = others
+            info["port_collision_pids"] = chrome.port_collision_pids
     return info
 
 
@@ -204,9 +199,9 @@ def delete_profile(name: str) -> bool:
     # directory; otherwise delete_profile leaves an orphaned Chrome running on
     # a now-deleted user-data-dir (the exact "can't close them" accumulation
     # this fixes). Also stop its MCP daemon if one is recorded.
-    lock_pid = read_singleton_lock_pid(profile_dir)
-    if lock_pid is not None and is_process_alive(lock_pid):
-        terminate_process_and_wait(lock_pid, timeout=5)
+    chrome = resolve_live_chrome(profile_dir)
+    if chrome is not None:
+        terminate_process_and_wait(chrome.pid, timeout=5)
     session_key = f"profile_{name}"
     daemon_pid_file = layout.daemon_pid_file(session_key)
     try:
