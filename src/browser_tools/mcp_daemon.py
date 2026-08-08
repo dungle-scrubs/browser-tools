@@ -51,7 +51,7 @@ try:
     from .cdp_handler import CDPHandler
     from .interstitial import format_interstitials
     from .mcp_broker import McpBroker
-    from .mcp_response import append_text, make_error, make_text
+    from .mcp_response import append_text, make_error
     from .screenshot_utils import (
         extract_screenshot_png_b64,
         screenshot_looks_blank,
@@ -59,7 +59,6 @@ try:
     from .tool_registry import (
         CDP_TOOLS,
         INSPECT_BLOCKED_TOOLS,
-        LOCAL_TOOLS,
         NAVIGATION_TOOLS,
         SCREENSHOT_GATE_TOOLS,
     )
@@ -82,7 +81,6 @@ except ImportError:
     from mcp_response import (  # type: ignore[import-untyped,no-redef]
         append_text,
         make_error,
-        make_text,
     )
     from screenshot_utils import (  # type: ignore[import-untyped,no-redef]
         extract_screenshot_png_b64,
@@ -91,7 +89,6 @@ except ImportError:
     from tool_registry import (  # type: ignore[import-untyped,no-redef]
         CDP_TOOLS,
         INSPECT_BLOCKED_TOOLS,
-        LOCAL_TOOLS,
         NAVIGATION_TOOLS,
         SCREENSHOT_GATE_TOOLS,
     )
@@ -393,44 +390,6 @@ def _take_screenshot_with_paint_gate(
     return last_response
 
 
-def _handle_local_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-    """Handle tools that execute locally in the daemon.
-
-    Args:
-        name: Tool name.
-        arguments: Tool arguments.
-
-    Returns:
-        JSON-RPC style response dict.
-    """
-    if name == "list_profiles":
-        from .profile_catalog import list_profiles
-
-        profiles = list_profiles()
-        if not profiles:
-            return make_text("No named profiles found.")
-        lines = ["Named profiles:"]
-        for p in profiles:
-            lines.append(f"  {p}")
-        return make_text("\n".join(lines))
-
-    elif name == "delete_profile":
-        from .profile_catalog import delete_profile
-
-        profile_name = arguments.get("name", "")
-        if not profile_name:
-            return make_error("Profile name is required")
-        if delete_profile(profile_name):
-            return make_text(f"Profile '{profile_name}' deleted.")
-        return make_error(f"Profile '{profile_name}' not found.")
-
-    elif name == "attach_browser":
-        # attach_browser is handled at the session level, not daemon level
-        return make_text("attach_browser handled by session wrapper")
-
-    return make_error(f"Unknown local tool: {name}")
-
-
 @dataclass
 class DispatchContext:
     """Collaborators needed to route and execute a tool call.
@@ -486,9 +445,6 @@ def dispatch_tool(request: dict[str, Any], client_id: Any, ctx: DispatchContext)
     # Route by registry flags.
     if tool_name in CDP_TOOLS:
         response = ctx.cdp_handler.call_tool(tool_name, arguments)
-        response["id"] = client_id
-    elif tool_name in LOCAL_TOOLS:
-        response = _handle_local_tool(tool_name, arguments)
         response["id"] = client_id
     elif tool_name in SCREENSHOT_GATE_TOOLS:
         response = _take_screenshot_with_paint_gate(request, client_id, ctx.broker, ctx.cdp_handler)

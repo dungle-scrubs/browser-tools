@@ -731,27 +731,6 @@ def test_all_new_tools_in_cdp_tools():
     assert not missing, f"Missing from CDP_TOOLS: {missing}"
 
 
-def test_no_new_tools_in_local_tools():
-    """New tools are NOT in LOCAL_TOOLS (they need CDP/async, not sync local)."""
-    from browser_tools.tool_registry import LOCAL_TOOLS
-
-    new_tools = {
-        "ax_find",
-        "ax_node",
-        "export_pdf",
-        "screenshot_element",
-        "wait_idle",
-        "wait_stable",
-        "get_text",
-        "get_html",
-        "get_attr",
-        "element_exists",
-        "element_visible",
-    }
-    overlap = new_tools & LOCAL_TOOLS
-    assert not overlap, f"New tools incorrectly in LOCAL_TOOLS: {overlap}"
-
-
 # ---------------------------------------------------------------------------
 # screencast tests
 # ---------------------------------------------------------------------------

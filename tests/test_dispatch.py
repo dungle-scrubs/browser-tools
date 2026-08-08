@@ -111,15 +111,6 @@ def test_cdp_tool_routes_to_cdp_handler() -> None:
     assert _text(response) == "cdp-ok"
 
 
-def test_local_tool_routes_to_local_handler() -> None:
-    canned = {"jsonrpc": "2.0", "result": {"content": [{"type": "text", "text": "local-ok"}]}}
-    with patch("browser_tools.mcp_daemon._handle_local_tool", return_value=canned) as mock_local:
-        response = dispatch_tool(_request("list_profiles"), 5, _ctx())
-    mock_local.assert_called_once_with("list_profiles", {})
-    assert response["id"] == 5
-    assert _text(response) == "local-ok"
-
-
 def test_screenshot_gate_routes_to_paint_gate() -> None:
     canned = {"jsonrpc": "2.0", "result": {"content": [{"type": "text", "text": "shot"}]}}
     with patch(

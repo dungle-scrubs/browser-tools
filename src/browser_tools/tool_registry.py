@@ -13,7 +13,6 @@ Flag meanings:
 
 - ``cdp``: routed to the CDP handler (frame/ax/page-domain tools), not the
   chrome-devtools-mcp subprocess.
-- ``local``: handled synchronously inside the daemon (no MCP or CDP round-trip).
 - ``interaction``: references an element UID, so the controller takes a
   snapshot first so the UID is valid in the current session. A strict subset
   of mutating tools - ``handle_dialog`` mutates page state but takes no UID,
@@ -29,8 +28,8 @@ Flag meanings:
   but wrapped with a paint-ready gate and blank-frame retry so the captured
   image is not a mid-animation / mid-hydration frame (``take_screenshot``).
 
-Tools absent from ``TOOLS`` are neither CDP- nor local-routed and fall through
-to the default path: forwarded unchanged to the chrome-devtools-mcp subprocess.
+Tools absent from ``TOOLS`` are not CDP-routed and fall through to the default
+path: forwarded unchanged to the chrome-devtools-mcp subprocess.
 """
 
 from __future__ import annotations
@@ -46,7 +45,6 @@ class ToolFlags:
     """
 
     cdp: bool = False
-    local: bool = False
     interaction: bool = False
     inspect_blocked: bool = False
     navigation: bool = False
@@ -58,10 +56,6 @@ class ToolFlags:
 # name -> flags. Only tools with at least one True flag need to be listed;
 # everything else is a default chrome-devtools-mcp tool forwarded as-is.
 TOOLS: dict[str, ToolFlags] = {
-    # --- Local (daemon-synchronous) tools ---
-    "attach_browser": ToolFlags(local=True),
-    "list_profiles": ToolFlags(local=True),
-    "delete_profile": ToolFlags(local=True),
     # --- Navigation (triggers interstitial detection) ---
     "navigate_page": ToolFlags(navigation=True, inspect_warn=True),
     "new_page": ToolFlags(navigation=True, inspect_warn=True, page_selecting=True),
@@ -70,7 +64,7 @@ TOOLS: dict[str, ToolFlags] = {
     # the controller's restore-before-call step. select_page is a default-
     # forwarded chrome-devtools-mcp tool (no other flags); declaring it here
     # keeps PAGE_SELECTING_TOOLS complete. Adding it with only page_selecting
-    # does not change routing, since CDP_TOOLS / LOCAL_TOOLS / etc. are derived
+    # does not change routing, since CDP_TOOLS / etc. are derived
     # from the other flags.
     "select_page": ToolFlags(page_selecting=True),
     # --- UID-based interactions (need a pre-snapshot) ---
@@ -119,7 +113,6 @@ def _names(flag: str) -> frozenset[str]:
 
 # Derived routing/behavior sets. Define these once; do not hand-maintain.
 CDP_TOOLS = _names("cdp")
-LOCAL_TOOLS = _names("local")
 INTERACTION_TOOLS = _names("interaction")
 INSPECT_BLOCKED_TOOLS = _names("inspect_blocked")
 NAVIGATION_TOOLS = _names("navigation")
@@ -133,7 +126,6 @@ __all__ = [
     "INSPECT_BLOCKED_TOOLS",
     "INSPECT_WARN_TOOLS",
     "INTERACTION_TOOLS",
-    "LOCAL_TOOLS",
     "NAVIGATION_TOOLS",
     "PAGE_SELECTING_TOOLS",
     "SCREENSHOT_GATE_TOOLS",

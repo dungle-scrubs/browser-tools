@@ -7,7 +7,6 @@ from browser_tools.tool_registry import (
     CDP_TOOLS,
     INSPECT_BLOCKED_TOOLS,
     INSPECT_WARN_TOOLS,
-    LOCAL_TOOLS,
 )
 
 
@@ -126,14 +125,9 @@ class TestToolSetCompleteness:
             f"Missing rodney tools from CDP_TOOLS: {rodney_tools - CDP_TOOLS}"
         )
 
-    def test_local_tools_are_management_tools(self) -> None:
-        """Local tools should be the management tools."""
-        expected = {"attach_browser", "list_profiles", "delete_profile"}
-        assert expected == LOCAL_TOOLS
-
     def test_no_overlap_between_sets(self) -> None:
         """Tool sets should not overlap."""
-        all_sets = [INSPECT_BLOCKED_TOOLS, CDP_TOOLS, LOCAL_TOOLS]
+        all_sets = [INSPECT_BLOCKED_TOOLS, CDP_TOOLS]
         for i, s1 in enumerate(all_sets):
             for j, s2 in enumerate(all_sets):
                 if i != j:
