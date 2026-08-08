@@ -126,7 +126,7 @@ class TestPersistentChromeController:
         self, monkeypatch, tmp_path: Path
     ) -> None:
         """Non-page-selection tools should resolve page by URL and restore selection."""
-        monkeypatch.setattr("browser_tools.persistent_browser.CACHE_DIR", tmp_path)
+        monkeypatch.setattr("browser_tools.session_layout.CACHE_DIR", tmp_path)
 
         FakeClient.responses = {
             "list_pages": make_response(
@@ -167,7 +167,7 @@ class TestPersistentChromeController:
         self, monkeypatch, tmp_path: Path
     ) -> None:
         """new_page should not reselect the prior tab before opening a new one."""
-        monkeypatch.setattr("browser_tools.persistent_browser.CACHE_DIR", tmp_path)
+        monkeypatch.setattr("browser_tools.session_layout.CACHE_DIR", tmp_path)
 
         FakeClient.responses = {
             "new_page": make_response(
@@ -198,7 +198,7 @@ class TestPersistentChromeController:
 
     def test_daemon_spawned_on_first_call(self, monkeypatch, tmp_path: Path) -> None:
         """_ensure_daemon should spawn the daemon when no daemon_pid is set."""
-        monkeypatch.setattr("browser_tools.persistent_browser.CACHE_DIR", tmp_path)
+        monkeypatch.setattr("browser_tools.session_layout.CACHE_DIR", tmp_path)
 
         controller = PersistentChromeController(
             isolated=True,
@@ -226,7 +226,7 @@ class TestPersistentChromeController:
 
     def test_daemon_not_respawned_if_alive(self, monkeypatch, tmp_path: Path) -> None:
         """_ensure_daemon should not spawn when daemon is already alive."""
-        monkeypatch.setattr("browser_tools.persistent_browser.CACHE_DIR", tmp_path)
+        monkeypatch.setattr("browser_tools.session_layout.CACHE_DIR", tmp_path)
 
         controller = PersistentChromeController(
             isolated=True,
@@ -255,7 +255,7 @@ class TestPersistentChromeController:
         """Recoverable daemon transport errors should trigger one clean retry."""
         from browser_tools.persistent_browser import MCPInvocationError
 
-        monkeypatch.setattr("browser_tools.persistent_browser.CACHE_DIR", tmp_path)
+        monkeypatch.setattr("browser_tools.session_layout.CACHE_DIR", tmp_path)
 
         controller = PersistentChromeController(
             isolated=True,

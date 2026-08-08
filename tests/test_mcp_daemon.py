@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 
-from browser_tools.persistent_browser import DaemonClient
+from browser_tools.daemon_client import DaemonClient
 
 # Path to the daemon script
 DAEMON_SCRIPT = Path(__file__).resolve().parents[1] / "src" / "browser_tools" / "mcp_daemon.py"

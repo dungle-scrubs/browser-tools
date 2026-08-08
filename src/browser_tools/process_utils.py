@@ -24,11 +24,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-try:
-    from .persistent_browser import INITIAL_PAGE_URL as _initial_page_url
-except ImportError:
-    # Fallback when imported before persistent_browser is loaded
-    _initial_page_url = "about:blank"
+from .session_layout import INITIAL_PAGE_URL as _initial_page_url
 
 _DEBUG_PORT_PATTERN = re.compile(r"--remote-debugging-port=(\d+)")
 _USER_DATA_DIR_PATTERN = re.compile(r"--user-data-dir=(\S+)")

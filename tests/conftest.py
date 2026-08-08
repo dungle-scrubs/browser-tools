@@ -15,16 +15,6 @@ def pytest_collection_modifyitems(config, items):
 
 
 @pytest.fixture
-def sample_snapshot():
-    """Sample accessibility tree snapshot."""
-    return """123 document 'Example Page'
-  456 button 'Submit Form' disabled
-  789 textbox 'Email' required
-  101 link 'Learn More'
-  202 heading 'Welcome'"""
-
-
-@pytest.fixture
 def sample_mcp_response():
     """Sample MCP tool response."""
     return {"content": [{"type": "text", "text": "Operation completed successfully"}]}

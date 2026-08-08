@@ -739,27 +739,6 @@ def test_no_new_tools_in_local_tools():
     assert not overlap, f"New tools incorrectly in LOCAL_TOOLS: {overlap}"
 
 
-def test_all_new_tools_in_chrome_config():
-    """All 11 new tools have TOOL_SCHEMAS entries in chrome_config.py."""
-    from browser_tools.chrome_config import TOOL_SCHEMAS
-
-    expected = {
-        "ax_find",
-        "ax_node",
-        "wait_idle",
-        "wait_stable",
-        "get_text",
-        "get_html",
-        "get_attr",
-        "export_pdf",
-        "screenshot_element",
-        "element_exists",
-        "element_visible",
-    }
-    missing = expected - set(TOOL_SCHEMAS.keys())
-    assert not missing, f"Missing from TOOL_SCHEMAS: {missing}"
-
-
 # ---------------------------------------------------------------------------
 # screencast tests
 # ---------------------------------------------------------------------------

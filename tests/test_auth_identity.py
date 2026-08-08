@@ -21,10 +21,10 @@ from browser_tools.persistent_browser import (
     PersistentChromeController,
     ProjectBrowserConfig,
     build_session_key,
-    create_controller_from_browser_config,
-    delete_profile,
 )
 from browser_tools.process_utils import validate_local_endpoint
+from browser_tools.profile_catalog import delete_profile
+from browser_tools.session_store import create_controller_from_browser_config
 
 
 class TestBuildSessionKey:
@@ -68,7 +68,7 @@ class TestControllerProfileDir:
 
     def test_headed_headless_same_user_data_dir(self, monkeypatch, tmp_path: Path) -> None:
         """A headed and a headless call share cookies via one profile dir."""
-        monkeypatch.setattr("browser_tools.persistent_browser.CACHE_DIR", tmp_path)
+        monkeypatch.setattr("browser_tools.session_layout.CACHE_DIR", tmp_path)
         headed = PersistentChromeController(headless=False, isolated=False)
         headless = PersistentChromeController(headless=True, isolated=False)
         assert headed.user_data_dir == headless.user_data_dir
@@ -91,7 +91,7 @@ class TestIsStateUsable:
 
     def test_reused_across_headless_switch(self, monkeypatch, tmp_path: Path) -> None:
         """Saved headed state is still usable for a headless controller."""
-        monkeypatch.setattr("browser_tools.persistent_browser.CACHE_DIR", tmp_path)
+        monkeypatch.setattr("browser_tools.session_layout.CACHE_DIR", tmp_path)
         controller = PersistentChromeController(headless=True, isolated=False)
         state = self._state(controller, headless=False)  # saved by a headed run
         with (
@@ -102,7 +102,7 @@ class TestIsStateUsable:
 
     def test_rejected_on_channel_mismatch(self, monkeypatch, tmp_path: Path) -> None:
         """A different channel points at a different profile dir."""
-        monkeypatch.setattr("browser_tools.persistent_browser.CACHE_DIR", tmp_path)
+        monkeypatch.setattr("browser_tools.session_layout.CACHE_DIR", tmp_path)
         controller = PersistentChromeController(isolated=False, channel="canary")
         state = self._state(controller, channel="stable")
         with patch("browser_tools.persistent_browser.is_devtools_available", return_value=True):
@@ -110,7 +110,7 @@ class TestIsStateUsable:
 
     def test_rejected_on_user_data_dir_mismatch(self, monkeypatch, tmp_path: Path) -> None:
         """Recorded state describing a different dir must not be trusted."""
-        monkeypatch.setattr("browser_tools.persistent_browser.CACHE_DIR", tmp_path)
+        monkeypatch.setattr("browser_tools.session_layout.CACHE_DIR", tmp_path)
         controller = PersistentChromeController(isolated=False)
         state = self._state(controller, user_data_dir=str(tmp_path / "somewhere-else"))
         with patch("browser_tools.persistent_browser.is_devtools_available", return_value=True):
@@ -145,7 +145,7 @@ class TestCreateControllerFromConfig:
     def test_mode_matrix(
         self, monkeypatch, tmp_path: Path, mode, expected_headless, expected_isolated
     ) -> None:
-        monkeypatch.setattr("browser_tools.persistent_browser.CACHE_DIR", tmp_path)
+        monkeypatch.setattr("browser_tools.session_layout.CACHE_DIR", tmp_path)
         controller = create_controller_from_browser_config(
             ProjectBrowserConfig(mode=mode), source="test"
         )
@@ -154,7 +154,7 @@ class TestCreateControllerFromConfig:
 
     def test_profile_forces_persistent(self, monkeypatch, tmp_path: Path) -> None:
         """A named profile must never be isolated (no E005 raise)."""
-        monkeypatch.setattr("browser_tools.persistent_browser.CACHE_DIR", tmp_path)
+        monkeypatch.setattr("browser_tools.session_layout.CACHE_DIR", tmp_path)
         controller = create_controller_from_browser_config(
             ProjectBrowserConfig(mode="headless", profile="dev"), source="test"
         )
@@ -162,7 +162,7 @@ class TestCreateControllerFromConfig:
         assert controller.profile == "dev"
 
     def test_explicit_flags_override_mode_defaults(self, monkeypatch, tmp_path: Path) -> None:
-        monkeypatch.setattr("browser_tools.persistent_browser.CACHE_DIR", tmp_path)
+        monkeypatch.setattr("browser_tools.session_layout.CACHE_DIR", tmp_path)
         controller = create_controller_from_browser_config(
             ProjectBrowserConfig(mode="headless", headless=False, isolated=False), source="test"
         )
@@ -175,14 +175,14 @@ class TestDeleteProfileTraversal:
 
     @pytest.mark.parametrize("name", ["..", ".", "../evil", "a/b", "a\\b", "", "a\x00b"])
     def test_rejects_unsafe_names(self, monkeypatch, tmp_path: Path, name) -> None:
-        monkeypatch.setattr("browser_tools.persistent_browser.CACHE_DIR", tmp_path)
+        monkeypatch.setattr("browser_tools.session_layout.CACHE_DIR", tmp_path)
         outside = tmp_path / "evil"
         outside.mkdir()
         assert delete_profile(name) is False
         assert outside.exists()  # nothing outside profiles/ was touched
 
     def test_deletes_valid_profile(self, monkeypatch, tmp_path: Path) -> None:
-        monkeypatch.setattr("browser_tools.persistent_browser.CACHE_DIR", tmp_path)
+        monkeypatch.setattr("browser_tools.session_layout.CACHE_DIR", tmp_path)
         (tmp_path / "profiles" / "dev").mkdir(parents=True)
         assert delete_profile("dev") is True
         assert not (tmp_path / "profiles" / "dev").exists()

@@ -93,17 +93,25 @@ IDLE_TIMEOUT_SECONDS = 30 * 60  # 30 minutes
 MCP_INIT_TIMEOUT_SECONDS = 60
 
 
-def _terminate_owned_chrome(chrome_pid: int | None, chrome_owned: bool) -> None:
+def _terminate_owned_chrome(
+    chrome_pid: int | None,
+    chrome_owned: bool,
+    chrome_user_data_dir: str | None,
+) -> None:
     """Quit the tool-launched Chrome when the daemon shuts down or idles out.
 
     Only fires when browser-tools launched Chrome into a private automation
     profile it owns; an externally attached or real-profile Chrome is never
-    touched. Sends SIGTERM, then SIGKILL if it does not exit promptly, so the
-    user never has to hunt for and kill an orphaned automation browser.
+    touched. Delegates to the controller's ``quit_owned_chrome`` so there is a
+    single owner for owned-Chrome teardown - the daemon inherits the same
+    SIGTERM -> SIGKILL sequence and stale-lock cleanup, and never re-implements
+    process signalling.
 
     Args:
         chrome_pid: PID of the tool-launched Chrome, if known.
         chrome_owned: Whether that Chrome is a private profile safe to quit.
+        chrome_user_data_dir: The Chrome's profile directory, so its stale
+            singleton lock is cleaned after it exits. None skips lock cleanup.
 
     Returns:
         None.
@@ -111,19 +119,10 @@ def _terminate_owned_chrome(chrome_pid: int | None, chrome_owned: bool) -> None:
     if not chrome_owned or chrome_pid is None:
         return
     try:
-        from .process_utils import is_process_alive, terminate_process
+        from .persistent_browser import quit_owned_chrome
     except ImportError:
-        from browser_tools.process_utils import is_process_alive, terminate_process
-
-    if not is_process_alive(chrome_pid):
-        return
-    terminate_process(chrome_pid)  # SIGTERM
-    deadline = time.time() + 5.0
-    while time.time() < deadline and is_process_alive(chrome_pid):
-        time.sleep(0.1)
-    if is_process_alive(chrome_pid):
-        with contextlib.suppress(ProcessLookupError, PermissionError):
-            os.kill(chrome_pid, signal.SIGKILL)
+        from browser_tools.persistent_browser import quit_owned_chrome
+    quit_owned_chrome(chrome_pid, chrome_user_data_dir, None)
 
 
 def main(
@@ -135,6 +134,7 @@ def main(
     stealth: bool = False,
     chrome_pid: int | None = None,
     chrome_owned: bool = False,
+    chrome_user_data_dir: str | None = None,
 ) -> None:
     """Run the MCP daemon broker.
 
@@ -151,6 +151,7 @@ def main(
         stealth: Whether to inject stealth patches to reduce automation fingerprinting.
         chrome_pid: PID of the tool-launched Chrome to quit on idle/shutdown.
         chrome_owned: Whether that Chrome is a private profile safe to quit.
+        chrome_user_data_dir: That Chrome's profile directory, for stale-lock cleanup.
 
     Returns:
         None.
@@ -273,7 +274,7 @@ def main(
             if time.time() - last_activity[0] > IDLE_TIMEOUT_SECONDS:
                 _reap_process(proc)
                 cdp_handler.stop()
-                _terminate_owned_chrome(chrome_pid, chrome_owned)
+                _terminate_owned_chrome(chrome_pid, chrome_owned, chrome_user_data_dir)
                 _cleanup_files(socket_path, pid_file)
                 os._exit(0)
 
@@ -303,7 +304,7 @@ def main(
         """
         _reap_process(proc)
         cdp_handler.stop()
-        _terminate_owned_chrome(chrome_pid, chrome_owned)
+        _terminate_owned_chrome(chrome_pid, chrome_owned, chrome_user_data_dir)
         server.close()
         _cleanup_files(socket_path, pid_file)
         sys.exit(0)
@@ -610,7 +611,7 @@ def _handle_local_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         JSON-RPC style response dict.
     """
     if name == "list_profiles":
-        from .persistent_browser import list_profiles
+        from .profile_catalog import list_profiles
 
         profiles = list_profiles()
         if not profiles:
@@ -621,7 +622,7 @@ def _handle_local_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         return make_text("\n".join(lines))
 
     elif name == "delete_profile":
-        from .persistent_browser import delete_profile
+        from .profile_catalog import delete_profile
 
         profile_name = arguments.get("name", "")
         if not profile_name:
@@ -702,6 +703,11 @@ if __name__ == "__main__":
         action="store_true",
         help="Whether the Chrome at --chrome-pid is a private profile safe to quit",
     )
+    parser.add_argument(
+        "--chrome-user-data-dir",
+        default=None,
+        help="Profile directory of the owned Chrome, for stale-lock cleanup on quit",
+    )
     args = parser.parse_args()
 
     try:
@@ -718,4 +724,5 @@ if __name__ == "__main__":
         args.stealth,
         args.chrome_pid,
         args.chrome_owned,
+        args.chrome_user_data_dir,
     )

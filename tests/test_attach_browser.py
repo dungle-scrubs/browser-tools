@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 
-from browser_tools.browser_tools_session import (
+from browser_tools.browser_session import (
     _format_live_profile_conflict_error,
     choose_live_profile_fallback,
     handle_attach_browser,
@@ -24,12 +24,14 @@ from browser_tools.browser_tools_session import (
 from browser_tools.persistent_browser import (
     BrowserState,
     PersistentChromeController,
-    create_project_preferred_controller,
     enumerate_tabs,
-    find_live_profiles,
+    select_tab_by_url,
+)
+from browser_tools.profile_catalog import find_live_profiles
+from browser_tools.session_store import (
+    create_project_preferred_controller,
     load_active_attach_controller,
     load_session_override,
-    select_tab_by_url,
 )
 
 
@@ -152,7 +154,7 @@ class TestAttachBrowserTool:
 
     def test_attach_sets_browser_url(self, monkeypatch, tmp_path: Path, fake_chrome: str) -> None:
         """attach_browser should configure the controller with the endpoint."""
-        monkeypatch.setattr("browser_tools.persistent_browser.CACHE_DIR", tmp_path)
+        monkeypatch.setattr("browser_tools.session_layout.CACHE_DIR", tmp_path)
 
         controller = PersistentChromeController(
             isolated=False,
@@ -166,7 +168,7 @@ class TestAttachBrowserTool:
         self, monkeypatch, tmp_path: Path, fake_chrome: str
     ) -> None:
         """When browser_url is set, no new Chrome process should be spawned."""
-        monkeypatch.setattr("browser_tools.persistent_browser.CACHE_DIR", tmp_path)
+        monkeypatch.setattr("browser_tools.session_layout.CACHE_DIR", tmp_path)
 
         controller = PersistentChromeController(
             isolated=False,
@@ -184,7 +186,7 @@ class TestAttachBrowserTool:
         fake_chrome: str,
     ) -> None:
         """attach_browser should save enough state for the next request to reuse it."""
-        monkeypatch.setattr("browser_tools.persistent_browser.CACHE_DIR", tmp_path)
+        monkeypatch.setattr("browser_tools.session_layout.CACHE_DIR", tmp_path)
 
         controller_ref = [None]
         response = handle_attach_browser(
@@ -216,7 +218,7 @@ class TestAttachBrowserTool:
         tmp_path: Path,
     ) -> None:
         """Project preference should select the same headed auth profile by default."""
-        monkeypatch.setattr("browser_tools.persistent_browser.CACHE_DIR", tmp_path / "cache")
+        monkeypatch.setattr("browser_tools.session_layout.CACHE_DIR", tmp_path / "cache")
         monkeypatch.setenv("CLAUDE_CWD", str(tmp_path))
         (tmp_path / ".browser-tools.json").write_text(
             json.dumps(
@@ -244,7 +246,7 @@ class TestAttachBrowserTool:
         fake_chrome: str,
     ) -> None:
         """Project preference should support a stable external Chrome endpoint."""
-        monkeypatch.setattr("browser_tools.persistent_browser.CACHE_DIR", tmp_path / "cache")
+        monkeypatch.setattr("browser_tools.session_layout.CACHE_DIR", tmp_path / "cache")
         monkeypatch.setenv("CLAUDE_CWD", str(tmp_path))
         (tmp_path / ".tool-proxy").mkdir()
         (tmp_path / ".tool-proxy" / "browser-tools.json").write_text(
@@ -273,7 +275,7 @@ class TestAttachBrowserTool:
         tmp_path: Path,
     ) -> None:
         """Explicit headless mode should override project headed-auth preference."""
-        monkeypatch.setattr("browser_tools.persistent_browser.CACHE_DIR", tmp_path / "cache")
+        monkeypatch.setattr("browser_tools.session_layout.CACHE_DIR", tmp_path / "cache")
         monkeypatch.setenv("CLAUDE_CWD", str(tmp_path))
         (tmp_path / ".browser-tools.json").write_text(
             json.dumps({"preferredSession": {"mode": "headed-auth", "profile": "google-auth"}})
@@ -302,7 +304,7 @@ class TestAttachBrowserTool:
         profile) so each project keeps its own login and the default headless
         session reuses the same cookies.
         """
-        monkeypatch.setattr("browser_tools.persistent_browser.CACHE_DIR", tmp_path / "cache")
+        monkeypatch.setattr("browser_tools.session_layout.CACHE_DIR", tmp_path / "cache")
         monkeypatch.setenv("CLAUDE_CWD", str(tmp_path))
 
         response = handle_use_browser_session([None], {"mode": "headed"})
@@ -319,7 +321,7 @@ class TestAttachBrowserTool:
         tmp_path: Path,
     ) -> None:
         """Headless auth should use the project auth profile when available."""
-        monkeypatch.setattr("browser_tools.persistent_browser.CACHE_DIR", tmp_path / "cache")
+        monkeypatch.setattr("browser_tools.session_layout.CACHE_DIR", tmp_path / "cache")
         monkeypatch.setenv("CLAUDE_CWD", str(tmp_path))
         (tmp_path / ".browser-tools.json").write_text(
             json.dumps({"preferredSession": {"mode": "headed-auth", "profile": "project-auth"}})
@@ -338,7 +340,7 @@ class TestAttachBrowserTool:
         tmp_path: Path,
     ) -> None:
         """browser_session_status should expose the selected session source."""
-        monkeypatch.setattr("browser_tools.persistent_browser.CACHE_DIR", tmp_path / "cache")
+        monkeypatch.setattr("browser_tools.session_layout.CACHE_DIR", tmp_path / "cache")
         monkeypatch.setenv("CLAUDE_CWD", str(tmp_path))
         handle_use_browser_session([None], {"mode": "headed-auth", "profile": "dev-auth"})
 
@@ -355,7 +357,7 @@ class TestAttachByProfile:
     def _setup_profile(self, monkeypatch, tmp_path: Path, fake_chrome: str, profile: str) -> Path:
         from urllib.parse import urlparse
 
-        monkeypatch.setattr("browser_tools.persistent_browser.CACHE_DIR", tmp_path)
+        monkeypatch.setattr("browser_tools.session_layout.CACHE_DIR", tmp_path)
         profile_dir = tmp_path / "profiles" / profile
         profile_dir.mkdir(parents=True)
         port = urlparse(fake_chrome).port
@@ -387,7 +389,7 @@ class TestAttachByProfile:
 
     def test_attach_with_no_profile_or_endpoint_errors(self, monkeypatch, tmp_path: Path) -> None:
         """Missing both profile and endpoint should return a clear error."""
-        monkeypatch.setattr("browser_tools.persistent_browser.CACHE_DIR", tmp_path)
+        monkeypatch.setattr("browser_tools.session_layout.CACHE_DIR", tmp_path)
         response = handle_attach_browser([None], {})
         assert response["result"]["isError"] is True
         assert "endpoint" in response["result"]["content"][0]["text"]
@@ -395,7 +397,7 @@ class TestAttachByProfile:
 
     def test_attach_with_unknown_profile_errors(self, monkeypatch, tmp_path: Path) -> None:
         """Unknown profile name should suggest list_profiles."""
-        monkeypatch.setattr("browser_tools.persistent_browser.CACHE_DIR", tmp_path)
+        monkeypatch.setattr("browser_tools.session_layout.CACHE_DIR", tmp_path)
         response = handle_attach_browser([None], {"profile": "ghost"})
         assert response["result"]["isError"] is True
         text = response["result"]["content"][0]["text"]
@@ -404,7 +406,7 @@ class TestAttachByProfile:
 
     def test_attach_profile_no_running_chrome_errors(self, monkeypatch, tmp_path: Path) -> None:
         """Profile dir present but no Chrome should hint at use_browser_session."""
-        monkeypatch.setattr("browser_tools.persistent_browser.CACHE_DIR", tmp_path)
+        monkeypatch.setattr("browser_tools.session_layout.CACHE_DIR", tmp_path)
         (tmp_path / "profiles" / "dev").mkdir(parents=True)
         monkeypatch.setattr(
             "browser_tools.persistent_browser.read_singleton_lock_pid", lambda d: None
@@ -421,7 +423,7 @@ class TestAttachByProfile:
         self, monkeypatch, tmp_path: Path
     ) -> None:
         """Live process + unreachable DevTools should return E001 with recovery steps."""
-        monkeypatch.setattr("browser_tools.persistent_browser.CACHE_DIR", tmp_path)
+        monkeypatch.setattr("browser_tools.session_layout.CACHE_DIR", tmp_path)
         (tmp_path / "profiles" / "dev").mkdir(parents=True)
         monkeypatch.setattr(
             "browser_tools.persistent_browser.read_singleton_lock_pid", lambda d: 4242
@@ -454,7 +456,7 @@ class TestAttachByProfile:
         """If endpoint points at a Chrome running a different profile, reject."""
         from urllib.parse import urlparse
 
-        monkeypatch.setattr("browser_tools.persistent_browser.CACHE_DIR", tmp_path)
+        monkeypatch.setattr("browser_tools.session_layout.CACHE_DIR", tmp_path)
         (tmp_path / "profiles" / "dev").mkdir(parents=True)
         port = urlparse(fake_chrome).port
         # Listener on the endpoint port returns a PID running a *different* dir.
@@ -482,9 +484,9 @@ class TestListProfilesStatus:
     ) -> None:
         from urllib.parse import urlparse
 
-        from browser_tools.browser_tools_session import handle_list_profiles
+        from browser_tools.browser_session import handle_list_profiles
 
-        monkeypatch.setattr("browser_tools.persistent_browser.CACHE_DIR", tmp_path)
+        monkeypatch.setattr("browser_tools.session_layout.CACHE_DIR", tmp_path)
         (tmp_path / "profiles" / "live-app").mkdir(parents=True)
         (tmp_path / "profiles" / "stopped-app").mkdir(parents=True)
 
@@ -493,10 +495,10 @@ class TestListProfilesStatus:
         def fake_lock(profile_dir):
             return 6414 if profile_dir.name == "live-app" else None
 
-        monkeypatch.setattr("browser_tools.persistent_browser.read_singleton_lock_pid", fake_lock)
-        monkeypatch.setattr("browser_tools.persistent_browser.is_process_alive", lambda pid: True)
+        monkeypatch.setattr("browser_tools.profile_catalog.read_singleton_lock_pid", fake_lock)
+        monkeypatch.setattr("browser_tools.profile_catalog.is_process_alive", lambda pid: True)
         monkeypatch.setattr(
-            "browser_tools.persistent_browser.find_chrome_debug_port", lambda pid: port
+            "browser_tools.profile_catalog.find_chrome_debug_port", lambda pid: port
         )
 
         response = handle_list_profiles({})
@@ -539,7 +541,7 @@ class TestLiveProfileFallback:
                 live and answering on that port; ``None`` makes the singleton
                 lock empty (stopped).
         """
-        monkeypatch.setattr("browser_tools.persistent_browser.CACHE_DIR", tmp_path)
+        monkeypatch.setattr("browser_tools.session_layout.CACHE_DIR", tmp_path)
         for name in profiles:
             (tmp_path / "profiles" / name).mkdir(parents=True)
 
@@ -550,10 +552,10 @@ class TestLiveProfileFallback:
         def fake_lock(profile_dir):
             return name_to_pid.get(profile_dir.name) if profiles.get(profile_dir.name) else None
 
-        monkeypatch.setattr("browser_tools.persistent_browser.read_singleton_lock_pid", fake_lock)
-        monkeypatch.setattr("browser_tools.persistent_browser.is_process_alive", lambda pid: True)
+        monkeypatch.setattr("browser_tools.profile_catalog.read_singleton_lock_pid", fake_lock)
+        monkeypatch.setattr("browser_tools.profile_catalog.is_process_alive", lambda pid: True)
         monkeypatch.setattr(
-            "browser_tools.persistent_browser.find_chrome_debug_port",
+            "browser_tools.profile_catalog.find_chrome_debug_port",
             lambda pid: pid_to_port.get(pid),
         )
 
@@ -639,7 +641,7 @@ class TestLiveProfileFallback:
         self, monkeypatch, tmp_path: Path
     ) -> None:
         """No live profiles should leave the caller to use the default."""
-        monkeypatch.setattr("browser_tools.persistent_browser.CACHE_DIR", tmp_path)
+        monkeypatch.setattr("browser_tools.session_layout.CACHE_DIR", tmp_path)
         (tmp_path / "profiles").mkdir()
 
         live = find_live_profiles()
@@ -752,7 +754,7 @@ class TestLiveProfileFallback:
         self, monkeypatch, tmp_path: Path
     ) -> None:
         """Zero live profiles should produce the default headless-isolated controller."""
-        monkeypatch.setattr("browser_tools.persistent_browser.CACHE_DIR", tmp_path)
+        monkeypatch.setattr("browser_tools.session_layout.CACHE_DIR", tmp_path)
         (tmp_path / "profiles").mkdir()
 
         controller, conflict = select_default_controller()
