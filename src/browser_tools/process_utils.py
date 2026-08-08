@@ -414,3 +414,45 @@ def terminate_process(pid: int | None) -> None:
         os.kill(pid, signal.SIGTERM)
     except OSError:
         return
+
+
+def terminate_process_and_wait(pid: int | None, timeout: float = 5.0) -> bool:
+    """Terminate a process and block until it exits, escalating to SIGKILL.
+
+    Unlike :func:`terminate_process` (fire-and-forget SIGTERM), this waits
+    for the process to actually exit so a caller can safely reuse the
+    resources it held - notably a Chrome user-data-dir SingletonLock, which
+    a still-dying Chrome would keep and hand off to a relaunch. SIGTERM is
+    tried first; if the process is still alive after ``timeout`` seconds it
+    is SIGKILLed and reaped.
+
+    Args:
+        pid: Process id to terminate.
+        timeout: Seconds to wait after SIGTERM before escalating to SIGKILL.
+
+    Returns:
+        True when the process is gone before the deadline, False if it could
+        not be reaped (already dead, or permission/ESRCH errors).
+    """
+    if pid is None:
+        return True
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except OSError:
+        # Already gone, or not ours - either way, nothing to wait on.
+        return True
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if not is_process_alive(pid):
+            return True
+        time.sleep(0.1)
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except OSError:
+        return not is_process_alive(pid)
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if not is_process_alive(pid):
+            return True
+        time.sleep(0.1)
+    return not is_process_alive(pid)

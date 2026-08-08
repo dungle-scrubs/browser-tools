@@ -7,6 +7,7 @@ Simplified CLI for Chrome DevTools MCP with snapshot-based architecture
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import sys
 from typing import Any
@@ -15,6 +16,7 @@ from .browser_state import (
     AUTH_MODES,
     HEADED_AUTH_MODES,
     HEADLESS_AUTH_MODES,
+    BrowserState,
     normalize_mode,
 )
 from .chrome_config import get_mcp_command
@@ -32,7 +34,7 @@ from .persistent_browser import (
     clear_session_override,
     create_project_preferred_controller,
     create_session_override_controller,
-    find_live_profiles,
+    extract_text_items,
     get_browser_session_status,
     load_active_attach_controller,
     load_project_browser_config,
@@ -694,8 +696,10 @@ def handle_use_browser_session(controller_ref: list[Any], args: Any) -> dict[str
             profile = project_config.profile
         if endpoint is None and project_config is not None and mode not in HEADLESS_AUTH_MODES:
             endpoint = project_config.endpoint or project_config.browser_url
-        if profile is None and endpoint is None:
-            profile = "google-auth"
+        # When neither a profile nor an endpoint is given, auth now lands in
+        # this project's own bucket (profile=None) rather than a shared global
+        # "google-auth" named profile, so each project keeps its own login and
+        # the default headless session reuses the same cookies.
 
     # Validate the resolved endpoint (whether from args or the project config)
     # before it is persisted and later dialed.
@@ -808,101 +812,239 @@ def _camoufox_result_to_mcp(result: dict[str, Any]) -> dict[str, Any]:
     return {"result": {"content": [{"type": "text", "text": text}]}}
 
 
-def choose_live_profile_fallback() -> tuple[
-    PersistentChromeController | None, list[dict[str, Any]]
-]:
-    """Decide whether to auto-attach to a live profile when no session is configured.
-
-    Returns:
-        ``(controller, live)``.
-
-        - ``controller`` is non-None only when exactly one named profile has a
-          reachable DevTools endpoint; in that case it is configured to reuse
-          that running Chrome.
-        - ``live`` is the full list of live-profile descriptors. When it has
-          more than one entry the caller should refuse to launch a new browser
-          and instead surface the list so the agent can pick one explicitly.
-    """
-    live = find_live_profiles()
-    if len(live) == 1:
-        info = live[0]
-        controller = PersistentChromeController(
-            headless=False,
-            isolated=False,
-            channel="canary",
-            profile=info["profile"],
-            force_persistent=True,
-        )
-        controller.mode = "full"
-        return controller, live
-    return None, live
-
-
 def select_default_controller() -> tuple[PersistentChromeController, list[dict[str, Any]] | None]:
-    """Pick a controller when no explicit session is configured.
+    """Pick the controller when no explicit session is configured.
 
-    Prefers a sole live profile over a fresh headless-isolated Chrome so the
-    agent does not start "random new sessions" while a real browser is open.
+    Each project resolves to exactly one persistent bucket (keyed on its git
+    root), so the default is simply that bucket. A live Chrome already on it
+    is reused via :meth:`PersistentChromeController.ensure_browser_state`;
+    otherwise the first tool call launches a single headless instance that
+    every later call in the project shares. Per-project isolation is
+    preserved: another project's browser is never silently attached to.
 
     Returns:
-        ``(controller, conflict)``.
-
-        - When exactly one profile is live, returns its reuse controller and
-          ``conflict=None``.
-        - When zero profiles are live, returns the default headless-isolated
-          controller and ``conflict=None``.
-        - When multiple profiles are live, returns the default
-          headless-isolated controller and the live-profile list as
-          ``conflict`` so the caller can refuse non-session tools.
+        ``(controller, None)``. The second slot is retained for caller
+        compatibility and is always None now that the default never crosses
+        project boundaries.
     """
-    fallback, live = choose_live_profile_fallback()
-    if fallback is not None:
-        return fallback, None
-    default = PersistentChromeController(
+    controller = PersistentChromeController(
         headless=True,
-        isolated=True,
         channel="canary",
         force_persistent=True,
     )
-    conflict = live if len(live) > 1 else None
-    return default, conflict
+    controller.mode = "full"
+    return controller, None
 
 
-def _format_live_profile_conflict_error(live: list[dict[str, Any]]) -> dict[str, Any]:
-    """Build a tool-proxy error response describing multiple live profiles.
+# ---------------------------------------------------------------------------
+# Session lifecycle: single-tab navigation, close_browser, auth promotion
+# ---------------------------------------------------------------------------
+
+
+def _extract_page_ids(list_response: dict[str, Any]) -> list[int]:
+    """Extract page ids (in listed order) from a list_pages response.
 
     Args:
-        live: ``describe_profile_runtime`` descriptors for live profiles.
+        list_response: Raw JSON-RPC response from list_pages.
 
     Returns:
-        MCP-style error response telling the agent how to disambiguate.
+        Ordered list of integer page ids.
     """
-    lines = [
-        f"Multiple browser profiles are live ({len(live)}). Refusing to launch a new headless",
-        "Chrome that would ignore them. Pick one explicitly:",
-        "",
-    ]
-    for info in live:
-        name = info.get("profile", "?")
-        endpoint = info.get("endpoint") or "?"
-        url = info.get("current_url") or "(no active page)"
-        tabs = info.get("tab_count", 0)
-        lines.append(f"  - {name}: {endpoint} ({tabs} tab(s)) — {url}")
-    lines.extend(
-        [
-            "",
-            "Recover with one of:",
-            "  use_browser_session(mode='headed-auth', profile='<name>')",
-            "  attach_browser(profile='<name>')",
-            "Or call use_browser_session(mode='headless') to opt into a fresh isolated session.",
-        ]
+    from .persistent_browser import PAGE_LINE_PATTERN
+
+    ids: list[int] = []
+    for text in extract_text_items(list_response):
+        for match in PAGE_LINE_PATTERN.finditer(text):
+            try:
+                ids.append(int(match.group(1)))
+            except ValueError:
+                continue
+    return ids
+
+
+def _handle_new_page_single_tab(
+    controller: PersistentChromeController, url: Any
+) -> dict[str, Any]:
+    """Open ``url`` in the single active tab instead of stacking a new one.
+
+    Navigates the existing first tab to the URL, then closes every other tab
+    so the browser holds exactly one page. This is the single-tab model that
+    stops the accumulation the agent otherwise causes by calling new_page.
+
+    Args:
+        controller: Active persistent controller.
+        url: URL to load.
+
+    Returns:
+        The navigate_page response for the reused tab (or a fresh list_pages
+        response if extra tabs were closed).
+    """
+    ids = _extract_page_ids(controller.invoke_tool("list_pages", {}))
+    if not ids:
+        # No tab at all (launch normally opens about:blank); create one.
+        return controller.invoke_tool("new_page", {"url": url})
+
+    controller.invoke_tool("select_page", {"pageId": ids[0]})
+    response = controller.invoke_tool("navigate_page", {"type": "url", "url": url})
+
+    # Close any remaining tabs. Re-list each iteration: closing a page can
+    # renumber the rest, so a stale id list would miss or mis-target one.
+    closed_any = False
+    for _ in range(20):  # hard cap to avoid an infinite loop on misbehavior
+        current = _extract_page_ids(controller.invoke_tool("list_pages", {}))
+        extras = current[1:] if len(current) > 1 else []
+        if not extras:
+            break
+        try:
+            controller.invoke_tool("close_page", {"pageId": extras[0]})
+            closed_any = True
+        except BrowserToolsError:
+            break
+    if closed_any:
+        response = controller.invoke_tool("list_pages", {})
+    return response
+
+
+def _response_signals_auth_wall(response: dict[str, Any]) -> bool:
+    """Return whether a navigation response carries an auth-wall interstitial.
+
+    The daemon appends an interstitial summary to navigation responses; the
+    auth_wall detector fires on login forms and sign-in page titles.
+
+    Args:
+        response: Raw JSON-RPC response from a navigation tool.
+
+    Returns:
+        True when an auth_wall signal is present in the response text.
+    """
+    return any("auth_wall" in text for text in extract_text_items(response))
+
+
+def _maybe_promote_on_auth_wall(
+    controller_ref: list[Any],
+    controller: PersistentChromeController,
+    response: dict[str, Any],
+    url: Any,
+) -> dict[str, Any]:
+    """Promote a headless session to headed when a navigation hits auth.
+
+    Headless Chrome cannot complete an OAuth/login handshake, so when the
+    interstitial detector reports an auth wall on a headless session the
+    headless Chrome is torn down and a headed one is launched on the same
+    profile dir (cookies survive on disk). The caller is told to finish
+    sign-in; future headless calls then reuse the authenticated profile.
+
+    Args:
+        controller_ref: Single-element list holding the active controller.
+        controller: Controller used for the navigation.
+        response: Navigation response to inspect.
+        url: URL to re-navigate in the headed window.
+
+    Returns:
+        The original response, or a promotion notice when promoted.
+    """
+    if not getattr(controller, "headless", False):
+        return response
+    if not _response_signals_auth_wall(response):
+        return response
+    headed = _promote_headless_to_headed(controller, url if isinstance(url, str) else None)
+    if headed is None:
+        return response
+    controller_ref[0] = headed
+    target = url if isinstance(url, str) else "the page"
+    notice = (
+        "Auth required — switched from headless to a headed window on the same "
+        f"profile at {target}. Complete sign-in there, then re-run the action. "
+        "Login persists on disk, so future headless sessions reuse it without "
+        "re-auth."
     )
-    return {
-        "result": {
-            "content": [{"type": "text", "text": "\n".join(lines)}],
-            "isError": True,
+    return {"result": {"content": [{"type": "text", "text": notice}]}}
+
+
+def _promote_headless_to_headed(
+    controller: PersistentChromeController, url: str | None
+) -> PersistentChromeController | None:
+    """Tear down the headless Chrome and relaunch headed on the same profile.
+
+    Args:
+        controller: Headless controller to replace.
+        url: Optional URL to navigate in the headed window.
+
+    Returns:
+        A new headed controller, or None if relaunch failed.
+    """
+    # Quit the headless Chrome + daemon but keep the user-data-dir (cookies).
+    controller.close_owned_browser()
+    headed = PersistentChromeController(
+        headless=False,
+        channel=controller.channel,
+        profile=controller.profile,
+        browser_url=None,
+        force_persistent=True,
+    )
+    headed.mode = controller.mode or "full"
+    try:
+        headed.ensure_browser_state()
+    except BrowserToolsError:
+        return None
+    if url:
+        with contextlib.suppress(BrowserToolsError):
+            headed.invoke_tool("navigate_page", {"type": "url", "url": url})
+    return headed
+
+
+def _handle_close_browser(controller_ref: list[Any], args: Any) -> dict[str, Any]:
+    """Handle the close_browser tool.
+
+    Stops the MCP daemon and then, by ownership: quits a tool-launched Chrome
+    (keeping its profile on disk so reopening does not re-auth), or detaches
+    from an externally attached browser and leaves it running.
+
+    Args:
+        controller_ref: Single-element list holding the active controller.
+        args: Tool arguments (``reset_session`` optional).
+
+    Returns:
+        JSON-RPC response dict describing what was torn down.
+    """
+    reset = bool(args.get("reset_session", False)) if isinstance(args, dict) else False
+    controller = controller_ref[0]
+    if controller is None:
+        controller = load_active_attach_controller()
+    if controller is None:
+        return {
+            "result": {
+                "content": [{"type": "text", "text": "No active browser session to close."}]
+            }
         }
-    }
+
+    state = BrowserState.from_path(controller.state_path)
+    owned = state is not None and state.pid is not None
+    if owned:
+        teardown = controller.close_owned_browser()
+        if teardown.get("chrome_quit"):
+            msg = (
+                "Tool-launched Chrome quit and MCP daemon stopped. Profile state "
+                "(cookies, login) is preserved on disk — the next call reopens the "
+                "same profile without re-auth."
+            )
+        else:
+            msg = (
+                "No live Chrome process found (already stopped); cleared its stale "
+                "session state. Profile dir is preserved on disk."
+            )
+    else:
+        controller.stop_daemon_only()
+        clear_active_attach_config()
+        msg = (
+            "Detached from the external browser (left running) and stopped the "
+            "browser-tools daemon."
+        )
+    if reset:
+        clear_session_override()
+        msg += " Session override cleared; project preference will be used next."
+    controller_ref[0] = None
+    return {"result": {"content": [{"type": "text", "text": msg}]}}
 
 
 def create_tool_proxy_handlers():
@@ -915,9 +1057,6 @@ def create_tool_proxy_handlers():
     controller_ref: list[Any] = [None]
     # Camoufox session ref — when not None, standard tools route through it
     camoufox_ref: list[Any] = [None]
-    # Populated when multiple profiles are live and no session is configured.
-    # Non-session tools fail loudly until the agent picks one.
-    live_profile_conflict: list[Any] = [None]
 
     def create_session():
         override = create_session_override_controller()
@@ -935,15 +1074,8 @@ def create_tool_proxy_handlers():
             controller_ref[0] = attached
             return attached
 
-        c, conflict = select_default_controller()
+        c, _conflict = select_default_controller()
         controller_ref[0] = c
-        if conflict is not None:
-            live_profile_conflict[0] = conflict
-        elif not c.isolated and c.profile:
-            print(
-                f"[browser-tools] Auto-attached to sole live profile '{c.profile}'",
-                file=sys.stderr,
-            )
         return c
 
     def call_tool(controller: PersistentChromeController, tool: str, args: Any) -> dict[str, Any]:
@@ -998,15 +1130,22 @@ def create_tool_proxy_handlers():
             return handle_list_profiles(args)
         if tool == "delete_profile":
             return handle_delete_profile(args)
-        # If we detected multiple live profiles at session creation and the
-        # agent hasn't picked one yet (attach_browser/use_browser_session would
-        # have cleared the conflict by swapping controller_ref or saving an
-        # override), refuse non-session tools rather than silently spawning a
-        # new headless Chrome.
-        if live_profile_conflict[0] is not None and controller_ref[0] is controller:
-            return _format_live_profile_conflict_error(live_profile_conflict[0])
+        if tool == "close_browser":
+            return _handle_close_browser(controller_ref, args)
         # Use latest controller (may have been swapped by attach_browser)
         active = controller_ref[0] or controller
+
+        # Single active tab: new_page reuses the one tab instead of stacking.
+        if tool == "new_page":
+            url = args.get("url")
+            response = _handle_new_page_single_tab(active, url)
+            return _maybe_promote_on_auth_wall(controller_ref, active, response, url)
+
+        # Headless -> headed auto-promotion when a navigation hits an auth wall.
+        if tool == "navigate_page" and args.get("type", "url") == "url":
+            response = active.invoke_tool(tool, args)
+            return _maybe_promote_on_auth_wall(controller_ref, active, response, args.get("url"))
+
         return active.invoke_tool(tool, args)  # type: ignore[arg-type]
 
     return create_session, call_tool
