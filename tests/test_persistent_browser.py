@@ -13,13 +13,8 @@ from browser_tools.persistent_browser import (
     BrowserState,
     PersistentChromeController,
     clean_stale_singleton_lock,
-    extract_selected_page_id,
-    extract_selected_page_url,
     find_chrome_debug_port,
-    normalize_tool_params,
     read_singleton_lock_pid,
-    resolve_page_id_by_url,
-    should_restore_selection,
 )
 
 
@@ -87,36 +82,6 @@ class FakeClient:
         """
         type(self).calls.append((name, arguments))
         return type(self).responses.get(name, {"result": {"content": []}})
-
-
-class TestNormalizeToolParams:
-    """Tests for wrapper argument normalization."""
-
-    def test_maps_select_page_idx_to_page_id(self) -> None:
-        """select_page should use pageId for the live MCP server."""
-        assert normalize_tool_params("select_page", {"pageIdx": 2}) == {"pageId": 2}
-
-    def test_maps_close_page_idx_to_page_id(self) -> None:
-        """close_page should use pageId for the live MCP server."""
-        assert normalize_tool_params("close_page", {"pageIdx": 3}) == {"pageId": 3}
-
-    def test_leaves_other_tools_unchanged(self) -> None:
-        """Tools without legacy argument names should pass through untouched."""
-        assert normalize_tool_params("take_snapshot", {"verbose": True}) == {"verbose": True}
-
-
-class TestExtractSelectedPageId:
-    """Tests for selected page parsing from MCP output."""
-
-    def test_parses_selected_page(self) -> None:
-        """Page list output should yield the selected page id."""
-        response = make_response("## Pages\n1: about:blank\n2: https://example.com/ [selected]")
-        assert extract_selected_page_id(response) == 2
-
-    def test_returns_none_without_selected_page(self) -> None:
-        """Responses without a selected marker should return None."""
-        response = make_response("## Pages\n1: about:blank\n2: https://example.com/")
-        assert extract_selected_page_id(response) is None
 
 
 class TestPersistentChromeController:
@@ -191,7 +156,13 @@ class TestPersistentChromeController:
 
         controller.invoke_tool("new_page", {"url": "https://example.com"})
 
-        assert FakeClient.calls == [("new_page", {"url": "https://example.com"})]
+        # new_page is a navigation tool, so the post-call list_pages refresh
+        # now runs (latent gap closed): the new tab's selected id+url are
+        # re-read instead of being left stale.
+        assert FakeClient.calls == [
+            ("new_page", {"url": "https://example.com"}),
+            ("list_pages", {}),
+        ]
         assert state.selected_page_id == 2
         assert state.selected_page_url == "https://example.com/"
         assert controller.state_path.exists()
@@ -287,60 +258,6 @@ class TestPersistentChromeController:
         assert response["result"]["content"][0]["text"] == "snapshot ok"
         assert attempts["count"] == 2
         assert invalidations == [state]
-
-
-class TestExtractSelectedPageUrl:
-    """Tests for selected page URL parsing from MCP output."""
-
-    def test_parses_selected_page_url(self) -> None:
-        """Page list output should yield the selected page URL."""
-        response = make_response("## Pages\n1: about:blank\n2: https://example.com/ [selected]")
-        assert extract_selected_page_url(response) == "https://example.com/"
-
-    def test_returns_none_without_selected_page(self) -> None:
-        """Responses without a selected marker should return None."""
-        response = make_response("## Pages\n1: about:blank\n2: https://example.com/")
-        assert extract_selected_page_url(response) is None
-
-
-class TestResolvePageIdByUrl:
-    """Tests for URL-based page ID resolution."""
-
-    def test_resolves_exact_url(self) -> None:
-        """Exact URL match should return the page ID."""
-        response = make_response("## Pages\n1: about:blank\n2: https://example.com/ [selected]")
-        assert resolve_page_id_by_url(response, "https://example.com/") == 2
-
-    def test_resolves_with_trailing_slash_mismatch(self) -> None:
-        """Trailing slash differences should still match."""
-        response = make_response("## Pages\n1: about:blank\n2: https://example.com [selected]")
-        assert resolve_page_id_by_url(response, "https://example.com/") == 2
-
-    def test_returns_none_for_missing_url(self) -> None:
-        """Unknown URL should return None."""
-        response = make_response("## Pages\n1: about:blank\n2: https://example.com/ [selected]")
-        assert resolve_page_id_by_url(response, "https://missing.com/") is None
-
-    def test_handles_reordered_pages(self) -> None:
-        """Pages listed in different order should still resolve correctly."""
-        response = make_response("## Pages\n1: https://example.com/\n2: about:blank [selected]")
-        assert resolve_page_id_by_url(response, "https://example.com/") == 1
-
-
-class TestShouldRestoreSelection:
-    """Tests for tool-specific selection restore rules."""
-
-    def test_new_page_does_not_restore_selection(self) -> None:
-        """new_page chooses the destination tab itself."""
-        assert should_restore_selection("new_page") is False
-
-    def test_select_page_does_not_restore_selection(self) -> None:
-        """select_page is already the restoration action."""
-        assert should_restore_selection("select_page") is False
-
-    def test_snapshot_restores_selection(self) -> None:
-        """Snapshotting should run against the previously selected tab."""
-        assert should_restore_selection("take_snapshot") is True
 
 
 class TestBrowserStateDaemonFields:

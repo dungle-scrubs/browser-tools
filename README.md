@@ -82,12 +82,14 @@ browser_tools_session.py     CLI entry point (argparse, command dispatch)
         +-- persistent_browser.py     Chrome lifecycle: controller, reaper,
         |                           teardown, shared on-disk session layout
         |       +-- browser_state.py     Persisted state dataclasses
+        |       +-- page_selection.py    Active-page tracking (restore, refresh, normalize)
         |       +-- mcp_session.py       Short-lived MCP session wrapper
         |       +-- daemon_client.py      Unix socket client
         |       +-- process_utils.py      Chrome process/port utilities
         |       +-- profile_catalog.py    Named-profile catalog & live discovery
         |       +-- session_store.py      Per-project session config & controller factories
-        |       +-- mcp_daemon.py         Long-lived MCP daemon
+        |       +-- mcp_daemon.py         Long-lived MCP daemon (dispatch_tool routes by registry flags)
+        |               +-- mcp_broker.py      JSON-RPC-over-stdio request multiplexer
         |               +-- cdp_handler.py     CDP tool implementations
         |               +-- cdp_constants.py   Tuning constants (timeouts, thresholds)
         |               +-- cdp_client.py      CDP WebSocket client

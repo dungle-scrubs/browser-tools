@@ -12,7 +12,6 @@ from __future__ import annotations
 import contextlib
 import fcntl
 import os
-import re
 import signal
 import subprocess
 import time
@@ -20,6 +19,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from .daemon_client import DaemonClient
 
 from . import session_layout as layout
@@ -33,8 +34,7 @@ from .daemon_supervisor import (
     build_daemon_command,  # type: ignore[reportUnusedImport]  # noqa: F401  # re-exported
     is_recoverable_daemon_error,
 )
-from .mcp_response import extract_text_items  # re-exported for consumers
-from .mcp_session import ChromeMcpSession  # noqa: TC001  # re-exported + used in type annotation
+from .page_selection import PageSelection
 from .process_utils import (
     build_browser_command,
     clean_stale_singleton_lock,
@@ -67,15 +67,12 @@ from .session_layout import (  # re-exported: session_layout owns the layout now
 from .session_reaper import (
     reap_orphaned_sessions,  # type: ignore[reportUnusedImport]  # noqa: F401  # re-exported for callers
 )
-from .tool_registry import INTERACTION_TOOLS
 
 DEFAULT_BROWSER_TIMEOUT_SECONDS = 60
 BROWSER_READY_TIMEOUT_SECONDS = 10.0
 # Chrome launch attempts; each retry picks a fresh debug port so a lost race
 # for the port (find_free_port releases it before Chrome binds) is recovered.
 LAUNCH_PORT_ATTEMPTS = 3
-SELECTED_PAGE_PATTERN = re.compile(r"^\s*(\d+):.*\[selected\]\s*$", re.MULTILINE)
-PAGE_LINE_PATTERN = re.compile(r"^\s*(\d+):\s*(.*?)(?:\s*\[selected\])?\s*$", re.MULTILINE)
 
 
 DAEMON_RECOVERY_RETRY_COUNT = 1
@@ -326,11 +323,10 @@ class PersistentChromeController:
             MCPInvocationError: If browser startup or tool invocation fails.
         """
         state = self.ensure_browser_state()
-        normalized_params = normalize_tool_params(tool_name, params)
 
         for attempt in range(DAEMON_RECOVERY_RETRY_COUNT + 1):
             try:
-                return self._invoke_tool_once(state, tool_name, normalized_params)
+                return self._invoke_tool_once(state, tool_name, params)
             except MCPInvocationError as exc:
                 if attempt >= DAEMON_RECOVERY_RETRY_COUNT or not is_recoverable_daemon_error(exc):
                     raise
@@ -343,30 +339,55 @@ class PersistentChromeController:
     ) -> dict[str, Any]:
         """Execute a single tool call against the current daemon.
 
+        The Active Page lifecycle - argument normalization, restore-before-call,
+        pre-snapshot, the call itself, the post-navigation page refresh, and the
+        response-driven state update - is owned by :class:`PageSelection`. This
+        method keeps only the ordering: restore+snapshot before the call, the
+        call, the optional ``list_pages`` refresh inside the connection, then
+        the response update.
+
         Args:
             state: Active browser state.
             tool_name: browser-tools MCP tool name.
-            params: Normalized tool arguments.
+            params: Raw wrapper arguments (normalized by ``PageSelection``).
 
         Returns:
             Raw JSON-RPC response from the MCP server.
         """
+        selection = PageSelection(state, self._make_save(state))
+        normalized_params = selection.normalize(tool_name, params)
         with self._connect_mcp(state) as client:
-            if should_restore_selection(tool_name) and (
-                state.selected_page_url or state.selected_page_id
-            ):
-                self._restore_selected_page(client, state)
-            if needs_pre_snapshot(tool_name):
-                client.call_tool("take_snapshot", {})
-            response = client.call_tool(tool_name, params)
-
+            selection.before_call(client, tool_name)
+            response = client.call_tool(tool_name, normalized_params)
             # After interactions that may cause navigation, refresh page info
-            if needs_pre_snapshot(tool_name) or tool_name in {"navigate_page"}:
+            if selection.needs_refresh(tool_name):
                 refresh = client.call_tool("list_pages", {})
-                self._update_state_from_response(state, "list_pages", {}, refresh)
+                selection.apply_response("list_pages", {}, refresh)
 
-        self._update_state_from_response(state, tool_name, params, response)
+        selection.apply_response(tool_name, normalized_params, response)
         return response
+
+    def _make_save(self, state: BrowserState) -> Callable[[], None]:
+        """Build a persistence callable that stamps ``last_used_at`` and saves.
+
+        ``PageSelection`` drives when state is persisted; this closure owns how:
+        refresh the last-used timestamp then atomically write the state file to
+        the controller's path. Returning a closure (rather than passing the path
+        directly) keeps the save side-effect localized to this controller.
+
+        Args:
+            state: Browser state to persist.
+
+        Returns:
+            A no-argument callable that updates ``last_used_at`` and writes
+            ``state`` to :attr:`state_path`.
+        """
+
+        def save() -> None:
+            state.last_used_at = time.time()
+            state.save(self.state_path)
+
+        return save
 
     def _connect_mcp(self, state: BrowserState) -> DaemonClient:
         """Return a client connected to the MCP daemon, spawning it if needed.
@@ -726,186 +747,6 @@ class PersistentChromeController:
         if state.pid is not None and not is_process_alive(state.pid):
             return False
         return is_devtools_available(state.browser_url)
-
-    def _restore_selected_page(
-        self, client: ChromeMcpSession | DaemonClient, state: BrowserState
-    ) -> None:
-        """Restore the last selected page in the MCP session.
-
-        Page IDs are not stable across MCP session restarts, so we resolve
-        the target page by URL first, then select it by its current ID.
-        When using the daemon, the MCP session persists and this is a
-        harmless no-op (selecting the already-selected page).
-
-        Args:
-            client: Active MCP session or daemon client with call_tool method.
-            state: Persisted browser state.
-
-        Returns:
-            None.
-        """
-        if state.selected_page_url is None and state.selected_page_id is None:
-            return
-
-        # Resolve the correct page ID in this session by listing pages first
-        if state.selected_page_url:
-            list_response = client.call_tool("list_pages", {})
-            resolved_id = resolve_page_id_by_url(list_response, state.selected_page_url)
-            if resolved_id is None:
-                state.selected_page_id = None
-                state.selected_page_url = None
-                state.last_used_at = time.time()
-                state.save(self.state_path)
-                return
-            target_id = resolved_id
-        else:
-            target_id = state.selected_page_id
-
-        response = client.call_tool("select_page", {"pageId": target_id})
-        if "error" in response:
-            state.selected_page_id = None
-            state.selected_page_url = None
-            state.last_used_at = time.time()
-            state.save(self.state_path)
-        else:
-            state.selected_page_id = target_id
-
-    def _update_state_from_response(
-        self,
-        state: BrowserState,
-        tool_name: str,
-        params: dict[str, Any],
-        response: dict[str, Any],
-    ) -> None:
-        """Persist selected-page changes inferred from the tool response.
-
-        Args:
-            state: Browser state to mutate and save.
-            tool_name: Tool that was invoked.
-            params: Normalized tool arguments.
-            response: Raw JSON-RPC response.
-
-        Returns:
-            None.
-        """
-        selected_page_id = extract_selected_page_id(response)
-        selected_page_url = extract_selected_page_url(response)
-
-        if selected_page_id is not None:
-            state.selected_page_id = selected_page_id
-            if selected_page_url is not None:
-                state.selected_page_url = selected_page_url
-        elif tool_name == "select_page":
-            page_id = params.get("pageId")
-            state.selected_page_id = page_id if isinstance(page_id, int) else state.selected_page_id
-        elif tool_name == "close_page":
-            closed_page_id = params.get("pageId")
-            if state.selected_page_id == closed_page_id:
-                state.selected_page_id = None
-                state.selected_page_url = None
-
-        state.last_used_at = time.time()
-        state.save(self.state_path)
-
-
-def normalize_tool_params(tool_name: str, params: dict[str, Any]) -> dict[str, Any]:
-    """Normalize wrapper arguments to the MCP server's actual schema.
-
-    Args:
-        tool_name: Tool being invoked.
-        params: Original wrapper arguments.
-
-    Returns:
-        Normalized argument dictionary.
-    """
-    normalized = dict(params)
-    if tool_name in {"select_page", "close_page"} and "pageId" not in normalized:
-        page_idx = normalized.pop("pageIdx", None)
-        if isinstance(page_idx, int):
-            normalized["pageId"] = page_idx
-    return normalized
-
-
-def needs_pre_snapshot(tool_name: str) -> bool:
-    """Decide whether a snapshot should be taken before the tool runs.
-
-    The upstream MCP server requires a snapshot in the same session before
-    any interaction tool that references element UIDs.
-
-    Args:
-        tool_name: Tool being invoked.
-
-    Returns:
-        True when an automatic pre-snapshot is needed.
-    """
-    return tool_name in INTERACTION_TOOLS
-
-
-def should_restore_selection(tool_name: str) -> bool:
-    """Decide whether the previous page selection should be restored first.
-
-    Args:
-        tool_name: Tool being invoked.
-
-    Returns:
-        True when restoring selection is required for correct behavior.
-    """
-    return tool_name not in {"new_page", "select_page"}
-
-
-def extract_selected_page_id(response: dict[str, Any]) -> int | None:
-    """Parse the selected page id from a page-list style MCP response.
-
-    Args:
-        response: Raw JSON-RPC response containing tool output.
-
-    Returns:
-        Selected page id if present, otherwise None.
-    """
-    texts = extract_text_items(response)
-    for text in texts:
-        match = SELECTED_PAGE_PATTERN.search(text)
-        if match:
-            return int(match.group(1))
-    return None
-
-
-def extract_selected_page_url(response: dict[str, Any]) -> str | None:
-    """Parse the selected page URL from a page-list style MCP response.
-
-    Args:
-        response: Raw JSON-RPC response containing tool output.
-
-    Returns:
-        URL of the selected page if present, otherwise None.
-    """
-    texts = extract_text_items(response)
-    for text in texts:
-        for match in PAGE_LINE_PATTERN.finditer(text):
-            line = match.group(0)
-            if "[selected]" in line:
-                return match.group(2).strip()
-    return None
-
-
-def resolve_page_id_by_url(response: dict[str, Any], target_url: str) -> int | None:
-    """Find the page ID for a given URL in a list_pages response.
-
-    Args:
-        response: Raw JSON-RPC response from list_pages.
-        target_url: URL to search for.
-
-    Returns:
-        Page ID matching the URL, or None if not found.
-    """
-    texts = extract_text_items(response)
-    for text in texts:
-        for match in PAGE_LINE_PATTERN.finditer(text):
-            page_id = int(match.group(1))
-            page_url = match.group(2).strip()
-            if page_url == target_url or page_url.rstrip("/") == target_url.rstrip("/"):
-                return page_id
-    return None
 
 
 def _wait_for_process_exit(pid: int, timeout_seconds: float) -> bool:

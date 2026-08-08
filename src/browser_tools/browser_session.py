@@ -579,7 +579,7 @@ def _extract_page_ids(list_response: dict[str, Any]) -> list[int]:
     Returns:
         Ordered list of integer page ids.
     """
-    from .persistent_browser import PAGE_LINE_PATTERN
+    from .page_selection import PAGE_LINE_PATTERN
 
     ids: list[int] = []
     for text in extract_text_items(list_response):
