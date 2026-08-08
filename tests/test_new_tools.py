@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -31,15 +32,24 @@ def make_cdp_handler(mock_cdp: Any) -> BrowserCDPHandler:
         mock_cdp: Mocked CDPClient with connected=True.
 
     Returns:
-        BrowserCDPHandler with the mock client injected.
+        BrowserCDPHandler with the mock client injected into its CDPRuntime.
     """
+    from browser_tools.cdp_handler import CDPRuntime
+
     handler = BrowserCDPHandler.__new__(BrowserCDPHandler)
-    handler._cdp_client = mock_cdp
-    handler._frame_manager = MagicMock()
-    handler._loop = None
-    handler._stop_event = None
-    handler._mode = "full"
-    handler._screencast = ScreencastRecorder()
+    # The handlers reach the browser through the runtime seam, so the mock
+    # client lives on a CDPRuntime the handler composes.
+    rt = CDPRuntime.__new__(CDPRuntime)
+    rt._cdp_client = mock_cdp
+    rt._frame_manager = MagicMock()
+    rt._loop = None
+    rt._stop_event = None
+    rt._mode = "full"
+    rt._stealth = False
+    rt._browser_url = None
+    rt._ready = threading.Event()
+    rt._screencast = ScreencastRecorder()
+    handler._rt = rt
     return handler
 
 
@@ -877,8 +887,12 @@ def test_call_tool_maps_cdp_tool_error_to_make_error(monkeypatch):
     from browser_tools.cdp_handler import CDPHandler, CdpToolError
 
     handler = CDPHandler.__new__(CDPHandler)
-    handler._loop = MagicMock()  # is_running() truthy by default
-    handler._loop.is_running = lambda: True
+    from browser_tools.cdp_handler import CDPRuntime
+
+    rt = CDPRuntime.__new__(CDPRuntime)
+    rt._loop = MagicMock()  # is_running() truthy by default
+    rt._loop.is_running = lambda: True
+    handler._rt = rt
 
     raised = CdpToolError("get_text", CDPError("websocket closed"))
 
