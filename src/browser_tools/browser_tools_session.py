@@ -184,7 +184,7 @@ def create_parser():
 
     # profiler_watch - Wait for CPU spike then capture
     profiler_watch = subparsers.add_parser("profiler-watch", help="Profile on CPU spike")
-    profiler_watch.add_argument("--threshold", type=float, default=80.0, help="CPU threshold %")
+    profiler_watch.add_argument("--threshold", type=float, default=80.0, help="CPU threshold percentage")
     profiler_watch.add_argument("--timeout", type=float, default=60.0, help="Max wait seconds")
     profiler_watch.add_argument("--window", type=float, default=3.0, help="Capture window seconds")
     profiler_watch.add_argument("--port", type=int, default=9222, help="Chrome debug port")
