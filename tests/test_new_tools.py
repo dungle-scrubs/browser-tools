@@ -17,6 +17,7 @@ import pytest
 
 # Import the daemon class under test
 from browser_tools.mcp_daemon import CDPHandler as BrowserCDPHandler
+from browser_tools.screencast import ScreencastRecorder
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -38,10 +39,7 @@ def make_cdp_handler(mock_cdp: Any) -> BrowserCDPHandler:
     handler._loop = None
     handler._stop_event = None
     handler._mode = "full"
-    handler._screencast_active = False
-    handler._screencast_frames = []
-    handler._screencast_max_frames = 600
-    handler._screencast_format = "jpeg"
+    handler._screencast = ScreencastRecorder()
     return handler
 
 
@@ -761,15 +759,15 @@ def test_no_new_tools_in_local_tools():
 
 @pytest.mark.asyncio
 async def test_screencast_start_begins_recording():
-    """screencast_start enables Page.startScreencast and subscribes to frames."""
+    """start enables Page.startScreencast and subscribes to frames."""
     cdp = connected_cdp()
-    handler = make_cdp_handler(cdp)
+    recorder = ScreencastRecorder()
 
-    result = await handler._handle_screencast_start({"quality": 60})
+    result = await recorder.start(cdp, {"quality": 60})
 
     assert "recording" in result["result"]["content"][0]["text"].lower()
-    assert handler._screencast_active is True
-    cdp.on.assert_called_once_with("Page.screencastFrame", handler._on_screencast_frame)
+    assert recorder.active is True
+    cdp.on.assert_called_once_with("Page.screencastFrame", recorder.on_frame)
     method, params = cdp.send.call_args[0]
     assert method == "Page.startScreencast"
     assert params["format"] == "jpeg"
@@ -778,82 +776,82 @@ async def test_screencast_start_begins_recording():
 
 @pytest.mark.asyncio
 async def test_screencast_start_requires_connection():
-    """screencast_start errors when CDP is not connected."""
+    """screencast_start errors when CDP is not connected (handler-level gate)."""
     handler = make_cdp_handler(disconnected_cdp())
 
     result = await handler._handle_screencast_start({})
 
     assert "not connected" in result["result"]["content"][0]["text"].lower()
-    assert handler._screencast_active is False
+    assert handler._screencast.active is False
 
 
 @pytest.mark.asyncio
 async def test_screencast_frame_buffers_and_acks():
     """Each frame is buffered and acked so the stream keeps flowing."""
     cdp = connected_cdp()
-    handler = make_cdp_handler(cdp)
-    handler._screencast_active = True
+    recorder = ScreencastRecorder()
+    await recorder.start(cdp, {})
 
-    handler._on_screencast_frame({"data": "QUJD", "metadata": {"timestamp": 12.5}, "sessionId": 7})
+    recorder.on_frame({"data": "QUJD", "metadata": {"timestamp": 12.5}, "sessionId": 7})
     await asyncio.sleep(0)  # let the scheduled ack run
 
-    assert handler._screencast_frames == [{"data": "QUJD", "timestamp": 12.5}]
+    assert recorder._frames == [{"data": "QUJD", "timestamp": 12.5}]
     cdp.send.assert_any_call("Page.screencastFrameAck", {"sessionId": 7})
 
 
 def test_screencast_frame_ignored_when_inactive():
     """Frames arriving outside an active capture are dropped."""
-    handler = make_cdp_handler(connected_cdp())
-    handler._screencast_active = False
+    recorder = ScreencastRecorder()
 
-    handler._on_screencast_frame({"data": "QUJD", "sessionId": 1})
+    recorder.on_frame({"data": "QUJD", "sessionId": 1})
 
-    assert handler._screencast_frames == []
+    assert recorder._frames == []
 
 
 @pytest.mark.asyncio
 async def test_screencast_respects_max_frames():
     """Buffer stops growing (and acking) once max_frames is reached."""
-    handler = make_cdp_handler(connected_cdp())
-    handler._screencast_active = True
-    handler._screencast_max_frames = 2
+    cdp = connected_cdp()
+    recorder = ScreencastRecorder()
+    await recorder.start(cdp, {"max_frames": 2})
 
     for _ in range(5):
-        handler._on_screencast_frame({"data": "QUJD", "sessionId": 1})
+        recorder.on_frame({"data": "QUJD", "sessionId": 1})
     await asyncio.sleep(0)  # drain any scheduled acks
 
-    assert len(handler._screencast_frames) == 2
+    assert len(recorder._frames) == 2
 
 
 @pytest.mark.asyncio
 async def test_screencast_stop_writes_frames(tmp_path):
-    """screencast_stop writes buffered frames and a manifest, then resets."""
+    """stop writes buffered frames and a manifest, then resets."""
     cdp = connected_cdp()
-    handler = make_cdp_handler(cdp)
-    handler._screencast_active = True
-    handler._screencast_frames = [
+    recorder = ScreencastRecorder()
+    recorder._active = True
+    recorder._cdp = cdp
+    recorder._frames = [
         {"data": "QUJD", "timestamp": 1.0},  # base64 for "ABC"
         {"data": "REVG", "timestamp": 2.0},  # base64 for "DEF"
     ]
 
-    result = await handler._handle_screencast_stop({"dir": str(tmp_path)})
+    result = await recorder.stop(cdp, {"dir": str(tmp_path)})
 
     assert "Wrote 2 frames" in result["result"]["content"][0]["text"]
     cdp.send.assert_any_call("Page.stopScreencast")
-    cdp.off.assert_called_once_with("Page.screencastFrame", handler._on_screencast_frame)
+    cdp.off.assert_called_once_with("Page.screencastFrame", recorder.on_frame)
     assert (tmp_path / "frame_00000.jpg").read_bytes() == b"ABC"
     assert (tmp_path / "frame_00001.jpg").read_bytes() == b"DEF"
     manifest = json.loads((tmp_path / "frames.json").read_text())
     assert [m["timestamp"] for m in manifest] == [1.0, 2.0]
-    assert handler._screencast_active is False
+    assert recorder.active is False
 
 
 @pytest.mark.asyncio
 async def test_screencast_stop_requires_active_capture():
-    """screencast_stop errors when nothing is recording."""
-    handler = make_cdp_handler(connected_cdp())
+    """stop errors when nothing is recording."""
+    recorder = ScreencastRecorder()
 
-    result = await handler._handle_screencast_stop({"dir": "/tmp/x"})
+    result = await recorder.stop(connected_cdp(), {"dir": "/tmp/x"})
 
     assert "no screencast in progress" in result["result"]["content"][0]["text"].lower()
 
