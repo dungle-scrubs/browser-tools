@@ -26,6 +26,7 @@ try:
         REQUEST_TIMEOUT_SECONDS,
         SCREENSHOT_PAINT_READY_TIMEOUT_MS,
     )
+    from .mcp_response import make_error, make_text
 except ImportError:
     from cdp_constants import (  # type: ignore[import-untyped,no-redef]
         INTERSTITIAL_AUTO_RETRY_TYPES,
@@ -33,6 +34,10 @@ except ImportError:
         INTERSTITIAL_RETRY_DELAY_SECONDS,
         REQUEST_TIMEOUT_SECONDS,
         SCREENSHOT_PAINT_READY_TIMEOUT_MS,
+    )
+    from mcp_response import (  # type: ignore[import-untyped,no-redef]
+        make_error,
+        make_text,
     )
 
 
@@ -1507,35 +1512,3 @@ class CDPHandler:
         except Exception:
             logger.debug("Interstitial detection failed", exc_info=True)
             return []
-
-
-def make_text(text: str) -> dict[str, Any]:
-    """Build a JSON-RPC success response with text content.
-
-    Args:
-        text: Text content.
-
-    Returns:
-        JSON-RPC response dict.
-    """
-    return {
-        "jsonrpc": "2.0",
-        "result": {"content": [{"type": "text", "text": text}]},
-        "id": 0,
-    }
-
-
-def make_error(message: str) -> dict[str, Any]:
-    """Build a JSON-RPC error response.
-
-    Args:
-        message: Error message.
-
-    Returns:
-        JSON-RPC response dict.
-    """
-    return {
-        "jsonrpc": "2.0",
-        "result": {"content": [{"type": "text", "text": f"Error: {message}"}], "isError": True},
-        "id": 0,
-    }

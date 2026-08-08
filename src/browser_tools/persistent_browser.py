@@ -33,6 +33,7 @@ from .browser_state import (  # re-exported for consumers
 from .chrome_config import get_mcp_command
 from .chrome_utils import MCPInvocationError
 from .daemon_client import DaemonClient
+from .mcp_response import extract_text_items  # re-exported for consumers
 from .mcp_session import ChromeMcpSession  # noqa: TC001  # re-exported + used in type annotation
 from .process_utils import (
     build_browser_command,
@@ -856,30 +857,6 @@ def resolve_page_id_by_url(response: dict[str, Any], target_url: str) -> int | N
             if page_url == target_url or page_url.rstrip("/") == target_url.rstrip("/"):
                 return page_id
     return None
-
-
-def extract_text_items(response: dict[str, Any]) -> list[str]:
-    """Extract all text content items from an MCP response.
-
-    Args:
-        response: Raw JSON-RPC response.
-
-    Returns:
-        List of text strings from the response content array.
-    """
-    result = response.get("result")
-    if not isinstance(result, dict):
-        return []
-    content = result.get("content")
-    if not isinstance(content, list):
-        return []
-    texts: list[str] = []
-    for item in content:
-        if isinstance(item, dict) and item.get("type") == "text":
-            text = item.get("text")
-            if isinstance(text, str):
-                texts.append(text)
-    return texts
 
 
 def is_recoverable_daemon_error(exc: MCPInvocationError) -> bool:

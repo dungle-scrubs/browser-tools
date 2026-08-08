@@ -10,6 +10,8 @@ import subprocess
 import sys
 from typing import Any, NoReturn
 
+from .mcp_response import extract_text_items
+
 
 class BrowserToolsError(Exception):
     """Base exception for Chrome DevTools wrapper errors"""
@@ -123,12 +125,8 @@ def extract_content(response: dict[str, Any]) -> str:
     if isinstance(payload, dict) and "content" in payload:
         content_items = payload["content"]
         if isinstance(content_items, list):
-            # Extract text from all content items
-            text_parts = []
-            for item in content_items:
-                if isinstance(item, dict) and item.get("type") == "text":
-                    text_parts.append(item.get("text", ""))
-            return "\n".join(text_parts)
+            # Extract text from all content items via the canonical reader.
+            return "\n".join(extract_text_items(response))
         if isinstance(content_items, str):
             return content_items
 
