@@ -11,26 +11,28 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
-import json
 import os
 import re
-import shutil
 import signal
-import socket
 import subprocess
-import sys
 import time
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from .daemon_client import DaemonClient
 
 from . import session_layout as layout
 from .browser_state import (  # re-exported for consumers
     BrowserState,
     ProjectBrowserConfig,  # type: ignore[reportUnusedImport]  # noqa: F401  # re-exported for tests
 )
-from .chrome_config import get_mcp_command
 from .chrome_utils import MCPInvocationError
-from .daemon_client import DaemonClient
+from .daemon_supervisor import (
+    McpDaemonSupervisor,
+    build_daemon_command,  # type: ignore[reportUnusedImport]  # noqa: F401  # re-exported
+    is_recoverable_daemon_error,
+)
 from .mcp_response import extract_text_items  # re-exported for consumers
 from .mcp_session import ChromeMcpSession  # noqa: TC001  # re-exported + used in type annotation
 from .process_utils import (
@@ -76,12 +78,9 @@ SELECTED_PAGE_PATTERN = re.compile(r"^\s*(\d+):.*\[selected\]\s*$", re.MULTILINE
 PAGE_LINE_PATTERN = re.compile(r"^\s*(\d+):\s*(.*?)(?:\s*\[selected\])?\s*$", re.MULTILINE)
 
 
-DAEMON_STARTUP_TIMEOUT_SECONDS = 30
 DAEMON_RECOVERY_RETRY_COUNT = 1
 # Grace period after SIGTERM before escalating to SIGKILL.
 CHROME_QUIT_TIMEOUT_SECONDS = 5.0
-DAEMON_SCRIPT = Path(__file__).parent / "mcp_daemon.py"
-BROWSER_TOOLS_ROOT = DAEMON_SCRIPT.parents[2]
 
 
 def is_owned_profile_dir(user_data_dir: str | Path | None) -> bool:
@@ -294,6 +293,7 @@ class PersistentChromeController:
             self.user_data_dir = layout.profile_dir(self.session_key)
 
         self.state_path = layout.state_path(self.session_key)
+        self._daemon = McpDaemonSupervisor(self.session_key)
 
     def should_use_persistent_browser(self) -> bool:
         """Determine whether this invocation should reuse a persistent browser.
@@ -371,6 +371,9 @@ class PersistentChromeController:
     def _connect_mcp(self, state: BrowserState) -> DaemonClient:
         """Return a client connected to the MCP daemon, spawning it if needed.
 
+        Thin orchestration seam over the daemon supervisor: kept as a method so
+        the invoke-tool path (and its tests) can swap the client connection.
+
         Args:
             state: Current browser state (mutated with daemon info on spawn).
 
@@ -380,108 +383,36 @@ class PersistentChromeController:
         Raises:
             MCPInvocationError: If the daemon cannot be started or reached.
         """
-        command = get_mcp_command(browser_url=state.browser_url)
-        self._ensure_daemon(state, command)
-        assert state.daemon_socket is not None
-        return DaemonClient(state.daemon_socket)
-
-    def _ensure_daemon(self, state: BrowserState, mcp_command: list[str]) -> None:
-        """Ensure the MCP daemon broker is running.
-
-        Uses a file lock to prevent races when multiple wrapper processes try
-        to spawn the daemon simultaneously.
-
-        Args:
-            state: Browser state (mutated with daemon_pid and daemon_socket).
-            mcp_command: Command to spawn the MCP subprocess inside the daemon.
-
-        Raises:
-            MCPInvocationError: If the daemon cannot be started.
-        """
-        if self._is_daemon_alive(state):
-            return
-
-        lock_path = layout.lock_path(self.session_key)
-        lock_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(lock_path, "w") as lock_file:
-            fcntl.flock(lock_file, fcntl.LOCK_EX)
-            try:
-                if self._is_daemon_alive(state):
-                    return
-                self._spawn_daemon(state, mcp_command)
-            finally:
-                fcntl.flock(lock_file, fcntl.LOCK_UN)
-
-    def _is_daemon_alive(self, state: BrowserState) -> bool:
-        """Check whether the daemon is running and its socket is reachable.
-
-        Args:
-            state: Browser state with daemon_pid and daemon_socket.
-
-        Returns:
-            True when the daemon is alive and accepting connections.
-        """
-        if state.daemon_pid is None or state.daemon_socket is None:
-            return False
-        if not is_process_alive(state.daemon_pid):
-            return False
-        if not Path(state.daemon_socket).exists():
-            return False
-        pid_file = layout.daemon_pid_file(self.session_key)
-        try:
-            pid_file_pid = int(pid_file.read_text().strip())
-        except (OSError, ValueError):
-            pid_file_pid = None
-        if pid_file_pid != state.daemon_pid:
-            return False
-        try:
-            test_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            test_sock.settimeout(2)
-            test_sock.connect(state.daemon_socket)
-            test_sock.close()
-            return True
-        except OSError:
-            return False
+        chrome_owned = state.pid is not None and is_owned_profile_dir(state.user_data_dir)
+        return self._daemon.client(
+            state,
+            chrome_owned=chrome_owned,
+            mode=self.mode,
+            stealth=getattr(self, "stealth", False),
+        )
 
     def _invalidate_daemon(self, state: BrowserState) -> None:
-        """Forget any stale daemon metadata so the next call respawns cleanly.
+        """Forget stale daemon metadata so the next call respawns cleanly.
+
+        Thin seam over the daemon supervisor; kept as a method for the
+        invoke-tool retry tests.
 
         Args:
             state: Browser state to mutate.
         """
-        if state.daemon_pid is not None and is_process_alive(state.daemon_pid):
-            terminate_process(state.daemon_pid)
-        state.daemon_pid = None
-        state.daemon_socket = None
-        state.save(self.state_path)
-        Path(layout.socket_path(self.session_key)).unlink(missing_ok=True)
-        layout.daemon_pid_file(self.session_key).unlink(missing_ok=True)
+        self._daemon.invalidate(state)
 
     def stop_daemon_only(self) -> bool:
         """Stop the MCP daemon for this session, leaving the browser running.
 
-        Used when detaching from an externally attached browser (one
-        browser-tools did not launch): the daemon is ours, the Chrome is the
+        Delegates to the daemon supervisor. Used when detaching from an
+        externally attached browser: the daemon is ours, the Chrome is the
         user's.
 
         Returns:
             True when a daemon was found and stopped.
         """
-        state = BrowserState.from_path(self.state_path)
-        stopped = False
-        if (
-            state is not None
-            and state.daemon_pid is not None
-            and is_process_alive(state.daemon_pid)
-        ):
-            terminate_process_and_wait(state.daemon_pid, timeout=5)
-            stopped = True
-            state.daemon_pid = None
-            state.daemon_socket = None
-            state.save(self.state_path)
-        Path(layout.socket_path(self.session_key)).unlink(missing_ok=True)
-        layout.daemon_pid_file(self.session_key).unlink(missing_ok=True)
-        return stopped
+        return self._daemon.stop_only(BrowserState.from_path(self.state_path))
 
     def close_owned_browser(self) -> dict[str, Any]:
         """Quit a tool-launched Chrome and stop its daemon, keeping the profile.
@@ -508,82 +439,6 @@ class PersistentChromeController:
                 clean_stale_singleton_lock(Path(state.user_data_dir))
         layout.clear_session_files(self.session_key)
         return result
-
-    def _spawn_daemon(self, state: BrowserState, mcp_command: list[str]) -> None:
-        """Spawn a new MCP daemon broker process.
-
-        Args:
-            state: Browser state (mutated with daemon_pid and daemon_socket).
-            mcp_command: Command for the MCP subprocess inside the daemon.
-
-        Raises:
-            MCPInvocationError: If the daemon fails to start within the timeout.
-        """
-        if state.daemon_pid is not None and is_process_alive(state.daemon_pid):
-            terminate_process(state.daemon_pid)
-
-        socket_path = layout.socket_path(self.session_key)
-        pid_file = str(layout.daemon_pid_file(self.session_key))
-
-        Path(socket_path).unlink(missing_ok=True)
-        Path(pid_file).unlink(missing_ok=True)
-
-        daemon_cmd = build_daemon_command(socket_path, pid_file, mcp_command)
-        if state.browser_url:
-            daemon_cmd.extend(["--browser-url", state.browser_url])
-        if self.mode:
-            daemon_cmd.extend(["--mode", self.mode])
-        if getattr(self, "stealth", False):
-            daemon_cmd.append("--stealth")
-        if state.pid is not None and is_owned_profile_dir(state.user_data_dir):
-            daemon_cmd.extend(
-                [
-                    "--chrome-pid",
-                    str(state.pid),
-                    "--chrome-owned",
-                    "--chrome-user-data-dir",
-                    str(state.user_data_dir),
-                ]
-            )
-
-        try:
-            subprocess.Popen(
-                daemon_cmd,
-                cwd=BROWSER_TOOLS_ROOT,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True,
-            )
-        except OSError as exc:
-            raise MCPInvocationError(f"Failed to start MCP daemon: {exc}") from exc
-
-        deadline = time.time() + DAEMON_STARTUP_TIMEOUT_SECONDS
-        while time.time() < deadline:
-            if Path(socket_path).exists():
-                try:
-                    test_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-                    test_sock.settimeout(2)
-                    test_sock.connect(socket_path)
-                    test_sock.close()
-                    break
-                except OSError:
-                    pass
-            time.sleep(0.2)
-        else:
-            raise MCPInvocationError(
-                "Timed out waiting for MCP daemon to start "
-                f"(waited {DAEMON_STARTUP_TIMEOUT_SECONDS}s)"
-            )
-
-        try:
-            daemon_pid = int(Path(pid_file).read_text().strip())
-        except (OSError, ValueError):
-            daemon_pid = None
-
-        state.daemon_pid = daemon_pid
-        state.daemon_socket = socket_path
-        state.save(self.state_path)
 
     def find_live_state(self) -> BrowserState | None:
         """Return a reachable browser state for this controller, or None.
@@ -1051,55 +906,6 @@ def resolve_page_id_by_url(response: dict[str, Any], target_url: str) -> int | N
             if page_url == target_url or page_url.rstrip("/") == target_url.rstrip("/"):
                 return page_id
     return None
-
-
-def is_recoverable_daemon_error(exc: MCPInvocationError) -> bool:
-    """Return whether a daemon transport failure is safe to retry once.
-
-    Args:
-        exc: Raised MCP invocation error.
-
-    Returns:
-        True when the daemon transport died before a tool result was returned.
-    """
-    message = str(exc)
-    return any(
-        fragment in message
-        for fragment in (
-            "Failed to connect to MCP daemon",
-            "MCP daemon connection error",
-            "MCP daemon connection closed unexpectedly",
-            "Failed to send request to MCP daemon",
-        )
-    )
-
-
-def build_daemon_command(
-    socket_path: str,
-    pid_file: str,
-    mcp_command: list[str],
-) -> list[str]:
-    """Build the command used to spawn the detached MCP daemon.
-
-    The wrapper may run from tool-proxy's Python environment while importing
-    browser-tools from source. The daemon needs browser-tools' own dependency
-    set, because CDP frame tools require ``websockets``.
-    """
-    python_command = [sys.executable]
-    if shutil.which("uv") and (BROWSER_TOOLS_ROOT / "pyproject.toml").exists():
-        python_command = ["uv", "run", "python"]
-
-    return [
-        *python_command,
-        "-m",
-        "browser_tools.mcp_daemon",
-        "--socket",
-        socket_path,
-        "--pid-file",
-        pid_file,
-        "--mcp-command",
-        json.dumps(mcp_command),
-    ]
 
 
 def _wait_for_process_exit(pid: int, timeout_seconds: float) -> bool:

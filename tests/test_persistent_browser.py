@@ -197,14 +197,12 @@ class TestPersistentChromeController:
         assert controller.state_path.exists()
 
     def test_daemon_spawned_on_first_call(self, monkeypatch, tmp_path: Path) -> None:
-        """_ensure_daemon should spawn the daemon when no daemon_pid is set."""
+        """Supervisor.ensure should spawn the daemon when no daemon_pid is set."""
+        from browser_tools.daemon_supervisor import McpDaemonSupervisor
+
         monkeypatch.setattr("browser_tools.session_layout.CACHE_DIR", tmp_path)
 
-        controller = PersistentChromeController(
-            isolated=True,
-            browser_url="http://127.0.0.1:9222",
-            force_persistent=True,
-        )
+        supervisor = McpDaemonSupervisor("deadbeefdeadbeef")
         state = BrowserState(
             browser_url="http://127.0.0.1:9222",
             daemon_pid=None,
@@ -213,40 +211,38 @@ class TestPersistentChromeController:
 
         spawn_calls: list[tuple] = []
 
-        def fake_spawn(self_ref, st, cmd):
+        def fake_spawn(self_ref, st, cmd, **kwargs):
             spawn_calls.append((st, cmd))
             st.daemon_pid = 12345
             st.daemon_socket = str(tmp_path / "test.sock")
 
-        monkeypatch.setattr(PersistentChromeController, "_spawn_daemon", fake_spawn)
-        controller._ensure_daemon(state, ["npx", "test"])
+        monkeypatch.setattr(McpDaemonSupervisor, "_spawn", fake_spawn)
+        supervisor.ensure(state, ["npx", "test"])
 
         assert len(spawn_calls) == 1
         assert state.daemon_pid == 12345
 
     def test_daemon_not_respawned_if_alive(self, monkeypatch, tmp_path: Path) -> None:
-        """_ensure_daemon should not spawn when daemon is already alive."""
+        """Supervisor.ensure should not spawn when the daemon is already alive."""
+        from browser_tools.daemon_supervisor import McpDaemonSupervisor
+
         monkeypatch.setattr("browser_tools.session_layout.CACHE_DIR", tmp_path)
 
-        controller = PersistentChromeController(
-            isolated=True,
-            browser_url="http://127.0.0.1:9222",
-            force_persistent=True,
-        )
+        supervisor = McpDaemonSupervisor("deadbeefdeadbeef")
         state = BrowserState(
             browser_url="http://127.0.0.1:9222",
             daemon_pid=99999,
             daemon_socket="/fake/socket",
         )
 
-        monkeypatch.setattr(controller, "_is_daemon_alive", lambda s: True)
+        monkeypatch.setattr(supervisor, "is_alive", lambda s: True)
 
         spawn_calls: list[tuple] = []
         monkeypatch.setattr(
-            controller, "_spawn_daemon", lambda st, cmd: spawn_calls.append((st, cmd))
+            supervisor, "_spawn", lambda st, cmd, **kw: spawn_calls.append((st, cmd))
         )
 
-        controller._ensure_daemon(state, ["npx", "test"])
+        supervisor.ensure(state, ["npx", "test"])
         assert len(spawn_calls) == 0
 
     def test_retries_once_after_recoverable_daemon_failure(
