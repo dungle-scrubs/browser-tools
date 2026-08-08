@@ -8,10 +8,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
-from typing import TYPE_CHECKING, Any, NoReturn
-
-if TYPE_CHECKING:
-    from collections.abc import Callable
+from typing import Any, NoReturn
 
 
 class BrowserToolsError(Exception):
@@ -107,43 +104,6 @@ def invoke_mcp_tool(
         ) from e
     except OSError as e:
         raise MCPInvocationError(f"Unexpected error invoking tool: {e}") from e
-
-
-def list_mcp_tools(config: list[str] | None = None) -> list[dict[str, Any]]:
-    """
-    List available MCP tools
-
-    Args:
-        config: Optional MCP server command configuration
-
-    Returns:
-        List of tool definitions
-
-    Raises:
-        MCPInvocationError: If listing tools fails
-    """
-    # Build command
-    cmd = ["npx", "@modelcontextprotocol/inspector", "--cli"]
-
-    if config:
-        cmd.extend(config)
-    else:
-        cmd.extend(["npx", "-y", "chrome-devtools-mcp@latest"])
-
-    cmd.extend(["--method", "tools/list"])
-
-    # Execute
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-
-        if result.returncode != 0:
-            raise MCPInvocationError(f"Failed to list tools: {result.stderr}")
-
-        response = json.loads(result.stdout)
-        return response.get("tools", [])
-
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
-        raise MCPInvocationError(f"Error listing tools: {e}") from e
 
 
 def extract_content(response: dict[str, Any]) -> str:
@@ -284,69 +244,6 @@ def success_output(message: str, data: Any | None = None, format_type: str = "te
                     print(data)
             else:
                 print(data)
-
-
-def validate_file_path(path: str, must_exist: bool = False) -> str:
-    """
-    Validate file path
-
-    Args:
-        path: File path to validate
-        must_exist: Whether file must already exist
-
-    Returns:
-        Validated path
-
-    Raises:
-        ParameterValidationError: If path is invalid
-    """
-    import os
-
-    # Expand user home directory
-    path = os.path.expanduser(path)
-
-    if must_exist and not os.path.exists(path):
-        raise ParameterValidationError(f"File does not exist: {path}")
-
-    # Ensure parent directory exists for new files
-    if not must_exist:
-        parent_dir = os.path.dirname(path)
-        if parent_dir and not os.path.exists(parent_dir):
-            raise ParameterValidationError(f"Parent directory does not exist: {parent_dir}")
-
-    return path
-
-
-def retry_on_failure(func: Callable[..., Any], max_retries: int = 3, delay: float = 1.0):
-    """
-    Retry a function on failure
-
-    Args:
-        func: Function to execute
-        max_retries: Maximum number of retries
-        delay: Delay between retries in seconds
-
-    Returns:
-        Function result
-
-    Raises:
-        Last exception if all retries fail
-    """
-    import time
-
-    last_exception = None
-    for attempt in range(max_retries):
-        try:
-            return func()
-        except Exception as e:
-            last_exception = e
-            if attempt < max_retries - 1:
-                time.sleep(delay)
-                delay *= 2  # Exponential backoff
-
-    if last_exception is not None:
-        raise last_exception
-    raise RuntimeError("Retry failed with no exception")
 
 
 # ============================================================================
@@ -525,11 +422,6 @@ def find_button(snapshot_text: str, text: str) -> str | None:
 def find_link(snapshot_text: str, text: str) -> str | None:
     """Convenience function to find link by text"""
     return find_element_uid(snapshot_text, text=text, role="link")
-
-
-def find_textbox(snapshot_text: str, name: str) -> str | None:
-    """Convenience function to find textbox by name"""
-    return find_element_uid(snapshot_text, name=name, role="textbox")
 
 
 def format_snapshot_summary(snapshot_text: str, max_elements: int = 20) -> str:

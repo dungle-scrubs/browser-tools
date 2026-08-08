@@ -235,8 +235,6 @@ def execute_screenshot_url(args: argparse.Namespace) -> int:
         controller.invoke_tool("new_page", {"url": args.url})
 
         # Step 2: Wait for page to load (wait for common text)
-        import contextlib
-
         with contextlib.suppress(BrowserToolsError):
             controller.invoke_tool("wait_for", {"text": "html"})
 

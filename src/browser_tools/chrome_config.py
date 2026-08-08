@@ -238,15 +238,6 @@ TOOL_SCHEMAS = {
     "element_visible": {"selector": (str, True, "CSS selector")},
 }
 
-# Chrome launch configuration
-CHROME_CONFIG = {
-    "default_viewport": {"width": 1280, "height": 720},
-    "default_timeout": 30000,  # 30 seconds
-    "headless": False,
-    "isolated": False,
-    "channel": "canary",  # ALWAYS use canary, not stable
-}
-
 
 # MCP server command configuration
 def get_mcp_command(
