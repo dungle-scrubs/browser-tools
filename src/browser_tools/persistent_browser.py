@@ -40,10 +40,10 @@ from .process_utils import (
     build_browser_command,
     clean_stale_singleton_lock,
     enumerate_tabs,  # type: ignore[reportUnusedImport]  # noqa: F401  # re-exported for tests
-    find_chrome_user_data_dir,  # type: ignore[reportUnusedImport]  # re-exported for tests
     find_free_port,
     is_devtools_available,
     is_process_alive,
+    pid_holds_user_data_dir,  # type: ignore[reportUnusedImport]  # noqa: F401  # re-exported for session_reaper
     read_process_command,  # type: ignore[reportUnusedImport]  # noqa: F401  # re-exported for tests
     read_process_start_time,
     resolve_chrome_executable,
@@ -758,28 +758,6 @@ def _wait_for_process_exit(pid: int, timeout_seconds: float) -> bool:
             return True
         time.sleep(0.1)
     return not is_process_alive(pid)
-
-
-def pid_holds_user_data_dir(pid: int, user_data_dir: Path) -> bool:
-    """Check whether a live PID is a Chrome holding the given profile dir.
-
-    Guards against a recycled SingletonLock PID (now an unrelated process) or a
-    Chrome running a different ``--user-data-dir``.
-
-    Args:
-        pid: Process ID recorded in the profile's SingletonLock.
-        user_data_dir: Profile directory the caller expects that PID to hold.
-
-    Returns:
-        True only when ``pid``'s command line resolves to ``user_data_dir``.
-    """
-    actual = find_chrome_user_data_dir(pid)
-    if actual is None:
-        return False
-    try:
-        return actual.resolve() == user_data_dir.resolve()
-    except OSError:
-        return False
 
 
 def format_dead_port_error(
