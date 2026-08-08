@@ -15,6 +15,7 @@ from typing import Any
 
 from . import persistent_browser, process_utils
 from . import session_layout as layout
+from .automation_backend import CAMOUFOX_TOOL_MAP, CamoufoxBackend, ChromeBackend
 from .browser_state import (
     AUTH_MODES,
     HEADED_AUTH_MODES,
@@ -426,66 +427,6 @@ SESSION_TOOLS = {
     "close_browser",
 }
 
-# Tools routed through Camoufox when active. Maps browser-tools names to
-# camoufox session tool names. Keys present here will be intercepted; if
-# the mapped value is None the original tool name is forwarded as-is.
-_CAMOUFOX_TOOL_MAP: dict[str, str | None] = {
-    "navigate_page": "navigate",
-    "new_page": "navigate",  # camoufox uses single page, navigate covers this
-    "take_snapshot": "snapshot",
-    "take_screenshot": "screenshot",
-    "click": "click",
-    "fill": "fill",
-    "type_text": "fill",  # alias
-    "evaluate_script": "evaluate",
-    "wait_for": None,  # not mapped — use wait_for_human instead
-}
-
-# Camoufox-exclusive tools handled directly by the camoufox session
-_CAMOUFOX_ONLY_TOOLS = {"launch_camoufox", "wait_for_human", "get_cookies", "close_camoufox"}
-
-
-def _translate_args_for_camoufox(chrome_tool: str, args: Any) -> dict[str, Any]:
-    """Translate browser-tools arg names to camoufox arg names.
-
-    Args:
-        chrome_tool: Original browser-tools tool name.
-        args: Original arguments.
-
-    Returns:
-        Args dict adapted for the camoufox session.
-    """
-    if chrome_tool in ("navigate_page", "new_page"):
-        return {"url": args.get("url", ""), "wait_until": args.get("wait_until", "load")}
-    if chrome_tool == "take_screenshot":
-        return {
-            "path": args.get("filePath", args.get("path", "")),
-            "full_page": args.get("fullPage", False),
-        }
-    if chrome_tool == "click":
-        uid = args.get("uid", "")
-        return {"selector": uid}
-    if chrome_tool in ("fill", "type_text"):
-        return {"selector": args.get("uid", ""), "value": args.get("value", "")}
-    if chrome_tool == "evaluate_script":
-        return {"script": args.get("function", "")}
-    return args
-
-
-def _camoufox_result_to_mcp(result: dict[str, Any]) -> dict[str, Any]:
-    """Wrap a camoufox session result in MCP JSON-RPC format.
-
-    Args:
-        result: CamoufoxSession.call_tool() return value.
-
-    Returns:
-        MCP-style response with content array.
-    """
-    if "error" in result:
-        return error_response(f"Error: {result['error']}")
-    text = json.dumps(result.get("result", result), indent=2)
-    return text_response(text)
-
 
 def choose_live_profile_fallback(
     live: list[dict[str, Any]],
@@ -819,19 +760,12 @@ def create_tool_proxy_handlers():
                     f"Error: {tool} requires an active Camoufox session. "
                     "Call launch_camoufox first."
                 )
-            return _camoufox_result_to_mcp(cfox.call_tool(tool, args))
+            return CamoufoxBackend(cfox).invoke(tool, args)
 
         # --- Standard tools routed through Camoufox when active ---
         cfox = camoufox_ref[0]
-        if cfox is not None and tool in _CAMOUFOX_TOOL_MAP:
-            mapped = _CAMOUFOX_TOOL_MAP[tool]
-            if mapped is None:
-                return error_response(
-                    f"Error: Tool '{tool}' is not supported in Camoufox mode. "
-                    "Use the camoufox-specific equivalent."
-                )
-            translated = _translate_args_for_camoufox(tool, args)
-            return _camoufox_result_to_mcp(cfox.call_tool(mapped, translated))
+        if cfox is not None and tool in CAMOUFOX_TOOL_MAP:
+            return CamoufoxBackend(cfox).invoke(tool, args)
 
         # --- Chrome/CDP tools (original path) ---
         if tool == "attach_browser":
@@ -855,6 +789,7 @@ def create_tool_proxy_handlers():
             return _format_live_profile_conflict_error(live_profile_conflict[0])
         # Use latest controller (may have been swapped by attach_browser)
         active = controller_ref[0] or controller
+        chrome = ChromeBackend(active)
 
         # Single active tab: new_page reuses the one tab instead of stacking.
         if tool == "new_page":
@@ -864,10 +799,10 @@ def create_tool_proxy_handlers():
 
         # Headless -> headed auto-promotion when a navigation hits an auth wall.
         if tool == "navigate_page" and args.get("type", "url") == "url":
-            response = active.invoke_tool(tool, args)
+            response = chrome.invoke(tool, args)
             return _maybe_promote_on_auth_wall(controller_ref, active, response, args.get("url"))
 
-        return active.invoke_tool(tool, args)  # type: ignore[arg-type]
+        return chrome.invoke(tool, args)
 
     return create_session, call_tool
 

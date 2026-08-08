@@ -50,6 +50,13 @@ and code should use these terms, not ad-hoc synonyms.
   retry loop that reads it. CDPHandler exposes only a thread-safe
   `run_post_navigation_detection` that marshals onto its event loop; it owns
   no detection policy. The implementation module is `interstitial`.
+- **Automation Backend** - the seam behind the two browser backends: Chrome
+  (via `PersistentChromeController`) and Camoufox (via `CamoufoxSession`). One
+  interface, `invoke(tool, args) -> mcp_response`; the Camoufox adapter owns
+  the browser-tools to Camoufox tool-name mapping, arg translation, and result
+  wrapping. Lifecycle and session tools (`launch_camoufox`, `attach_browser`,
+  ...) are not automation tools and stay routed in `browser_session`. The
+  implementation module is `automation_backend`.
 
 ## Mode vocabulary
 
