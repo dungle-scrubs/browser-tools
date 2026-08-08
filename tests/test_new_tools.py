@@ -862,3 +862,72 @@ async def test_screencast_stop_requires_active_capture():
     result = await handler._handle_screencast_stop({"dir": "/tmp/x"})
 
     assert "no screencast in progress" in result["result"]["content"][0]["text"].lower()
+
+
+# ---------------------------------------------------------------------------
+# Error-mapping contract (_cdp_call / CdpToolError / call_tool)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_cdp_call_wraps_protocol_failure_with_label():
+    """A CDP protocol error becomes CdpToolError('<label> failed: <cause>')."""
+    from browser_tools.cdp_client import CDPError
+    from browser_tools.cdp_handler import CdpToolError, _cdp_call
+
+    cdp = connected_cdp()
+    cdp.send = AsyncMock(side_effect=CDPError("websocket closed"))
+
+    with pytest.raises(CdpToolError) as exc_info:
+        await _cdp_call(cdp, "Runtime.evaluate", {"expression": "1"}, label="get_text")
+
+    # str() is what call_tool feeds to make_error, so it must match the prior
+    # hand-written "get_text failed: <cause>" wording exactly.
+    assert str(exc_info.value) == "get_text failed: websocket closed"
+
+
+@pytest.mark.asyncio
+async def test_cdp_call_wraps_unexpected_failure_with_label():
+    """An unexpected (non-CDP) error becomes CdpToolError('<label> failed')."""
+    from browser_tools.cdp_handler import CdpToolError, _cdp_call
+
+    cdp = connected_cdp()
+    cdp.send = AsyncMock(side_effect=RuntimeError("kaboom"))
+
+    with pytest.raises(CdpToolError) as exc_info:
+        await _cdp_call(cdp, "Runtime.evaluate", None, label="wait_idle")
+
+    assert str(exc_info.value) == "wait_idle failed"
+
+
+def test_call_tool_maps_cdp_tool_error_to_make_error(monkeypatch):
+    """call_tool's top-level handler turns a raised CdpToolError into make_error."""
+    from browser_tools.cdp_client import CDPError
+    from browser_tools.cdp_handler import CDPHandler, CdpToolError
+
+    handler = CDPHandler.__new__(CDPHandler)
+    handler._loop = MagicMock()  # is_running() truthy by default
+    handler._loop.is_running = lambda: True
+
+    raised = CdpToolError("get_text", CDPError("websocket closed"))
+
+    class _FakeFuture:
+        def result(self, timeout=None):
+            raise raised
+
+        def cancel(self):
+            pass
+
+    # call_tool dispatches via run_coroutine_threadsafe; short-circuit it so the
+    # raised CdpToolError surfaces through future.result() exactly as in prod.
+    def _fake_run_coroutine_threadsafe(coro, loop):
+        coro.close()  # discard the real dispatch coroutine cleanly
+        return _FakeFuture()
+
+    monkeypatch.setattr(asyncio, "run_coroutine_threadsafe", _fake_run_coroutine_threadsafe)
+
+    response = handler.call_tool("get_text", {"selector": "#x"})
+    text = response["result"]["content"][0]["text"]
+    assert response["result"]["isError"] is True
+    # make_error prefixes "Error: "; the label+cause wording is preserved.
+    assert text == "Error: get_text failed: websocket closed"

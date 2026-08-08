@@ -54,6 +54,24 @@ class ToolInvocationError(Exception):
         self.cause = cause
 
 
+class CdpToolError(Exception):
+    """A CDP tool call failed; carries the label for the error response.
+
+    ``str()`` yields ``"<label> failed"`` (unexpected) or
+    ``"<label> failed: <cause>"`` (a wrapped CDP protocol failure), which
+    ``call_tool``'s top-level handler turns into the matching ``make_error``
+    text. Raised by :func:`_cdp_call` so handlers stay linear.
+    """
+
+    def __init__(self, label: str, cause: BaseException | None = None) -> None:
+        self.label = label
+        self.cause = cause
+        if cause is not None:
+            super().__init__(f"{label} failed: {cause}")
+        else:
+            super().__init__(f"{label} failed")
+
+
 def _get_cdp_error_class() -> type[Exception]:
     """Import CDPError lazily to avoid breaking script-mode execution.
 
@@ -99,6 +117,32 @@ async def _safe_cdp_send(
         raise ToolInvocationError(method, exc) from exc
 
 
+async def _cdp_call(
+    cdp_client: Any,
+    method: str,
+    params: dict[str, Any] | None,
+    *,
+    label: str,
+) -> dict[str, Any]:
+    """Send one CDP command, raising :class:`CdpToolError` on failure.
+
+    Consolidates the error mapping that was duplicated in every handler:
+    ``ToolInvocationError`` (an expected CDP protocol failure) and any
+    unexpected exception both become a ``CdpToolError`` carrying ``label``.
+    ``call_tool``'s top-level ``except`` turns it into the matching
+    ``make_error`` text, so handlers stay linear with no per-call try/except.
+    """
+    try:
+        if params is not None:
+            return await _safe_cdp_send(cdp_client, method, params)
+        return await _safe_cdp_send(cdp_client, method)
+    except ToolInvocationError as exc:
+        raise CdpToolError(label, exc.cause) from exc
+    except Exception:
+        logger.exception("Unexpected error in %s", label)
+        raise CdpToolError(label) from None
+
+
 class CDPHandler:
     """Manages CDP client and frame manager in a dedicated asyncio event loop.
 
@@ -142,6 +186,18 @@ class CDPHandler:
     def mode(self) -> str:
         """Current access mode ('full' or 'inspect')."""
         return self._mode
+
+    def _cdp_or_error(self) -> tuple[Any, dict[str, Any] | None]:
+        """Return the connected CDP client, or an error response if down.
+
+        Replaces the 15 hand-copied ``if cdp is None or not cdp.connected``
+        guards. Returns ``(cdp_client, None)`` when connected, otherwise
+        ``(None, make_error(...))``.
+        """
+        cdp = self._cdp_client
+        if cdp is None or not cdp.connected:
+            return None, make_error("CDP client not connected")
+        return cdp, None
 
     def run(self) -> None:
         """Run the asyncio event loop (called in a background thread)."""
@@ -413,10 +469,8 @@ class CDPHandler:
                     result_parts.append(f"  {c.get('name')}: {c.get('value', '')[:50]}")
             except ToolInvocationError as exc:
                 result_parts.append(f"Cookies: error - {exc.cause}")
-
             except Exception:
                 logger.exception("Storage fetch error (Cookies)")
-
                 result_parts.append("Cookies: error - unexpected")
 
         if ctx_id and "localStorage" in storage_types:
@@ -434,10 +488,8 @@ class CDPHandler:
                 result_parts.append(f"\nlocalStorage: {ls_value}")
             except ToolInvocationError as exc:
                 result_parts.append(f"\nlocalStorage: error - {exc.cause}")
-
             except Exception:
-                logger.exception("Storage fetch error (\nlocalStorage)")
-
+                logger.exception("Storage fetch error (localStorage)")
                 result_parts.append("\nlocalStorage: error - unexpected")
 
         if ctx_id and "sessionStorage" in storage_types:
@@ -455,9 +507,8 @@ class CDPHandler:
                 result_parts.append(f"\nsessionStorage: {ss_value}")
             except ToolInvocationError as exc:
                 result_parts.append(f"\nsessionStorage: error - {exc.cause}")
-
             except Exception:
-                logger.exception("Storage fetch error (\nsessionStorage)")
+                logger.exception("Storage fetch error (sessionStorage)")
 
                 result_parts.append("\nsessionStorage: error - unexpected")
 
@@ -479,9 +530,9 @@ class CDPHandler:
         Returns:
             JSON-RPC style response dict with list of matching AX nodes.
         """
-        cdp = self._cdp_client
-        if cdp is None or not cdp.connected:
-            return make_error("CDP client not connected")
+        cdp, err = self._cdp_or_error()
+        if err is not None:
+            return err
 
         role = arguments.get("role", "").strip()
         name = arguments.get("name", "").strip()
@@ -495,15 +546,9 @@ class CDPHandler:
         if name:
             params["accessibleName"] = name
 
-        try:
-            result = await _safe_cdp_send(cdp, "Accessibility.queryAXTree", params)
-        except ToolInvocationError as exc:
-            return make_error(f"Accessibility.queryAXTree failed: {exc.cause}")
-
-        except Exception:
-            logger.exception("Unexpected error in Accessibility.queryAXTree failed")
-
-            return make_error("Accessibility.queryAXTree failed")
+        result = await _cdp_call(
+            cdp, "Accessibility.queryAXTree", params, label="Accessibility.queryAXTree"
+        )
 
         nodes = result.get("nodes", [])
         # Filter out ignored nodes
@@ -552,31 +597,21 @@ class CDPHandler:
         Returns:
             JSON-RPC style response dict with AX node properties.
         """
-        cdp = self._cdp_client
-        if cdp is None or not cdp.connected:
-            return make_error("CDP client not connected")
+        cdp, err = self._cdp_or_error()
+        if err is not None:
+            return err
 
         selector = arguments.get("selector", "").strip()
         if not selector:
             return make_error("selector is required")
 
         # Resolve selector to a backend DOM node ID
-        try:
-            eval_result = await _safe_cdp_send(
-                cdp,
-                "Runtime.evaluate",
-                {
-                    "expression": f"document.querySelector({selector!r})",
-                    "returnByValue": False,
-                },
-            )
-        except ToolInvocationError as exc:
-            return make_error(f"Runtime.evaluate failed: {exc.cause}")
-
-        except Exception:
-            logger.exception("Unexpected error in Runtime.evaluate failed")
-
-            return make_error("Runtime.evaluate failed")
+        eval_result = await _cdp_call(
+            cdp,
+            "Runtime.evaluate",
+            {"expression": f"document.querySelector({selector!r})", "returnByValue": False},
+            label="Runtime.evaluate",
+        )
 
         remote_obj = eval_result.get("result", {})
         if remote_obj.get("type") == "undefined" or remote_obj.get("subtype") == "null":
@@ -587,34 +622,21 @@ class CDPHandler:
             return make_error(f"E006: No element found matching selector '{selector}'")
 
         # Get the backend DOM node ID
-        try:
-            node_result = await _safe_cdp_send(cdp, "DOM.requestNode", {"objectId": object_id})
-        except ToolInvocationError as exc:
-            return make_error(f"DOM.requestNode failed: {exc.cause}")
-
-        except Exception:
-            logger.exception("Unexpected error in DOM.requestNode failed")
-
-            return make_error("DOM.requestNode failed")
+        node_result = await _cdp_call(
+            cdp, "DOM.requestNode", {"objectId": object_id}, label="DOM.requestNode"
+        )
 
         backend_node_id = node_result.get("nodeId")
         if not backend_node_id:
             return make_error("Could not resolve element to DOM node")
 
         # Get partial AX tree for this node
-        try:
-            ax_result = await _safe_cdp_send(
-                cdp,
-                "Accessibility.getPartialAXTree",
-                {"nodeId": backend_node_id, "fetchRelatives": False},
-            )
-        except ToolInvocationError as exc:
-            return make_error(f"Accessibility.getPartialAXTree failed: {exc.cause}")
-
-        except Exception:
-            logger.exception("Unexpected error in Accessibility.getPartialAXTree failed")
-
-            return make_error("Accessibility.getPartialAXTree failed")
+        ax_result = await _cdp_call(
+            cdp,
+            "Accessibility.getPartialAXTree",
+            {"nodeId": backend_node_id, "fetchRelatives": False},
+            label="Accessibility.getPartialAXTree",
+        )
 
         nodes = ax_result.get("nodes", [])
         if not nodes:
@@ -666,9 +688,9 @@ class CDPHandler:
         import base64
         import time
 
-        cdp = self._cdp_client
-        if cdp is None or not cdp.connected:
-            return make_error("CDP client not connected")
+        cdp, err = self._cdp_or_error()
+        if err is not None:
+            return err
 
         landscape = arguments.get("landscape", False)
         print_background = arguments.get("print_background", True)
@@ -676,23 +698,16 @@ class CDPHandler:
         if not out_path:
             out_path = f"{int(time.time())}_page.pdf"
 
-        try:
-            result = await _safe_cdp_send(
-                cdp,
-                "Page.printToPDF",
-                {
-                    "landscape": landscape,
-                    "printBackground": print_background,
-                    "transferMode": "ReturnAsBase64",
-                },
-            )
-        except ToolInvocationError as exc:
-            return make_error(f"Page.printToPDF failed: {exc.cause}")
-
-        except Exception:
-            logger.exception("Unexpected error in Page.printToPDF failed")
-
-            return make_error("Page.printToPDF failed")
+        result = await _cdp_call(
+            cdp,
+            "Page.printToPDF",
+            {
+                "landscape": landscape,
+                "printBackground": print_background,
+                "transferMode": "ReturnAsBase64",
+            },
+            label="Page.printToPDF",
+        )
 
         pdf_data = result.get("data", "")
         if not pdf_data:
@@ -703,12 +718,8 @@ class CDPHandler:
             abs_path = str(Path(out_path).resolve())
             Path(abs_path).parent.mkdir(parents=True, exist_ok=True)
             Path(abs_path).write_bytes(pdf_bytes)
-        except ToolInvocationError as exc:
-            return make_error(f"E009: Failed to write PDF to '{out_path}': {exc.cause}")
-
         except Exception:
             logger.exception("Unexpected error writing PDF to '%s'", out_path)
-
             return make_error(f"E009: Failed to write PDF to '{out_path}'")
 
         return make_text(f"PDF saved to: {abs_path} ({len(pdf_bytes):,} bytes)")
@@ -724,9 +735,9 @@ class CDPHandler:
         """
         import base64
 
-        cdp = self._cdp_client
-        if cdp is None or not cdp.connected:
-            return make_error("CDP client not connected")
+        cdp, err = self._cdp_or_error()
+        if err is not None:
+            return err
 
         selector = arguments.get("selector", "").strip()
         if not selector:
@@ -742,19 +753,12 @@ class CDPHandler:
             return {{x: r.x, y: r.y, width: r.width, height: r.height}};
         }})()
         """
-        try:
-            eval_result = await _safe_cdp_send(
-                cdp,
-                "Runtime.evaluate",
-                {"expression": js, "returnByValue": True},
-            )
-        except ToolInvocationError as exc:
-            return make_error(f"Runtime.evaluate failed: {exc.cause}")
-
-        except Exception:
-            logger.exception("Unexpected error in Runtime.evaluate failed")
-
-            return make_error("Runtime.evaluate failed")
+        eval_result = await _cdp_call(
+            cdp,
+            "Runtime.evaluate",
+            {"expression": js, "returnByValue": True},
+            label="Runtime.evaluate",
+        )
 
         rect = eval_result.get("result", {}).get("value")
         if rect is None:
@@ -773,19 +777,12 @@ class CDPHandler:
             "scale": 1,
         }
 
-        try:
-            shot_result = await _safe_cdp_send(
-                cdp,
-                "Page.captureScreenshot",
-                {"format": "png", "clip": clip},
-            )
-        except ToolInvocationError as exc:
-            return make_error(f"Page.captureScreenshot failed: {exc.cause}")
-
-        except Exception:
-            logger.exception("Unexpected error in Page.captureScreenshot failed")
-
-            return make_error("Page.captureScreenshot failed")
+        shot_result = await _cdp_call(
+            cdp,
+            "Page.captureScreenshot",
+            {"format": "png", "clip": clip},
+            label="Page.captureScreenshot",
+        )
 
         img_data = shot_result.get("data", "")
         if not img_data:
@@ -851,9 +848,9 @@ class CDPHandler:
         Returns:
             JSON-RPC style response dict.
         """
-        cdp = self._cdp_client
-        if cdp is None or not cdp.connected:
-            return make_error("CDP client not connected")
+        cdp, err = self._cdp_or_error()
+        if err is not None:
+            return err
         if self._screencast_active:
             return make_error("screencast already recording; call screencast_stop first")
 
@@ -904,9 +901,9 @@ class CDPHandler:
         Returns:
             JSON-RPC style response dict.
         """
-        cdp = self._cdp_client
-        if cdp is None or not cdp.connected:
-            return make_error("CDP client not connected")
+        cdp, err = self._cdp_or_error()
+        if err is not None:
+            return err
         if not self._screencast_active:
             return make_error("no screencast in progress; call screencast_start first")
 
@@ -940,13 +937,9 @@ class CDPHandler:
                 manifest.append({"file": fname, "timestamp": frame["timestamp"]})
             (base / "frames.json").write_text(json.dumps(manifest, indent=2))
             lines.append(f"Wrote {len(frames)} frames + frames.json to {base}")
-        except ToolInvocationError as exc:
-            return make_error(f"could not write frames: {exc.cause}")
-
         except Exception:
-            logger.exception("Unexpected error in could not write frames")
-
-            return make_error("could not write frames failed")
+            logger.exception("could not write screencast frames")
+            return make_error("could not write frames")
         return make_text("\n".join(lines))
 
     # ------------------------------------------------------------------ #
@@ -966,9 +959,9 @@ class CDPHandler:
         Returns:
             JSON-RPC style response dict.
         """
-        cdp = self._cdp_client
-        if cdp is None or not cdp.connected:
-            return make_error("CDP client not connected")
+        cdp, err = self._cdp_or_error()
+        if err is not None:
+            return err
 
         timeout_ms = int(arguments.get("timeout_ms", 5000))
         idle_ms = int(arguments.get("idle_ms", 500))
@@ -1004,24 +997,17 @@ class CDPHandler:
         }})
         """
 
-        try:
-            result = await _safe_cdp_send(
-                cdp,
-                "Runtime.evaluate",
-                {
-                    "expression": js,
-                    "awaitPromise": True,
-                    "returnByValue": True,
-                    "timeout": timeout_ms + 2000,
-                },
-            )
-        except ToolInvocationError as exc:
-            return make_error(f"wait_idle failed: {exc.cause}")
-
-        except Exception:
-            logger.exception("Unexpected error in wait_idle failed")
-
-            return make_error("wait_idle failed")
+        result = await _cdp_call(
+            cdp,
+            "Runtime.evaluate",
+            {
+                "expression": js,
+                "awaitPromise": True,
+                "returnByValue": True,
+                "timeout": timeout_ms + 2000,
+            },
+            label="wait_idle",
+        )
 
         # Check for JS exception
         exc_details = result.get("exceptionDetails")
@@ -1044,9 +1030,9 @@ class CDPHandler:
         Returns:
             JSON-RPC style response dict.
         """
-        cdp = self._cdp_client
-        if cdp is None or not cdp.connected:
-            return make_error("CDP client not connected")
+        cdp, err = self._cdp_or_error()
+        if err is not None:
+            return err
 
         timeout_ms = int(arguments.get("timeout_ms", 5000))
         stable_ms = int(arguments.get("stable_ms", 300))
@@ -1091,24 +1077,17 @@ class CDPHandler:
         }})
         """
 
-        try:
-            result = await _safe_cdp_send(
-                cdp,
-                "Runtime.evaluate",
-                {
-                    "expression": js,
-                    "awaitPromise": True,
-                    "returnByValue": True,
-                    "timeout": timeout_ms + 2000,
-                },
-            )
-        except ToolInvocationError as exc:
-            return make_error(f"wait_stable failed: {exc.cause}")
-
-        except Exception:
-            logger.exception("Unexpected error in wait_stable failed")
-
-            return make_error("wait_stable failed")
+        result = await _cdp_call(
+            cdp,
+            "Runtime.evaluate",
+            {
+                "expression": js,
+                "awaitPromise": True,
+                "returnByValue": True,
+                "timeout": timeout_ms + 2000,
+            },
+            label="wait_stable",
+        )
 
         exc_details = result.get("exceptionDetails")
         if exc_details:
@@ -1123,7 +1102,7 @@ class CDPHandler:
     # ------------------------------------------------------------------ #
 
     async def _query_element_js(
-        self, cdp: Any, selector: str, expression: str
+        self, cdp: Any, selector: str, expression: str, *, label: str
     ) -> dict[str, Any] | None:
         """Evaluate a JS expression on a queried element.
 
@@ -1132,9 +1111,11 @@ class CDPHandler:
             selector: CSS selector string.
             expression: JS expression using 'el' as the element variable.
                 Must return the desired value or null if element not found.
+            label: Error-mapping label forwarded to :func:`_cdp_call`.
 
         Returns:
-            CDP result dict on success, or None if the element was not found.
+            The CDP result dict on success, or None if the element was not
+            found. Raises :class:`CdpToolError` on CDP failure.
         """
         js = f"""
         (() => {{
@@ -1143,10 +1124,11 @@ class CDPHandler:
             return {expression};
         }})()
         """
-        result = await _safe_cdp_send(
+        result = await _cdp_call(
             cdp,
             "Runtime.evaluate",
             {"expression": js, "returnByValue": True},
+            label=label,
         )
         val = result.get("result", {}).get("value")
         # None (Python) means JS returned null (element not found)
@@ -1161,23 +1143,17 @@ class CDPHandler:
         Returns:
             JSON-RPC style response dict with element text content.
         """
-        cdp = self._cdp_client
-        if cdp is None or not cdp.connected:
-            return make_error("CDP client not connected")
+        cdp, err = self._cdp_or_error()
+        if err is not None:
+            return err
 
         selector = arguments.get("selector", "").strip()
         if not selector:
             return make_error("selector is required")
 
-        try:
-            result = await self._query_element_js(cdp, selector, "el.textContent")
-        except ToolInvocationError as exc:
-            return make_error(f"get_text failed: {exc.cause}")
-
-        except Exception:
-            logger.exception("Unexpected error in get_text failed")
-
-            return make_error("get_text failed")
+        result = await self._query_element_js(
+            cdp, selector, "el.textContent", label="get_text"
+        )
 
         if result is None:
             return make_error(f"E006: No element found matching selector '{selector}'")
@@ -1194,23 +1170,17 @@ class CDPHandler:
         Returns:
             JSON-RPC style response dict with element outer HTML.
         """
-        cdp = self._cdp_client
-        if cdp is None or not cdp.connected:
-            return make_error("CDP client not connected")
+        cdp, err = self._cdp_or_error()
+        if err is not None:
+            return err
 
         selector = arguments.get("selector", "").strip()
         if not selector:
             return make_error("selector is required")
 
-        try:
-            result = await self._query_element_js(cdp, selector, "el.outerHTML")
-        except ToolInvocationError as exc:
-            return make_error(f"get_html failed: {exc.cause}")
-
-        except Exception:
-            logger.exception("Unexpected error in get_html failed")
-
-            return make_error("get_html failed")
+        result = await self._query_element_js(
+            cdp, selector, "el.outerHTML", label="get_html"
+        )
 
         if result is None:
             return make_error(f"E006: No element found matching selector '{selector}'")
@@ -1229,9 +1199,9 @@ class CDPHandler:
         Returns:
             JSON-RPC style response dict with attribute value.
         """
-        cdp = self._cdp_client
-        if cdp is None or not cdp.connected:
-            return make_error("CDP client not connected")
+        cdp, err = self._cdp_or_error()
+        if err is not None:
+            return err
 
         selector = arguments.get("selector", "").strip()
         attribute = arguments.get("attribute", "").strip()
@@ -1248,19 +1218,12 @@ class CDPHandler:
             return val === null ? '__ATTR_NULL__' : val;
         }})()
         """
-        try:
-            result = await _safe_cdp_send(
-                cdp,
-                "Runtime.evaluate",
-                {"expression": js, "returnByValue": True},
-            )
-        except ToolInvocationError as exc:
-            return make_error(f"get_attr failed: {exc.cause}")
-
-        except Exception:
-            logger.exception("Unexpected error in get_attr failed")
-
-            return make_error("get_attr failed")
+        result = await _cdp_call(
+            cdp,
+            "Runtime.evaluate",
+            {"expression": js, "returnByValue": True},
+            label="get_attr",
+        )
 
         val = result.get("result", {}).get("value", "__ELEMENT_NOT_FOUND__")
         if val == "__ELEMENT_NOT_FOUND__":
@@ -1284,28 +1247,21 @@ class CDPHandler:
         Returns:
             JSON-RPC style response dict with exists bool and count.
         """
-        cdp = self._cdp_client
-        if cdp is None or not cdp.connected:
-            return make_error("CDP client not connected")
+        cdp, err = self._cdp_or_error()
+        if err is not None:
+            return err
 
         selector = arguments.get("selector", "").strip()
         if not selector:
             return make_error("selector is required")
 
         js = f"document.querySelectorAll({selector!r}).length"
-        try:
-            result = await _safe_cdp_send(
-                cdp,
-                "Runtime.evaluate",
-                {"expression": js, "returnByValue": True},
-            )
-        except ToolInvocationError as exc:
-            return make_error(f"element_exists failed: {exc.cause}")
-
-        except Exception:
-            logger.exception("Unexpected error in element_exists failed")
-
-            return make_error("element_exists failed")
+        result = await _cdp_call(
+            cdp,
+            "Runtime.evaluate",
+            {"expression": js, "returnByValue": True},
+            label="element_exists",
+        )
 
         # querySelectorAll throws for invalid selectors -- check for exception
         exc_details = result.get("exceptionDetails")
@@ -1329,9 +1285,9 @@ class CDPHandler:
         Returns:
             JSON-RPC style response dict with visible bool.
         """
-        cdp = self._cdp_client
-        if cdp is None or not cdp.connected:
-            return make_error("CDP client not connected")
+        cdp, err = self._cdp_or_error()
+        if err is not None:
+            return err
 
         selector = arguments.get("selector", "").strip()
         if not selector:
@@ -1349,19 +1305,12 @@ class CDPHandler:
             return rect.width > 0 && rect.height > 0;
         }})()
         """
-        try:
-            result = await _safe_cdp_send(
-                cdp,
-                "Runtime.evaluate",
-                {"expression": js, "returnByValue": True},
-            )
-        except ToolInvocationError as exc:
-            return make_error(f"element_visible failed: {exc.cause}")
-
-        except Exception:
-            logger.exception("Unexpected error in element_visible failed")
-
-            return make_error("element_visible failed")
+        result = await _cdp_call(
+            cdp,
+            "Runtime.evaluate",
+            {"expression": js, "returnByValue": True},
+            label="element_visible",
+        )
 
         visible = result.get("result", {}).get("value", False)
         return make_text(f'{{"visible": {str(visible).lower()}}}')
