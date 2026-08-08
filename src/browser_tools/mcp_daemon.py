@@ -42,14 +42,9 @@ logger = logging.getLogger(__name__)
 
 try:
     from .cdp_constants import (
-        CDP_TOOLS,
-        INSPECT_BLOCKED_TOOLS,
-        INSPECT_WARN_TOOLS,  # type: ignore[import-untyped]
         INTERSTITIAL_AUTO_RETRY_TYPES,  # type: ignore[import-untyped]
         INTERSTITIAL_MAX_RETRIES,  # type: ignore[import-untyped]
         INTERSTITIAL_RETRY_DELAY_SECONDS,  # type: ignore[import-untyped]
-        LOCAL_TOOLS,
-        NAVIGATION_TOOLS,
         REQUEST_TIMEOUT_SECONDS,
         SCREENSHOT_BLANK_MAX_RETRIES,
         SCREENSHOT_BLANK_RETRY_DELAY_SECONDS,
@@ -60,16 +55,17 @@ try:
         extract_screenshot_png_b64,
         screenshot_looks_blank,
     )
-except ImportError:
-    from cdp_constants import (  # type: ignore[import-untyped,no-redef]
+    from .tool_registry import (
         CDP_TOOLS,
         INSPECT_BLOCKED_TOOLS,
-        INSPECT_WARN_TOOLS,  # type: ignore[import-untyped]  # noqa: F401
+        LOCAL_TOOLS,
+        NAVIGATION_TOOLS,
+    )
+except ImportError:
+    from cdp_constants import (  # type: ignore[import-untyped,no-redef]
         INTERSTITIAL_AUTO_RETRY_TYPES,  # type: ignore[import-untyped]  # noqa: F401
         INTERSTITIAL_MAX_RETRIES,  # type: ignore[import-untyped]  # noqa: F401
         INTERSTITIAL_RETRY_DELAY_SECONDS,  # type: ignore[import-untyped]  # noqa: F401
-        LOCAL_TOOLS,
-        NAVIGATION_TOOLS,
         REQUEST_TIMEOUT_SECONDS,
         SCREENSHOT_BLANK_MAX_RETRIES,
         SCREENSHOT_BLANK_RETRY_DELAY_SECONDS,
@@ -85,6 +81,12 @@ except ImportError:
     from screenshot_utils import (  # type: ignore[import-untyped,no-redef]
         extract_screenshot_png_b64,
         screenshot_looks_blank,
+    )
+    from tool_registry import (  # type: ignore[import-untyped,no-redef]
+        CDP_TOOLS,
+        INSPECT_BLOCKED_TOOLS,
+        LOCAL_TOOLS,
+        NAVIGATION_TOOLS,
     )
 
 IDLE_TIMEOUT_SECONDS = 30 * 60  # 30 minutes

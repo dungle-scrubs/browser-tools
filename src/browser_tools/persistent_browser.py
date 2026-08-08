@@ -58,6 +58,7 @@ from .project_identity import (
     get_project_id,
     resolve_project_root,
 )
+from .tool_registry import INTERACTION_TOOLS
 
 CACHE_DIR = Path.home() / ".cache" / "tool-proxy" / "browser-tools"
 DEFAULT_BROWSER_TIMEOUT_SECONDS = 60
@@ -762,19 +763,6 @@ def normalize_tool_params(tool_name: str, params: dict[str, Any]) -> dict[str, A
         if isinstance(page_idx, int):
             normalized["pageId"] = page_idx
     return normalized
-
-
-INTERACTION_TOOLS = frozenset(
-    {
-        "click",
-        "hover",
-        "fill",
-        "fill_form",
-        "drag",
-        "press_key",
-        "upload_file",
-    }
-)
 
 
 def needs_pre_snapshot(tool_name: str) -> bool:

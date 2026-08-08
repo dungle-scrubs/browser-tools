@@ -699,7 +699,7 @@ async def test_element_visible_checks_css_properties():
 
 def test_all_new_tools_in_cdp_tools():
     """All 11 new tools are registered in CDP_TOOLS frozenset."""
-    from browser_tools.mcp_daemon import CDP_TOOLS
+    from browser_tools.tool_registry import CDP_TOOLS
 
     expected = {
         "ax_find",
@@ -720,7 +720,7 @@ def test_all_new_tools_in_cdp_tools():
 
 def test_no_new_tools_in_local_tools():
     """New tools are NOT in LOCAL_TOOLS (they need CDP/async, not sync local)."""
-    from browser_tools.mcp_daemon import LOCAL_TOOLS
+    from browser_tools.tool_registry import LOCAL_TOOLS
 
     new_tools = {
         "ax_find",
