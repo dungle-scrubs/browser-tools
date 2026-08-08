@@ -28,13 +28,12 @@ import contextlib
 import json
 import logging
 import os
-import queue
 import signal
 import socket
-import subprocess
 import sys
 import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -50,6 +49,8 @@ try:
         SCREENSHOT_BLANK_RETRY_DELAY_SECONDS,
     )
     from .cdp_handler import CDPHandler
+    from .interstitial import format_interstitials
+    from .mcp_broker import McpBroker
     from .mcp_response import append_text, make_error, make_text
     from .screenshot_utils import (
         extract_screenshot_png_b64,
@@ -60,6 +61,7 @@ try:
         INSPECT_BLOCKED_TOOLS,
         LOCAL_TOOLS,
         NAVIGATION_TOOLS,
+        SCREENSHOT_GATE_TOOLS,
     )
 except ImportError:
     from cdp_constants import (  # type: ignore[import-untyped,no-redef]
@@ -73,6 +75,10 @@ except ImportError:
     from cdp_handler import (  # type: ignore[import-untyped,no-redef]
         CDPHandler,
     )
+    from interstitial import (  # type: ignore[import-untyped,no-redef]
+        format_interstitials,
+    )
+    from mcp_broker import McpBroker  # type: ignore[import-untyped,no-redef]
     from mcp_response import (  # type: ignore[import-untyped,no-redef]
         append_text,
         make_error,
@@ -87,23 +93,32 @@ except ImportError:
         INSPECT_BLOCKED_TOOLS,
         LOCAL_TOOLS,
         NAVIGATION_TOOLS,
+        SCREENSHOT_GATE_TOOLS,
     )
 
 IDLE_TIMEOUT_SECONDS = 30 * 60  # 30 minutes
 MCP_INIT_TIMEOUT_SECONDS = 60
 
 
-def _terminate_owned_chrome(chrome_pid: int | None, chrome_owned: bool) -> None:
+def _terminate_owned_chrome(
+    chrome_pid: int | None,
+    chrome_owned: bool,
+    chrome_user_data_dir: str | None,
+) -> None:
     """Quit the tool-launched Chrome when the daemon shuts down or idles out.
 
     Only fires when browser-tools launched Chrome into a private automation
     profile it owns; an externally attached or real-profile Chrome is never
-    touched. Sends SIGTERM, then SIGKILL if it does not exit promptly, so the
-    user never has to hunt for and kill an orphaned automation browser.
+    touched. Delegates to the controller's ``quit_owned_chrome`` so there is a
+    single owner for owned-Chrome teardown - the daemon inherits the same
+    SIGTERM -> SIGKILL sequence and stale-lock cleanup, and never re-implements
+    process signalling.
 
     Args:
         chrome_pid: PID of the tool-launched Chrome, if known.
         chrome_owned: Whether that Chrome is a private profile safe to quit.
+        chrome_user_data_dir: The Chrome's profile directory, so its stale
+            singleton lock is cleaned after it exits. None skips lock cleanup.
 
     Returns:
         None.
@@ -111,19 +126,10 @@ def _terminate_owned_chrome(chrome_pid: int | None, chrome_owned: bool) -> None:
     if not chrome_owned or chrome_pid is None:
         return
     try:
-        from .process_utils import is_process_alive, terminate_process
+        from .persistent_browser import quit_owned_chrome
     except ImportError:
-        from browser_tools.process_utils import is_process_alive, terminate_process
-
-    if not is_process_alive(chrome_pid):
-        return
-    terminate_process(chrome_pid)  # SIGTERM
-    deadline = time.time() + 5.0
-    while time.time() < deadline and is_process_alive(chrome_pid):
-        time.sleep(0.1)
-    if is_process_alive(chrome_pid):
-        with contextlib.suppress(ProcessLookupError, PermissionError):
-            os.kill(chrome_pid, signal.SIGKILL)
+        from browser_tools.persistent_browser import quit_owned_chrome
+    quit_owned_chrome(chrome_pid, chrome_user_data_dir, None)
 
 
 def main(
@@ -135,6 +141,7 @@ def main(
     stealth: bool = False,
     chrome_pid: int | None = None,
     chrome_owned: bool = False,
+    chrome_user_data_dir: str | None = None,
 ) -> None:
     """Run the MCP daemon broker.
 
@@ -151,6 +158,7 @@ def main(
         stealth: Whether to inject stealth patches to reduce automation fingerprinting.
         chrome_pid: PID of the tool-launched Chrome to quit on idle/shutdown.
         chrome_owned: Whether that Chrome is a private profile safe to quit.
+        chrome_user_data_dir: That Chrome's profile directory, for stale-lock cleanup.
 
     Returns:
         None.
@@ -167,78 +175,15 @@ def main(
     os.close(devnull_fd)
 
     try:
-        proc = subprocess.Popen(
-            mcp_command,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            bufsize=1,
-        )
+        broker = McpBroker(mcp_command)
     except (FileNotFoundError, OSError):
         _cleanup_files(socket_path, pid_file)
         sys.exit(1)
 
-    msg_id_counter = [0]
-    pending: dict[int, queue.Queue[dict[str, Any]]] = {}
-    lock = threading.Lock()
-    last_activity = [time.time()]
-
-    def read_mcp_stdout() -> None:
-        """Route JSON-RPC responses from MCP stdout to waiting callers."""
-        assert proc.stdout is not None
-        for line in proc.stdout:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                payload = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            resp_id = payload.get("id")
-            with lock:
-                resp_queue = pending.get(resp_id)
-            if resp_queue is not None:
-                resp_queue.put(payload)
-
-    reader = threading.Thread(target=read_mcp_stdout, daemon=True)
-    reader.start()
-
-    def send_to_mcp(method: str, params: dict[str, Any], timeout: float) -> dict[str, Any]:
-        """Send a JSON-RPC request to MCP and wait for the response.
-
-        Args:
-            method: JSON-RPC method name.
-            params: Method parameters.
-            timeout: Seconds to wait for a response.
-
-        Returns:
-            JSON-RPC response dict.
-        """
-        with lock:
-            msg_id_counter[0] += 1
-            internal_id = msg_id_counter[0]
-            resp_q: queue.Queue[dict[str, Any]] = queue.Queue()
-            pending[internal_id] = resp_q
-
-        request = {"jsonrpc": "2.0", "method": method, "params": params, "id": internal_id}
-        assert proc.stdin is not None
-        proc.stdin.write(json.dumps(request) + "\n")
-        proc.stdin.flush()
-
-        try:
-            response = resp_q.get(timeout=timeout)
-        except queue.Empty:
-            with lock:
-                pending.pop(internal_id, None)
-            return {"jsonrpc": "2.0", "error": {"code": -32000, "message": "Timeout"}, "id": 0}
-
-        with lock:
-            pending.pop(internal_id, None)
-        return response
+    broker.start()
 
     # Initialize the MCP session
-    init_resp = send_to_mcp(
+    init_resp = broker.request(
         "initialize",
         {
             "protocolVersion": "2024-11-05",
@@ -248,7 +193,7 @@ def main(
         timeout=MCP_INIT_TIMEOUT_SECONDS,
     )
     if "error" in init_resp:
-        proc.terminate()
+        broker.terminate()
         _cleanup_files(socket_path, pid_file)
         sys.exit(1)
 
@@ -257,23 +202,24 @@ def main(
     cdp_thread = threading.Thread(target=cdp_handler.run, daemon=True)
     cdp_thread.start()
 
+    last_activity = [time.time()]
+
     # Health monitor
     def health_check() -> None:
         """Periodically verify the MCP subprocess is alive and daemon is active."""
         while True:
             time.sleep(5)
-            if proc.poll() is not None:
-                # Subprocess already exited; reap it to avoid a zombie, stop the
-                # CDP client, then tear the daemon down.
-                with contextlib.suppress(Exception):
-                    proc.wait(timeout=5)
+            if not broker.is_alive():
+                # Subprocess already exited; stop the CDP client, then tear the
+                # daemon down. os._exit reaps the broker's child as this process
+                # exits, so no separate wait is needed here.
                 cdp_handler.stop()
                 _cleanup_files(socket_path, pid_file)
                 os._exit(1)
             if time.time() - last_activity[0] > IDLE_TIMEOUT_SECONDS:
-                _reap_process(proc)
+                broker.terminate()
                 cdp_handler.stop()
-                _terminate_owned_chrome(chrome_pid, chrome_owned)
+                _terminate_owned_chrome(chrome_pid, chrome_owned, chrome_user_data_dir)
                 _cleanup_files(socket_path, pid_file)
                 os._exit(0)
 
@@ -301,9 +247,9 @@ def main(
         Returns:
             None.
         """
-        _reap_process(proc)
+        broker.terminate()
         cdp_handler.stop()
-        _terminate_owned_chrome(chrome_pid, chrome_owned)
+        _terminate_owned_chrome(chrome_pid, chrome_owned, chrome_user_data_dir)
         server.close()
         _cleanup_files(socket_path, pid_file)
         sys.exit(0)
@@ -321,15 +267,7 @@ def main(
 
         last_activity[0] = time.time()
         try:
-            _handle_client(
-                client_sock,
-                proc,
-                msg_id_counter,
-                pending,
-                lock,
-                last_activity,
-                cdp_handler,
-            )
+            _handle_client(client_sock, broker, cdp_handler, last_activity)
         except Exception:
             logger.exception("Client handler failed")
         finally:
@@ -339,32 +277,27 @@ def main(
 
 def _handle_client(
     client_sock: socket.socket,
-    mcp_proc: subprocess.Popen[str],
-    msg_id_counter: list[int],
-    pending: dict[int, queue.Queue[dict[str, Any]]],
-    lock: threading.Lock,
-    last_activity: list[float],
+    broker: McpBroker,
     cdp_handler: CDPHandler,
+    last_activity: list[float],
 ) -> None:
     """Handle one client connection with sequential JSON-RPC requests.
 
-    Routes tool calls to either the MCP subprocess, CDP handler, or local
-    handlers based on the tool name.
+    Reads each request and delegates routing to :func:`dispatch_tool`; this
+    loop owns only the socket read/write and the activity timestamp.
 
     Args:
         client_sock: Connected client socket.
-        mcp_proc: Running MCP subprocess.
-        msg_id_counter: Shared message ID counter.
-        pending: Map of internal message IDs to response queues.
-        lock: Lock protecting pending and msg_id_counter.
-        last_activity: Last activity timestamp.
+        broker: MCP request multiplexer owning the subprocess.
         cdp_handler: CDP/frame tool handler.
+        last_activity: Last activity timestamp.
 
     Returns:
         None.
     """
     client_sock.settimeout(REQUEST_TIMEOUT_SECONDS)
     buf = b""
+    ctx = DispatchContext(broker, cdp_handler)
 
     while True:
         try:
@@ -387,159 +320,17 @@ def _handle_client(
                 continue
 
             last_activity[0] = time.time()
-            client_id = request.get("id")
-
-            # Extract tool name for routing
-            params = request.get("params", {})
-            tool_name = params.get("name", "")
-
-            # Check inspect mode
-            if cdp_handler.mode == "inspect" and tool_name in INSPECT_BLOCKED_TOOLS:
-                response = {
-                    "jsonrpc": "2.0",
-                    "result": make_error(
-                        f"E004: Tool '{tool_name}' is blocked in inspect mode. "
-                        "Observation tools only: take_snapshot, take_screenshot, "
-                        "list_pages, evaluate_script, list_console_messages, "
-                        "list_network_requests, list_frames, get_frame_storage."
-                    )["result"],
-                    "id": client_id,
-                }
-                try:
-                    client_sock.sendall(json.dumps(response).encode() + b"\n")
-                except OSError:
-                    break
-                continue
-
-            # Route to appropriate handler
-            if tool_name in CDP_TOOLS:
-                response = cdp_handler.call_tool(tool_name, params.get("arguments", {}))
-                response["id"] = client_id
-                try:
-                    client_sock.sendall(json.dumps(response).encode() + b"\n")
-                except OSError:
-                    break
-                continue
-
-            if tool_name in LOCAL_TOOLS:
-                response = _handle_local_tool(tool_name, params.get("arguments", {}))
-                response["id"] = client_id
-                try:
-                    client_sock.sendall(json.dumps(response).encode() + b"\n")
-                except OSError:
-                    break
-                continue
-
-            # take_screenshot is forwarded to the MCP subprocess like other
-            # default tools, but wrapped with a paint-ready gate and a
-            # blank-frame retry so the LLM doesn't get back an image that
-            # captured a mid-animation / mid-hydration frame. See
-            # _take_screenshot_with_paint_gate for the full sequence.
-            if tool_name == "take_screenshot":
-                response = _take_screenshot_with_paint_gate(
-                    request,
-                    client_id,
-                    mcp_proc,
-                    msg_id_counter,
-                    pending,
-                    lock,
-                    cdp_handler,
-                )
-            else:
-                # Default: forward to MCP subprocess unchanged.
-                response = _forward_to_mcp_subprocess(
-                    request,
-                    client_id,
-                    mcp_proc,
-                    msg_id_counter,
-                    pending,
-                    lock,
-                )
-
-            # Post-navigation interstitial detection with auto-retry
-            if tool_name in NAVIGATION_TOOLS and "error" not in response:
-                detection_result = cdp_handler.run_post_navigation_detection()
-                if detection_result and detection_result.get("detections"):
-                    from .interstitial import format_interstitials
-
-                    detections = detection_result["detections"]
-                    auto_retried = detection_result.get("auto_retried", False)
-                    retries_used = detection_result.get("retries_used", 0)
-                    warning = format_interstitials(
-                        detections,
-                        auto_retried=auto_retried,
-                        retries_used=retries_used,
-                    )
-                    if warning:
-                        append_text(response, f"\n\n{warning}")
-                elif detection_result and detection_result.get("auto_retried"):
-                    # Challenge was detected but auto-cleared
-                    retries_used = detection_result.get("retries_used", 0)
-                    append_text(
-                        response,
-                        f"\n\n✅ Anti-bot challenge detected and auto-cleared "
-                        f"after {retries_used} retry(ies).",
-                    )
-
+            response = dispatch_tool(request, request.get("id"), ctx)
             try:
                 client_sock.sendall(json.dumps(response).encode() + b"\n")
             except OSError:
                 break
 
 
-def _forward_to_mcp_subprocess(
-    request: dict[str, Any],
-    client_id: Any,
-    mcp_proc: subprocess.Popen[str],
-    msg_id_counter: list[int],
-    pending: dict[int, queue.Queue[dict[str, Any]]],
-    lock: threading.Lock,
-) -> dict[str, Any]:
-    """Send a tool-call request to the chrome-devtools-mcp subprocess and
-    block until its response arrives (or REQUEST_TIMEOUT_SECONDS elapses).
-
-    Extracted from the inline default branch in _handle_client so the
-    take_screenshot wrapper can call it more than once for retries while
-    keeping the original numbering/pending bookkeeping centralized.
-
-    The MCP subprocess identifies responses by id, so each forward gets a
-    fresh internal id; the caller's id is restored on the way out.
-    """
-    with lock:
-        msg_id_counter[0] += 1
-        internal_id = msg_id_counter[0]
-        resp_q: queue.Queue[dict[str, Any]] = queue.Queue()
-        pending[internal_id] = resp_q
-
-    request["id"] = internal_id
-    assert mcp_proc.stdin is not None
-    mcp_proc.stdin.write(json.dumps(request) + "\n")
-    mcp_proc.stdin.flush()
-
-    try:
-        response = resp_q.get(timeout=REQUEST_TIMEOUT_SECONDS)
-    except queue.Empty:
-        response = {
-            "jsonrpc": "2.0",
-            "error": {"code": -32000, "message": "Request timeout"},
-            "id": client_id,
-        }
-    else:
-        response["id"] = client_id
-
-    with lock:
-        pending.pop(internal_id, None)
-
-    return response
-
-
 def _take_screenshot_with_paint_gate(
     request: dict[str, Any],
     client_id: Any,
-    mcp_proc: subprocess.Popen[str],
-    msg_id_counter: list[int],
-    pending: dict[int, queue.Queue[dict[str, Any]]],
-    lock: threading.Lock,
+    broker: McpBroker,
     cdp_handler: CDPHandler,
 ) -> dict[str, Any]:
     """Wrap take_screenshot with a pre-capture rAF gate and post-capture
@@ -564,9 +355,12 @@ def _take_screenshot_with_paint_gate(
         # functional in headless/no-CDP environments.
         cdp_handler.await_paint_ready()
 
-        last_response = _forward_to_mcp_subprocess(
-            request, client_id, mcp_proc, msg_id_counter, pending, lock
+        last_response = broker.request(
+            request["method"],
+            request.get("params", {}),
+            timeout=REQUEST_TIMEOUT_SECONDS,
         )
+        last_response["id"] = client_id
 
         # Errors from the subprocess shouldn't trigger a retry — they're
         # not blank-frame failures and would just compound the user's wait.
@@ -610,7 +404,7 @@ def _handle_local_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         JSON-RPC style response dict.
     """
     if name == "list_profiles":
-        from .persistent_browser import list_profiles
+        from .profile_catalog import list_profiles
 
         profiles = list_profiles()
         if not profiles:
@@ -621,7 +415,7 @@ def _handle_local_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         return make_text("\n".join(lines))
 
     elif name == "delete_profile":
-        from .persistent_browser import delete_profile
+        from .profile_catalog import delete_profile
 
         profile_name = arguments.get("name", "")
         if not profile_name:
@@ -637,6 +431,114 @@ def _handle_local_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
     return make_error(f"Unknown local tool: {name}")
 
 
+@dataclass
+class DispatchContext:
+    """Collaborators needed to route and execute a tool call.
+
+    Built once per client connection; ``broker`` and ``cdp_handler`` do not
+    change between requests on the same connection.
+    """
+
+    broker: McpBroker
+    cdp_handler: CDPHandler
+
+
+def dispatch_tool(request: dict[str, Any], client_id: Any, ctx: DispatchContext) -> dict[str, Any]:
+    """Route one tool call to the right backend and apply cross-cutting policy.
+
+    All routing is data-driven from ``tool_registry`` flags rather than an
+    if-chain over tool names:
+
+    - inspect mode refuses ``inspect_blocked`` tools;
+    - ``cdp`` tools -> CDP handler, ``local`` tools -> the local handler;
+    - ``screenshot_gate`` tools -> the paint-gate wrapper; everything else is
+      forwarded to the MCP subprocess via the broker;
+    - ``navigation`` tools trigger post-call interstitial detection.
+
+    The caller's ``client_id`` is reattached onto every response (the broker
+    uses its own internal id namespace).
+
+    Args:
+        request: Parsed JSON-RPC request from the client socket.
+        client_id: Caller's request id, reattached onto the response.
+        ctx: Broker + CDP handler collaborators.
+
+    Returns:
+        JSON-RPC response dict with ``id`` set to ``client_id``.
+    """
+    params = request.get("params", {})
+    tool_name = params.get("name", "")
+    arguments = params.get("arguments", {})
+
+    # Inspect mode: refuse page-mutating tools.
+    if ctx.cdp_handler.mode == "inspect" and tool_name in INSPECT_BLOCKED_TOOLS:
+        return {
+            "jsonrpc": "2.0",
+            "result": make_error(
+                f"E004: Tool '{tool_name}' is blocked in inspect mode. "
+                "Observation tools only: take_snapshot, take_screenshot, "
+                "list_pages, evaluate_script, list_console_messages, "
+                "list_network_requests, list_frames, get_frame_storage."
+            )["result"],
+            "id": client_id,
+        }
+
+    # Route by registry flags.
+    if tool_name in CDP_TOOLS:
+        response = ctx.cdp_handler.call_tool(tool_name, arguments)
+        response["id"] = client_id
+    elif tool_name in LOCAL_TOOLS:
+        response = _handle_local_tool(tool_name, arguments)
+        response["id"] = client_id
+    elif tool_name in SCREENSHOT_GATE_TOOLS:
+        response = _take_screenshot_with_paint_gate(request, client_id, ctx.broker, ctx.cdp_handler)
+    else:
+        # Default: forward to the MCP subprocess via the broker.
+        response = ctx.broker.request(request["method"], params, timeout=REQUEST_TIMEOUT_SECONDS)
+        response["id"] = client_id
+
+    # Post-navigation interstitial detection with auto-retry.
+    if tool_name in NAVIGATION_TOOLS and "error" not in response:
+        _append_interstitial_warning(response, ctx.cdp_handler)
+
+    return response
+
+
+def _append_interstitial_warning(response: dict[str, Any], cdp_handler: CDPHandler) -> None:
+    """Run post-navigation interstitial detection and annotate the response.
+
+    When a challenge page is detected after navigation, append a formatted
+    warning. When a challenge was detected but auto-cleared by retry, note that
+    instead. Mutates ``response`` in place.
+
+    Args:
+        response: JSON-RPC response to annotate.
+        cdp_handler: CDP handler running interstitial detection.
+
+    Returns:
+        None.
+    """
+    detection_result = cdp_handler.run_post_navigation_detection()
+    if detection_result and detection_result.get("detections"):
+        detections = detection_result["detections"]
+        auto_retried = detection_result.get("auto_retried", False)
+        retries_used = detection_result.get("retries_used", 0)
+        warning = format_interstitials(
+            detections,
+            auto_retried=auto_retried,
+            retries_used=retries_used,
+        )
+        if warning:
+            append_text(response, f"\n\n{warning}")
+    elif detection_result and detection_result.get("auto_retried"):
+        # Challenge was detected but auto-cleared.
+        retries_used = detection_result.get("retries_used", 0)
+        append_text(
+            response,
+            f"\n\n✅ Anti-bot challenge detected and auto-cleared after {retries_used} retry(ies).",
+        )
+
+
 def _cleanup_files(socket_path: str, pid_file: str) -> None:
     """Remove socket and PID files.
 
@@ -649,27 +551,6 @@ def _cleanup_files(socket_path: str, pid_file: str) -> None:
     """
     Path(socket_path).unlink(missing_ok=True)
     Path(pid_file).unlink(missing_ok=True)
-
-
-def _reap_process(proc: subprocess.Popen[str]) -> None:
-    """Terminate the MCP subprocess and wait for it so no zombie is left.
-
-    Args:
-        proc: The MCP subprocess to stop.
-
-    Returns:
-        None.
-    """
-    with contextlib.suppress(Exception):
-        proc.terminate()
-    try:
-        proc.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        with contextlib.suppress(Exception):
-            proc.kill()
-            proc.wait(timeout=5)
-    except Exception:
-        pass
 
 
 if __name__ == "__main__":
@@ -702,6 +583,11 @@ if __name__ == "__main__":
         action="store_true",
         help="Whether the Chrome at --chrome-pid is a private profile safe to quit",
     )
+    parser.add_argument(
+        "--chrome-user-data-dir",
+        default=None,
+        help="Profile directory of the owned Chrome, for stale-lock cleanup on quit",
+    )
     args = parser.parse_args()
 
     try:
@@ -718,4 +604,5 @@ if __name__ == "__main__":
         args.stealth,
         args.chrome_pid,
         args.chrome_owned,
+        args.chrome_user_data_dir,
     )

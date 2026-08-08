@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from browser_tools.browser_tools_session import (
+from browser_tools.browser_session import (
     _extract_page_ids,
     _handle_new_page_single_tab,
     _maybe_promote_on_auth_wall,
@@ -74,9 +74,7 @@ class TestProjectIdentity:
         monkeypatch.setenv("TOOL_PROXY_PROJECT_DIR", str(tmp_path))
         assert resolve_project_root() == tmp_path.resolve()
 
-    def test_prefers_new_canonical_env_over_legacy_claude_name(
-        self, monkeypatch, tmp_path
-    ) -> None:
+    def test_prefers_new_canonical_env_over_legacy_claude_name(self, monkeypatch, tmp_path) -> None:
         """TOOL_PROXY_PROJECT_DIR wins over the legacy CLAUDE_CWD name."""
         monkeypatch.setenv("TOOL_PROXY_PROJECT_DIR", str(tmp_path / "canonical"))
         monkeypatch.setenv("CLAUDE_CWD", str(tmp_path / "legacy"))
@@ -158,7 +156,9 @@ class TestExtractPageIds:
     """Page id parsing from list_pages output."""
 
     def test_parses_ordered_ids(self) -> None:
-        response = _pages_response("1: about:blank\n2: https://x.com/ [selected]\n3: https://y.com/")
+        response = _pages_response(
+            "1: about:blank\n2: https://x.com/ [selected]\n3: https://y.com/"
+        )
         assert _extract_page_ids(response) == [1, 2, 3]
 
     def test_empty_when_no_pages(self) -> None:
@@ -193,8 +193,8 @@ class TestSingleTabNewPage:
         lists = [
             _pages_response("0: a\n1: b\n2: c"),  # initial id lookup (3 tabs)
             _pages_response("0: a\n1: b\n2: c"),  # loop iter 1: extras [1,2], close 1
-            _pages_response("0: a\n1: b"),         # loop iter 2: extras [1], close 1
-            _pages_response("0: a"),               # loop iter 3: no extras, stop
+            _pages_response("0: a\n1: b"),  # loop iter 2: extras [1], close 1
+            _pages_response("0: a"),  # loop iter 3: no extras, stop
         ]
         controller = _FakeController({})
 
@@ -243,7 +243,7 @@ class TestMaybePromoteOnAuthWall:
             return headed  # type: ignore[return-value]
 
         monkeypatch.setattr(
-            "browser_tools.browser_tools_session._promote_headless_to_headed", fake_promote
+            "browser_tools.browser_session._promote_headless_to_headed", fake_promote
         )
 
         result = _maybe_promote_on_auth_wall([None], controller, response, "https://x/login")  # type: ignore[arg-type]
@@ -268,6 +268,3 @@ class TestMaybePromoteOnAuthWall:
 
         result = _maybe_promote_on_auth_wall([None], controller, response, "https://x/")  # type: ignore[arg-type]
         assert result is response
-
-
-

@@ -27,6 +27,7 @@ try:
         SCREENSHOT_PAINT_READY_TIMEOUT_MS,
     )
     from .mcp_response import make_error, make_text
+    from .tool_registry import CDP_TOOLS
 except ImportError:
     from cdp_constants import (  # type: ignore[import-untyped,no-redef]
         INTERSTITIAL_AUTO_RETRY_TYPES,
@@ -39,6 +40,7 @@ except ImportError:
         make_error,
         make_text,
     )
+    from tool_registry import CDP_TOOLS  # type: ignore[import-untyped,no-redef]
 
 
 class ToolInvocationError(Exception):
@@ -143,6 +145,38 @@ async def _cdp_call(
         raise CdpToolError(label) from None
 
 
+# Tool name -> handler method name. This is the single binding of CDP tool name
+# to handler; it is parity-checked against tool_registry.CDP_TOOLS so the
+# registry remains the single source of which tools are CDP-routed. Adding a
+# CDP tool takes exactly one edit here plus the handler method - no elif chain
+# to keep in sync.
+_CDP_HANDLERS: dict[str, str] = {
+    "list_frames": "_handle_list_frames",
+    "select_frame": "_handle_select_frame",
+    "reset_frame": "_handle_reset_frame",
+    "get_frame_events": "_handle_get_frame_events",
+    "get_frame_storage": "_handle_get_frame_storage",
+    "ax_find": "_handle_ax_find",
+    "ax_node": "_handle_ax_node",
+    "export_pdf": "_handle_export_pdf",
+    "screenshot_element": "_handle_screenshot_element",
+    "screencast_start": "_handle_screencast_start",
+    "screencast_stop": "_handle_screencast_stop",
+    "wait_idle": "_handle_wait_idle",
+    "wait_stable": "_handle_wait_stable",
+    "get_text": "_handle_get_text",
+    "get_html": "_handle_get_html",
+    "get_attr": "_handle_get_attr",
+    "element_exists": "_handle_element_exists",
+    "element_visible": "_handle_element_visible",
+}
+
+assert set(_CDP_HANDLERS) == CDP_TOOLS, (
+    "CDP handler table drifted from tool_registry.CDP_TOOLS; "
+    f"symmetric difference: {set(_CDP_HANDLERS) ^ set(CDP_TOOLS)}"
+)
+
+
 class CDPHandler:
     """Manages CDP client and frame manager in a dedicated asyncio event loop.
 
@@ -176,6 +210,11 @@ class CDPHandler:
         self._screencast_frames: list[dict[str, Any]] = []
         self._screencast_max_frames: int = 600
         self._screencast_format: str = "jpeg"
+        # Tool name -> bound handler. Built from the class-level _CDP_HANDLERS
+        # table, which is parity-checked against tool_registry.CDP_TOOLS below.
+        self._handlers: dict[str, Any] = {
+            name: getattr(self, method) for name, method in _CDP_HANDLERS.items()
+        }
 
     @property
     def available(self) -> bool:
@@ -315,7 +354,12 @@ class CDPHandler:
             return make_error(str(exc))
 
     async def _dispatch_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-        """Route a tool call to the appropriate handler.
+        """Route a tool call to its registered handler.
+
+        The handler table (``_CDP_HANDLERS``) is the single binding of tool name
+        to method; it is parity-checked against ``tool_registry.CDP_TOOLS`` at
+        import, so a tool flagged CDP in the registry with no handler here (or
+        vice versa) fails loudly rather than silently returning "Unknown".
 
         Args:
             name: Tool name.
@@ -324,51 +368,12 @@ class CDPHandler:
         Returns:
             JSON-RPC style response dict.
         """
-        if name == "list_frames":
-            return self._handle_list_frames()
-        elif name == "select_frame":
-            return self._handle_select_frame(arguments)
-        elif name == "reset_frame":
-            return self._handle_reset_frame()
-        elif name == "get_frame_events":
-            return self._handle_get_frame_events()
-        elif name == "get_frame_storage":
-            return await self._handle_get_frame_storage(arguments)
-        # Accessibility tools
-        elif name == "ax_find":
-            return await self._handle_ax_find(arguments)
-        elif name == "ax_node":
-            return await self._handle_ax_node(arguments)
-        # Page export/capture
-        elif name == "export_pdf":
-            return await self._handle_export_pdf(arguments)
-        elif name == "screenshot_element":
-            return await self._handle_screenshot_element(arguments)
-        elif name == "screencast_start":
-            return await self._handle_screencast_start(arguments)
-        elif name == "screencast_stop":
-            return await self._handle_screencast_stop(arguments)
-        # Semantic waits
-        elif name == "wait_idle":
-            return await self._handle_wait_idle(arguments)
-        elif name == "wait_stable":
-            return await self._handle_wait_stable(arguments)
-        # Content extraction
-        elif name == "get_text":
-            return await self._handle_get_text(arguments)
-        elif name == "get_html":
-            return await self._handle_get_html(arguments)
-        elif name == "get_attr":
-            return await self._handle_get_attr(arguments)
-        # Element queries
-        elif name == "element_exists":
-            return await self._handle_element_exists(arguments)
-        elif name == "element_visible":
-            return await self._handle_element_visible(arguments)
-        else:
+        handler = self._handlers.get(name)
+        if handler is None:
             return make_error(f"Unknown CDP tool: {name}")
+        return await handler(arguments)
 
-    def _handle_list_frames(self) -> dict[str, Any]:
+    async def _handle_list_frames(self, arguments: dict[str, Any]) -> dict[str, Any]:
         """Handle list_frames tool."""
         fm = self._frame_manager
         if fm is None:
@@ -391,7 +396,7 @@ class CDPHandler:
             lines.append(f"{indent}{frame['frameId']}: {frame['url']}{name}{selected}")
         return make_text("\n".join(lines))
 
-    def _handle_select_frame(self, arguments: dict[str, Any]) -> dict[str, Any]:
+    async def _handle_select_frame(self, arguments: dict[str, Any]) -> dict[str, Any]:
         """Handle select_frame tool."""
         fm = self._frame_manager
         if fm is None:
@@ -416,7 +421,7 @@ class CDPHandler:
             f"Origin: {frame.security_origin}{ctx_info}"
         )
 
-    def _handle_reset_frame(self) -> dict[str, Any]:
+    async def _handle_reset_frame(self, arguments: dict[str, Any]) -> dict[str, Any]:
         """Handle reset_frame tool."""
         fm = self._frame_manager
         if fm is None:
@@ -425,7 +430,7 @@ class CDPHandler:
         fm.reset_frame()
         return make_text("Frame selection cleared. Now targeting top-level page.")
 
-    def _handle_get_frame_events(self) -> dict[str, Any]:
+    async def _handle_get_frame_events(self, arguments: dict[str, Any]) -> dict[str, Any]:
         """Handle get_frame_events tool."""
         fm = self._frame_manager
         if fm is None:
@@ -1151,9 +1156,7 @@ class CDPHandler:
         if not selector:
             return make_error("selector is required")
 
-        result = await self._query_element_js(
-            cdp, selector, "el.textContent", label="get_text"
-        )
+        result = await self._query_element_js(cdp, selector, "el.textContent", label="get_text")
 
         if result is None:
             return make_error(f"E006: No element found matching selector '{selector}'")
@@ -1178,9 +1181,7 @@ class CDPHandler:
         if not selector:
             return make_error("selector is required")
 
-        result = await self._query_element_js(
-            cdp, selector, "el.outerHTML", label="get_html"
-        )
+        result = await self._query_element_js(cdp, selector, "el.outerHTML", label="get_html")
 
         if result is None:
             return make_error(f"E006: No element found matching selector '{selector}'")

@@ -21,6 +21,13 @@ Flag meanings:
 - ``inspect_blocked``: refused in inspect (read-only) mode.
 - ``navigation``: triggers post-call interstitial detection.
 - ``inspect_warn``: allowed but warned in inspect mode.
+- ``page_selecting``: chooses the active tab itself (``new_page``, ``select_page``),
+  so the controller must skip the restore-before-call step that reselects the
+  prior tab. A strict subset - the controller restores before most tools, so
+  listing a tool here opts it out of that restore.
+- ``screenshot_gate``: forwarded to the MCP subprocess like a default tool,
+  but wrapped with a paint-ready gate and blank-frame retry so the captured
+  image is not a mid-animation / mid-hydration frame (``take_screenshot``).
 
 Tools absent from ``TOOLS`` are neither CDP- nor local-routed and fall through
 to the default path: forwarded unchanged to the chrome-devtools-mcp subprocess.
@@ -44,6 +51,8 @@ class ToolFlags:
     inspect_blocked: bool = False
     navigation: bool = False
     inspect_warn: bool = False
+    page_selecting: bool = False
+    screenshot_gate: bool = False
 
 
 # name -> flags. Only tools with at least one True flag need to be listed;
@@ -55,8 +64,15 @@ TOOLS: dict[str, ToolFlags] = {
     "delete_profile": ToolFlags(local=True),
     # --- Navigation (triggers interstitial detection) ---
     "navigate_page": ToolFlags(navigation=True, inspect_warn=True),
-    "new_page": ToolFlags(navigation=True, inspect_warn=True),
+    "new_page": ToolFlags(navigation=True, inspect_warn=True, page_selecting=True),
     "close_page": ToolFlags(inspect_warn=True),
+    # --- Page-selection tools: choose the active tab themselves, so they skip
+    # the controller's restore-before-call step. select_page is a default-
+    # forwarded chrome-devtools-mcp tool (no other flags); declaring it here
+    # keeps PAGE_SELECTING_TOOLS complete. Adding it with only page_selecting
+    # does not change routing, since CDP_TOOLS / LOCAL_TOOLS / etc. are derived
+    # from the other flags.
+    "select_page": ToolFlags(page_selecting=True),
     # --- UID-based interactions (need a pre-snapshot) ---
     "click": ToolFlags(interaction=True, inspect_blocked=True),
     "hover": ToolFlags(interaction=True, inspect_blocked=True),
@@ -70,6 +86,10 @@ TOOLS: dict[str, ToolFlags] = {
     # Camoufox alias for ``fill``; declared so inspect-mode blocking stays
     # consistent even though it has no chrome-devtools-mcp schema entry.
     "type_text": ToolFlags(inspect_blocked=True),
+    # --- Screenshot gate: forwarded to MCP but wrapped with a paint-ready
+    # gate + blank-frame retry. take_screenshot is a default chrome-devtools-mcp
+    # tool; declaring it here with only screenshot_gate does not change routing.
+    "take_screenshot": ToolFlags(screenshot_gate=True),
     # --- CDP-routed tools (frame / accessibility / page / runtime domains) ---
     "list_frames": ToolFlags(cdp=True),
     "select_frame": ToolFlags(cdp=True),
@@ -104,6 +124,8 @@ INTERACTION_TOOLS = _names("interaction")
 INSPECT_BLOCKED_TOOLS = _names("inspect_blocked")
 NAVIGATION_TOOLS = _names("navigation")
 INSPECT_WARN_TOOLS = _names("inspect_warn")
+PAGE_SELECTING_TOOLS = _names("page_selecting")
+SCREENSHOT_GATE_TOOLS = _names("screenshot_gate")
 
 
 __all__ = [
@@ -113,6 +135,8 @@ __all__ = [
     "INTERACTION_TOOLS",
     "LOCAL_TOOLS",
     "NAVIGATION_TOOLS",
+    "PAGE_SELECTING_TOOLS",
+    "SCREENSHOT_GATE_TOOLS",
     "TOOLS",
     "ToolFlags",
 ]

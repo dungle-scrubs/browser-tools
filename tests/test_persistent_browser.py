@@ -13,13 +13,8 @@ from browser_tools.persistent_browser import (
     BrowserState,
     PersistentChromeController,
     clean_stale_singleton_lock,
-    extract_selected_page_id,
-    extract_selected_page_url,
     find_chrome_debug_port,
-    normalize_tool_params,
     read_singleton_lock_pid,
-    resolve_page_id_by_url,
-    should_restore_selection,
 )
 
 
@@ -89,36 +84,6 @@ class FakeClient:
         return type(self).responses.get(name, {"result": {"content": []}})
 
 
-class TestNormalizeToolParams:
-    """Tests for wrapper argument normalization."""
-
-    def test_maps_select_page_idx_to_page_id(self) -> None:
-        """select_page should use pageId for the live MCP server."""
-        assert normalize_tool_params("select_page", {"pageIdx": 2}) == {"pageId": 2}
-
-    def test_maps_close_page_idx_to_page_id(self) -> None:
-        """close_page should use pageId for the live MCP server."""
-        assert normalize_tool_params("close_page", {"pageIdx": 3}) == {"pageId": 3}
-
-    def test_leaves_other_tools_unchanged(self) -> None:
-        """Tools without legacy argument names should pass through untouched."""
-        assert normalize_tool_params("take_snapshot", {"verbose": True}) == {"verbose": True}
-
-
-class TestExtractSelectedPageId:
-    """Tests for selected page parsing from MCP output."""
-
-    def test_parses_selected_page(self) -> None:
-        """Page list output should yield the selected page id."""
-        response = make_response("## Pages\n1: about:blank\n2: https://example.com/ [selected]")
-        assert extract_selected_page_id(response) == 2
-
-    def test_returns_none_without_selected_page(self) -> None:
-        """Responses without a selected marker should return None."""
-        response = make_response("## Pages\n1: about:blank\n2: https://example.com/")
-        assert extract_selected_page_id(response) is None
-
-
 class TestPersistentChromeController:
     """Tests for restoring page selection across tool calls."""
 
@@ -126,7 +91,7 @@ class TestPersistentChromeController:
         self, monkeypatch, tmp_path: Path
     ) -> None:
         """Non-page-selection tools should resolve page by URL and restore selection."""
-        monkeypatch.setattr("browser_tools.persistent_browser.CACHE_DIR", tmp_path)
+        monkeypatch.setattr("browser_tools.session_layout.CACHE_DIR", tmp_path)
 
         FakeClient.responses = {
             "list_pages": make_response(
@@ -167,7 +132,7 @@ class TestPersistentChromeController:
         self, monkeypatch, tmp_path: Path
     ) -> None:
         """new_page should not reselect the prior tab before opening a new one."""
-        monkeypatch.setattr("browser_tools.persistent_browser.CACHE_DIR", tmp_path)
+        monkeypatch.setattr("browser_tools.session_layout.CACHE_DIR", tmp_path)
 
         FakeClient.responses = {
             "new_page": make_response(
@@ -191,20 +156,24 @@ class TestPersistentChromeController:
 
         controller.invoke_tool("new_page", {"url": "https://example.com"})
 
-        assert FakeClient.calls == [("new_page", {"url": "https://example.com"})]
+        # new_page is a navigation tool, so the post-call list_pages refresh
+        # now runs (latent gap closed): the new tab's selected id+url are
+        # re-read instead of being left stale.
+        assert FakeClient.calls == [
+            ("new_page", {"url": "https://example.com"}),
+            ("list_pages", {}),
+        ]
         assert state.selected_page_id == 2
         assert state.selected_page_url == "https://example.com/"
         assert controller.state_path.exists()
 
     def test_daemon_spawned_on_first_call(self, monkeypatch, tmp_path: Path) -> None:
-        """_ensure_daemon should spawn the daemon when no daemon_pid is set."""
-        monkeypatch.setattr("browser_tools.persistent_browser.CACHE_DIR", tmp_path)
+        """Supervisor.ensure should spawn the daemon when no daemon_pid is set."""
+        from browser_tools.daemon_supervisor import McpDaemonSupervisor
 
-        controller = PersistentChromeController(
-            isolated=True,
-            browser_url="http://127.0.0.1:9222",
-            force_persistent=True,
-        )
+        monkeypatch.setattr("browser_tools.session_layout.CACHE_DIR", tmp_path)
+
+        supervisor = McpDaemonSupervisor("deadbeefdeadbeef")
         state = BrowserState(
             browser_url="http://127.0.0.1:9222",
             daemon_pid=None,
@@ -213,40 +182,38 @@ class TestPersistentChromeController:
 
         spawn_calls: list[tuple] = []
 
-        def fake_spawn(self_ref, st, cmd):
+        def fake_spawn(self_ref, st, cmd, **kwargs):
             spawn_calls.append((st, cmd))
             st.daemon_pid = 12345
             st.daemon_socket = str(tmp_path / "test.sock")
 
-        monkeypatch.setattr(PersistentChromeController, "_spawn_daemon", fake_spawn)
-        controller._ensure_daemon(state, ["npx", "test"])
+        monkeypatch.setattr(McpDaemonSupervisor, "_spawn", fake_spawn)
+        supervisor.ensure(state, ["npx", "test"])
 
         assert len(spawn_calls) == 1
         assert state.daemon_pid == 12345
 
     def test_daemon_not_respawned_if_alive(self, monkeypatch, tmp_path: Path) -> None:
-        """_ensure_daemon should not spawn when daemon is already alive."""
-        monkeypatch.setattr("browser_tools.persistent_browser.CACHE_DIR", tmp_path)
+        """Supervisor.ensure should not spawn when the daemon is already alive."""
+        from browser_tools.daemon_supervisor import McpDaemonSupervisor
 
-        controller = PersistentChromeController(
-            isolated=True,
-            browser_url="http://127.0.0.1:9222",
-            force_persistent=True,
-        )
+        monkeypatch.setattr("browser_tools.session_layout.CACHE_DIR", tmp_path)
+
+        supervisor = McpDaemonSupervisor("deadbeefdeadbeef")
         state = BrowserState(
             browser_url="http://127.0.0.1:9222",
             daemon_pid=99999,
             daemon_socket="/fake/socket",
         )
 
-        monkeypatch.setattr(controller, "_is_daemon_alive", lambda s: True)
+        monkeypatch.setattr(supervisor, "is_alive", lambda s: True)
 
         spawn_calls: list[tuple] = []
         monkeypatch.setattr(
-            controller, "_spawn_daemon", lambda st, cmd: spawn_calls.append((st, cmd))
+            supervisor, "_spawn", lambda st, cmd, **kw: spawn_calls.append((st, cmd))
         )
 
-        controller._ensure_daemon(state, ["npx", "test"])
+        supervisor.ensure(state, ["npx", "test"])
         assert len(spawn_calls) == 0
 
     def test_retries_once_after_recoverable_daemon_failure(
@@ -255,7 +222,7 @@ class TestPersistentChromeController:
         """Recoverable daemon transport errors should trigger one clean retry."""
         from browser_tools.persistent_browser import MCPInvocationError
 
-        monkeypatch.setattr("browser_tools.persistent_browser.CACHE_DIR", tmp_path)
+        monkeypatch.setattr("browser_tools.session_layout.CACHE_DIR", tmp_path)
 
         controller = PersistentChromeController(
             isolated=True,
@@ -291,60 +258,6 @@ class TestPersistentChromeController:
         assert response["result"]["content"][0]["text"] == "snapshot ok"
         assert attempts["count"] == 2
         assert invalidations == [state]
-
-
-class TestExtractSelectedPageUrl:
-    """Tests for selected page URL parsing from MCP output."""
-
-    def test_parses_selected_page_url(self) -> None:
-        """Page list output should yield the selected page URL."""
-        response = make_response("## Pages\n1: about:blank\n2: https://example.com/ [selected]")
-        assert extract_selected_page_url(response) == "https://example.com/"
-
-    def test_returns_none_without_selected_page(self) -> None:
-        """Responses without a selected marker should return None."""
-        response = make_response("## Pages\n1: about:blank\n2: https://example.com/")
-        assert extract_selected_page_url(response) is None
-
-
-class TestResolvePageIdByUrl:
-    """Tests for URL-based page ID resolution."""
-
-    def test_resolves_exact_url(self) -> None:
-        """Exact URL match should return the page ID."""
-        response = make_response("## Pages\n1: about:blank\n2: https://example.com/ [selected]")
-        assert resolve_page_id_by_url(response, "https://example.com/") == 2
-
-    def test_resolves_with_trailing_slash_mismatch(self) -> None:
-        """Trailing slash differences should still match."""
-        response = make_response("## Pages\n1: about:blank\n2: https://example.com [selected]")
-        assert resolve_page_id_by_url(response, "https://example.com/") == 2
-
-    def test_returns_none_for_missing_url(self) -> None:
-        """Unknown URL should return None."""
-        response = make_response("## Pages\n1: about:blank\n2: https://example.com/ [selected]")
-        assert resolve_page_id_by_url(response, "https://missing.com/") is None
-
-    def test_handles_reordered_pages(self) -> None:
-        """Pages listed in different order should still resolve correctly."""
-        response = make_response("## Pages\n1: https://example.com/\n2: about:blank [selected]")
-        assert resolve_page_id_by_url(response, "https://example.com/") == 1
-
-
-class TestShouldRestoreSelection:
-    """Tests for tool-specific selection restore rules."""
-
-    def test_new_page_does_not_restore_selection(self) -> None:
-        """new_page chooses the destination tab itself."""
-        assert should_restore_selection("new_page") is False
-
-    def test_select_page_does_not_restore_selection(self) -> None:
-        """select_page is already the restoration action."""
-        assert should_restore_selection("select_page") is False
-
-    def test_snapshot_restores_selection(self) -> None:
-        """Snapshotting should run against the previously selected tab."""
-        assert should_restore_selection("take_snapshot") is True
 
 
 class TestBrowserStateDaemonFields:

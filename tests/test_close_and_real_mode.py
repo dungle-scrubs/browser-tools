@@ -29,17 +29,17 @@ class TestIsOwnedProfileDir:
     """Ownership rule: only private automation profiles may be quit."""
 
     def test_private_profile_is_owned(self, monkeypatch, tmp_path: Path) -> None:
-        monkeypatch.setattr("browser_tools.persistent_browser.CACHE_DIR", tmp_path)
+        monkeypatch.setattr("browser_tools.session_layout.CACHE_DIR", tmp_path)
         owned = tmp_path / "profiles" / "my-app"
         assert is_owned_profile_dir(str(owned)) is True
 
     def test_real_profile_is_not_owned(self, monkeypatch, tmp_path: Path) -> None:
-        monkeypatch.setattr("browser_tools.persistent_browser.CACHE_DIR", tmp_path)
+        monkeypatch.setattr("browser_tools.session_layout.CACHE_DIR", tmp_path)
         real = "/Users/someone/Library/Application Support/Google/Chrome Canary"
         assert is_owned_profile_dir(real) is False
 
     def test_none_is_not_owned(self, monkeypatch, tmp_path: Path) -> None:
-        monkeypatch.setattr("browser_tools.persistent_browser.CACHE_DIR", tmp_path)
+        monkeypatch.setattr("browser_tools.session_layout.CACHE_DIR", tmp_path)
         assert is_owned_profile_dir(None) is False
 
 
@@ -84,7 +84,7 @@ class TestRealModeController:
     """mode='real' wires the controller to the user's everyday profile."""
 
     def test_system_profile_uses_real_dir_and_key(self, monkeypatch, tmp_path: Path) -> None:
-        monkeypatch.setattr("browser_tools.persistent_browser.CACHE_DIR", tmp_path)
+        monkeypatch.setattr("browser_tools.session_layout.CACHE_DIR", tmp_path)
         real = tmp_path / "real-canary"
         monkeypatch.setattr(
             "browser_tools.persistent_browser.resolve_system_profile_dir",
@@ -109,7 +109,7 @@ class TestRealModeController:
     ) -> None:
         from browser_tools.persistent_browser import MCPInvocationError
 
-        monkeypatch.setattr("browser_tools.persistent_browser.CACHE_DIR", tmp_path)
+        monkeypatch.setattr("browser_tools.session_layout.CACHE_DIR", tmp_path)
         real = tmp_path / "real-canary"
         monkeypatch.setattr(
             "browser_tools.persistent_browser.resolve_system_profile_dir",
@@ -129,7 +129,7 @@ class TestRealModeController:
         monkeypatch.setattr("browser_tools.persistent_browser.is_process_alive", lambda pid: True)
         # The everyday Chrome genuinely holds the real profile dir.
         monkeypatch.setattr(
-            "browser_tools.persistent_browser._pid_holds_user_data_dir",
+            "browser_tools.persistent_browser.pid_holds_user_data_dir",
             lambda pid, d: True,
         )
         controller = PersistentChromeController(system_profile=True, isolated=False)
@@ -144,7 +144,7 @@ class TestCloseActiveSession:
         BrowserState(**kwargs).save(controller.state_path)
 
     def test_quits_owned_chrome(self, monkeypatch, tmp_path: Path) -> None:
-        monkeypatch.setattr("browser_tools.persistent_browser.CACHE_DIR", tmp_path)
+        monkeypatch.setattr("browser_tools.session_layout.CACHE_DIR", tmp_path)
         killed: list[int] = []
         monkeypatch.setattr(
             "browser_tools.persistent_browser.terminate_process",
@@ -157,9 +157,7 @@ class TestCloseActiveSession:
         monkeypatch.setattr(
             "browser_tools.persistent_browser.clean_stale_singleton_lock", lambda d: None
         )
-        monkeypatch.setattr(
-            "browser_tools.persistent_browser.clear_active_attach_config", lambda: None
-        )
+        monkeypatch.setattr("browser_tools.session_store.clear_active_attach_config", lambda: None)
         controller = PersistentChromeController(isolated=False, profile="owned-app")
         self._write_state(
             controller,
@@ -174,16 +172,14 @@ class TestCloseActiveSession:
         assert not controller.state_path.exists()
 
     def test_detaches_from_external_chrome(self, monkeypatch, tmp_path: Path) -> None:
-        monkeypatch.setattr("browser_tools.persistent_browser.CACHE_DIR", tmp_path)
+        monkeypatch.setattr("browser_tools.session_layout.CACHE_DIR", tmp_path)
         killed: list[int] = []
         monkeypatch.setattr(
             "browser_tools.persistent_browser.terminate_process",
             lambda pid: killed.append(pid),
         )
         monkeypatch.setattr("browser_tools.persistent_browser.is_process_alive", lambda pid: True)
-        monkeypatch.setattr(
-            "browser_tools.persistent_browser.clear_active_attach_config", lambda: None
-        )
+        monkeypatch.setattr("browser_tools.session_store.clear_active_attach_config", lambda: None)
         controller = PersistentChromeController(isolated=False, browser_url="http://127.0.0.1:9222")
         self._write_state(
             controller,
@@ -199,19 +195,19 @@ class TestCloseActiveSession:
 
 
 class TestDaemonOwnedChromeTerminator:
-    """The daemon only quits Chrome it was told it owns."""
+    """The daemon delegates owned-Chrome teardown to quit_owned_chrome."""
 
     def test_noop_when_not_owned(self, monkeypatch) -> None:
         from browser_tools import mcp_daemon
 
         killed: list[int] = []
         monkeypatch.setattr(
-            "browser_tools.process_utils.terminate_process",
+            "browser_tools.persistent_browser.terminate_process",
             lambda pid: killed.append(pid),
         )
-        monkeypatch.setattr("browser_tools.process_utils.is_process_alive", lambda pid: True)
-        mcp_daemon._terminate_owned_chrome(123, chrome_owned=False)
-        mcp_daemon._terminate_owned_chrome(None, chrome_owned=True)
+        monkeypatch.setattr("browser_tools.persistent_browser.is_process_alive", lambda pid: True)
+        mcp_daemon._terminate_owned_chrome(123, chrome_owned=False, chrome_user_data_dir=None)
+        mcp_daemon._terminate_owned_chrome(None, chrome_owned=True, chrome_user_data_dir=None)
         assert killed == []
 
     def test_terminates_when_owned(self, monkeypatch) -> None:
@@ -219,14 +215,14 @@ class TestDaemonOwnedChromeTerminator:
 
         killed: list[int] = []
         monkeypatch.setattr(
-            "browser_tools.process_utils.terminate_process",
+            "browser_tools.persistent_browser.terminate_process",
             lambda pid: killed.append(pid),
         )
         monkeypatch.setattr(
-            "browser_tools.process_utils.is_process_alive",
+            "browser_tools.persistent_browser.is_process_alive",
             lambda pid: pid not in killed,
         )
-        mcp_daemon._terminate_owned_chrome(123, chrome_owned=True)
+        mcp_daemon._terminate_owned_chrome(123, chrome_owned=True, chrome_user_data_dir=None)
         assert 123 in killed
 
 
@@ -234,7 +230,7 @@ class TestHandleCloseBrowser:
     """The close_browser tool handler reports and resets session state."""
 
     def test_reports_quit_and_clears_ref(self, monkeypatch, tmp_path: Path) -> None:
-        from browser_tools import browser_tools_session as bts
+        from browser_tools import browser_session as bts
 
         monkeypatch.setattr(
             "browser_tools.persistent_browser.close_active_session",
@@ -254,7 +250,7 @@ class TestHandleCloseBrowser:
         assert controller_ref[0] is None
 
     def test_no_active_session(self, monkeypatch) -> None:
-        from browser_tools import browser_tools_session as bts
+        from browser_tools import browser_session as bts
 
         resp = bts.handle_close_browser([None], None, {})
         assert "No active browser session" in resp["result"]["content"][0]["text"]
@@ -304,7 +300,7 @@ class TestReapOrphanedSessions:
             lambda pid: started_at if started_at is not None else cls.STARTED_AT,
         )
         monkeypatch.setattr(
-            "browser_tools.persistent_browser._pid_holds_user_data_dir",
+            "browser_tools.persistent_browser.pid_holds_user_data_dir",
             lambda pid, directory: holds_dir,
         )
         monkeypatch.setattr(
@@ -344,7 +340,7 @@ class TestReapOrphanedSessions:
         return state_path
 
     def test_quits_orphan_and_clears_state(self, monkeypatch, tmp_path: Path) -> None:
-        monkeypatch.setattr("browser_tools.persistent_browser.CACHE_DIR", tmp_path)
+        monkeypatch.setattr("browser_tools.session_layout.CACHE_DIR", tmp_path)
         killed = self._patch_process_probes(monkeypatch)
         state_path = self._write_session(tmp_path, "deadbeefdeadbeef")
         (tmp_path / "deadbeefdeadbeef.sock").touch()
@@ -361,7 +357,7 @@ class TestReapOrphanedSessions:
         assert (tmp_path / "profiles" / "deadbeefdeadbeef").exists()
 
     def test_skips_session_with_live_daemon(self, monkeypatch, tmp_path: Path) -> None:
-        monkeypatch.setattr("browser_tools.persistent_browser.CACHE_DIR", tmp_path)
+        monkeypatch.setattr("browser_tools.session_layout.CACHE_DIR", tmp_path)
         killed = self._patch_process_probes(monkeypatch)
         state_path = self._write_session(tmp_path, "aaaabbbbccccdddd", daemon_pid=777)
         (tmp_path / "aaaabbbbccccdddd.daemon.pid").write_text("777")
@@ -372,7 +368,7 @@ class TestReapOrphanedSessions:
 
     def test_recycled_daemon_pid_does_not_exempt_forever(self, monkeypatch, tmp_path: Path) -> None:
         """A live PID that is no longer *our* daemon must not block reaping."""
-        monkeypatch.setattr("browser_tools.persistent_browser.CACHE_DIR", tmp_path)
+        monkeypatch.setattr("browser_tools.session_layout.CACHE_DIR", tmp_path)
         killed = self._patch_process_probes(monkeypatch)
         self._write_session(tmp_path, "bbbbccccddddeeee", daemon_pid=777)
         # The daemon's own PID file names a different process: 777 was recycled.
@@ -383,7 +379,7 @@ class TestReapOrphanedSessions:
 
     def test_unowned_state_flag_blocks_reaping(self, monkeypatch, tmp_path: Path) -> None:
         """A browser we did not launch is never force-quit, profile dir notwithstanding."""
-        monkeypatch.setattr("browser_tools.persistent_browser.CACHE_DIR", tmp_path)
+        monkeypatch.setattr("browser_tools.session_layout.CACHE_DIR", tmp_path)
         killed = self._patch_process_probes(monkeypatch)
         state_path = self._write_session(tmp_path, "ccccddddeeeeffff", chrome_owned=False)
 
@@ -393,7 +389,7 @@ class TestReapOrphanedSessions:
 
     def test_start_time_mismatch_is_not_signalled(self, monkeypatch, tmp_path: Path) -> None:
         """A PID recycled since launch fails the identity check before any signal."""
-        monkeypatch.setattr("browser_tools.persistent_browser.CACHE_DIR", tmp_path)
+        monkeypatch.setattr("browser_tools.session_layout.CACHE_DIR", tmp_path)
         killed = self._patch_process_probes(monkeypatch, started_at="Sat Jul 25 09:00:00 2026")
         state_path = self._write_session(tmp_path, "ddddeeeeffff0000")
 
@@ -404,7 +400,7 @@ class TestReapOrphanedSessions:
 
     def test_surviving_chrome_keeps_its_state(self, monkeypatch, tmp_path: Path) -> None:
         """A kill that silently fails must not erase the record of what is running."""
-        monkeypatch.setattr("browser_tools.persistent_browser.CACHE_DIR", tmp_path)
+        monkeypatch.setattr("browser_tools.session_layout.CACHE_DIR", tmp_path)
         killed = self._patch_process_probes(monkeypatch, unkillable=True)
         state_path = self._write_session(tmp_path, "eeeeffff00001111")
 
@@ -414,7 +410,7 @@ class TestReapOrphanedSessions:
 
     def test_lock_file_survives_reaping(self, monkeypatch, tmp_path: Path) -> None:
         """Unlinking a held lock would let two wrappers both think they hold it."""
-        monkeypatch.setattr("browser_tools.persistent_browser.CACHE_DIR", tmp_path)
+        monkeypatch.setattr("browser_tools.session_layout.CACHE_DIR", tmp_path)
         self._patch_process_probes(monkeypatch)
         self._write_session(tmp_path, "ffff000011112222")
         lock_path = tmp_path / "ffff000011112222.lock"
@@ -425,7 +421,7 @@ class TestReapOrphanedSessions:
     def test_skips_recently_used_session(self, monkeypatch, tmp_path: Path) -> None:
         import time
 
-        monkeypatch.setattr("browser_tools.persistent_browser.CACHE_DIR", tmp_path)
+        monkeypatch.setattr("browser_tools.session_layout.CACHE_DIR", tmp_path)
         killed = self._patch_process_probes(monkeypatch)
         self._write_session(tmp_path, "1111222233334444", last_used_at=time.time())
 
@@ -433,7 +429,7 @@ class TestReapOrphanedSessions:
         assert killed == []
 
     def test_never_quits_unowned_browser(self, monkeypatch, tmp_path: Path) -> None:
-        monkeypatch.setattr("browser_tools.persistent_browser.CACHE_DIR", tmp_path)
+        monkeypatch.setattr("browser_tools.session_layout.CACHE_DIR", tmp_path)
         killed = self._patch_process_probes(monkeypatch)
         # mode='real' / externally attached Chrome: outside CACHE_DIR/profiles.
         state_path = tmp_path / "real_canary.json"
@@ -452,7 +448,7 @@ class TestReapOrphanedSessions:
         assert state_path.exists()
 
     def test_recycled_pid_is_not_signalled(self, monkeypatch, tmp_path: Path) -> None:
-        monkeypatch.setattr("browser_tools.persistent_browser.CACHE_DIR", tmp_path)
+        monkeypatch.setattr("browser_tools.session_layout.CACHE_DIR", tmp_path)
         killed = self._patch_process_probes(monkeypatch, holds_dir=False)
         state_path = self._write_session(tmp_path, "5555666677778888")
 
@@ -462,7 +458,7 @@ class TestReapOrphanedSessions:
         assert not state_path.exists()
 
     def test_ignores_override_and_attach_records(self, monkeypatch, tmp_path: Path) -> None:
-        monkeypatch.setattr("browser_tools.persistent_browser.CACHE_DIR", tmp_path)
+        monkeypatch.setattr("browser_tools.session_layout.CACHE_DIR", tmp_path)
         killed = self._patch_process_probes(monkeypatch)
         override = tmp_path / "browser_session_abc.json"
         override.write_text('{"mode": "headless", "isolated": true}')
@@ -487,7 +483,7 @@ class TestChromeOwnershipProvenance:
             tmp_path: Test cache root.
             pid: PID the fake launch should report.
         """
-        monkeypatch.setattr("browser_tools.persistent_browser.CACHE_DIR", tmp_path)
+        monkeypatch.setattr("browser_tools.session_layout.CACHE_DIR", tmp_path)
         monkeypatch.setattr(
             "browser_tools.persistent_browser.resolve_chrome_executable",
             lambda channel: "/bin/chrome",
@@ -538,13 +534,13 @@ class TestChromeOwnershipProvenance:
 
     def test_reuse_inherits_ownership_from_prior_state(self, monkeypatch, tmp_path: Path) -> None:
         """A relaunch-free reuse of our own Chrome keeps it reapable."""
-        monkeypatch.setattr("browser_tools.persistent_browser.CACHE_DIR", tmp_path)
+        monkeypatch.setattr("browser_tools.session_layout.CACHE_DIR", tmp_path)
         monkeypatch.setattr(
             "browser_tools.persistent_browser.read_singleton_lock_pid", lambda d: 777
         )
         monkeypatch.setattr("browser_tools.persistent_browser.is_process_alive", lambda pid: True)
         monkeypatch.setattr(
-            "browser_tools.persistent_browser._pid_holds_user_data_dir", lambda pid, d: True
+            "browser_tools.persistent_browser.pid_holds_user_data_dir", lambda pid, d: True
         )
         monkeypatch.setattr(
             "browser_tools.persistent_browser.find_chrome_debug_port", lambda pid: 9556
@@ -571,13 +567,13 @@ class TestChromeOwnershipProvenance:
         self, monkeypatch, tmp_path: Path
     ) -> None:
         """A Chrome we find but never launched must not become force-quittable."""
-        monkeypatch.setattr("browser_tools.persistent_browser.CACHE_DIR", tmp_path)
+        monkeypatch.setattr("browser_tools.session_layout.CACHE_DIR", tmp_path)
         monkeypatch.setattr(
             "browser_tools.persistent_browser.read_singleton_lock_pid", lambda d: 777
         )
         monkeypatch.setattr("browser_tools.persistent_browser.is_process_alive", lambda pid: True)
         monkeypatch.setattr(
-            "browser_tools.persistent_browser._pid_holds_user_data_dir", lambda pid, d: True
+            "browser_tools.persistent_browser.pid_holds_user_data_dir", lambda pid, d: True
         )
         monkeypatch.setattr(
             "browser_tools.persistent_browser.find_chrome_debug_port", lambda pid: 9556

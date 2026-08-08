@@ -71,18 +71,25 @@ Runtime requirements:
 ## Architecture
 
 ```
-browser_tools_session.py     CLI entry point
+browser_tools_session.py     CLI entry point (argparse, command dispatch)
         |
-        +-- chrome_config.py          Tool schemas & validation
-        +-- chrome_utils.py           MCP subprocess invocation, formatting
+        +-- browser_session.py       Tool-proxy session adapter (tool dispatch,
+        |                           camoufox routing, auth-wall promotion)
+        +-- chrome_config.py          MCP subprocess command builder
+        +-- chrome_utils.py           MCP invocation, formatting, errors
         +-- mcp_response.py           Single owner of MCP response envelopes
         +-- tool_registry.py          Single source of truth for tool routing flags
-        +-- persistent_browser.py     Chrome lifecycle, daemon, profiles
+        +-- persistent_browser.py     Chrome lifecycle: controller, reaper,
+        |                           teardown, shared on-disk session layout
         |       +-- browser_state.py     Persisted state dataclasses
+        |       +-- page_selection.py    Active-page tracking (restore, refresh, normalize)
         |       +-- mcp_session.py       Short-lived MCP session wrapper
         |       +-- daemon_client.py      Unix socket client
         |       +-- process_utils.py      Chrome process/port utilities
-        |       +-- mcp_daemon.py         Long-lived MCP daemon
+        |       +-- profile_catalog.py    Named-profile catalog & live discovery
+        |       +-- session_store.py      Per-project session config & controller factories
+        |       +-- mcp_daemon.py         Long-lived MCP daemon (dispatch_tool routes by registry flags)
+        |               +-- mcp_broker.py      JSON-RPC-over-stdio request multiplexer
         |               +-- cdp_handler.py     CDP tool implementations
         |               +-- cdp_constants.py   Tuning constants (timeouts, thresholds)
         |               +-- cdp_client.py      CDP WebSocket client
