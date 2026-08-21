@@ -1,6 +1,6 @@
 [project]
 name = "browser-tools"
-version = "0.1.0"
+version = "0.2.0"
 description = "Browser automation, debugging, and anti-detect browsing CLI"
 readme = "README.md"
 license = "MIT"
