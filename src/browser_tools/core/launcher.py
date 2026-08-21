@@ -1,0 +1,407 @@
+# Vendored from chrome-agent v0.5.7 (https://github.com/captivus/chrome-agent).
+# Copyright (c) 2026 Corey Gallon.
+# SPDX-License-Identifier: MIT
+# See /NOTICE for the full vendoring notice.
+#
+# This file is a verbatim vendored copy; the only permitted modification is
+# rewriting intra-package imports to browser_tools.core. See RFC-01, section
+# "Vendoring rules".
+
+"""Browser launch and session management.
+
+Finds Chrome/Chromium on the system, launches it with CDP enabled,
+waits for the port to become ready, and manages session directories.
+No Playwright dependency -- uses subprocess directly.
+"""
+
+import asyncio
+import json
+import logging
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+
+from .connection import check_cdp_port
+from .registry import REGISTRY_PATH, InstanceInfo, allocate_port, register, cleanup
+from .registry import _load_registry, _resolve_path
+from .utils import process_is_ours, process_is_running, process_start_time
+
+logger = logging.getLogger(__name__)
+
+_SESSION_ROOT = "/tmp/chrome-agent"
+
+
+class BrowserNotFoundError(Exception):
+    """Chrome/Chromium binary not found on the system."""
+
+    def __init__(self, searched_paths: list[str]):
+        self.searched_paths = searched_paths
+        paths_str = "\n  ".join(searched_paths)
+        super().__init__(
+            f"Chrome/Chromium not found. Searched:\n  {paths_str}"
+        )
+
+
+def find_chrome_binary() -> str | None:
+    """Search platform-specific paths for Chrome/Chromium.
+
+    Returns the path to the first found executable, or None.
+    """
+    candidates = _platform_candidates()
+    for path in candidates:
+        if os.path.isfile(path) and os.access(path, os.X_OK):
+            return path
+    return None
+
+
+def _platform_candidates() -> list[str]:
+    """Return platform-specific Chrome/Chromium binary paths."""
+    if sys.platform == "linux":
+        return [
+            "/usr/bin/google-chrome",
+            "/usr/bin/google-chrome-stable",
+            "/usr/bin/chromium-browser",
+            "/usr/bin/chromium",
+            "/snap/bin/chromium",
+        ]
+    elif sys.platform == "darwin":
+        return [
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            "/Applications/Chromium.app/Contents/MacOS/Chromium",
+        ]
+    elif sys.platform == "win32":
+        return [
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+            r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+        ]
+    return []
+
+
+async def launch_browser(
+    port_override: int | None = None,
+    fingerprint: str | None = None,
+    headless: bool = False,
+    pin_to_desktop: bool = True,
+    working_dir: str | None = None,
+    registry_path: str | None = None,
+    extra_args: list[str] | None = None,
+    window_border: bool = True,
+) -> InstanceInfo:
+    """Launch Chrome with CDP enabled and register as a named instance.
+
+    Finds the Chrome binary, auto-allocates a port (or uses port_override),
+    starts Chrome with --remote-debugging-port, waits for the port to be
+    ready, registers the instance in the registry, and optionally applies
+    a fingerprint profile.
+
+    Session data is stored under /tmp/chrome-agent/session-<id>/.
+    The browser continues running after this function returns.
+
+    Returns InstanceInfo with name, port, pid, browser_version, user_data_dir.
+
+    Raises BrowserNotFoundError if Chrome is not installed.
+    Raises RuntimeError if no ports are available.
+    Raises TimeoutError if the browser doesn't start within 30 seconds.
+    """
+
+    # Phase 1: Find Chrome binary
+    binary = find_chrome_binary()
+    if binary is None:
+        raise BrowserNotFoundError(searched_paths=_platform_candidates())
+
+    # Prune truly-dead instances first (fallback for browsers whose supervisor
+    # was killed, and for headless instances which have no supervisor), and
+    # sweep any orphaned session directories (e.g. a browser that held its
+    # profile files past the supervisor's removal window). With the pid-OR-port
+    # liveness check and the SingletonLock pid check, this only removes
+    # genuinely-gone browsers, and it frees their names/ports for reuse.
+    cleanup_sessions(registry_path=registry_path)
+
+    # Phase 2: Allocate port
+    if port_override is not None:
+        port = port_override
+    else:
+        reg_path = _resolve_path(registry_path)
+        registry_data = _load_registry(reg_path)
+        port = allocate_port(registry=registry_data)
+
+    # Phase 3: Prepare launch arguments
+    os.makedirs(_SESSION_ROOT, exist_ok=True)
+    session_dir = tempfile.mkdtemp(prefix="session-", dir=_SESSION_ROOT)
+
+    # Write Chrome preferences to disable password save prompts
+    default_dir = os.path.join(session_dir, "Default")
+    os.makedirs(default_dir, exist_ok=True)
+    prefs = {
+        "credentials_enable_service": False,
+        "profile": {
+            "password_manager_enabled": False,
+        },
+    }
+    with open(os.path.join(default_dir, "Preferences"), "w") as f:
+        json.dump(prefs, f)
+
+    args = [
+        binary,
+        f"--remote-debugging-port={port}",
+        f"--user-data-dir={session_dir}",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--password-store=basic",
+    ]
+    if headless:
+        args.append("--headless=new")
+    if extra_args:
+        args.extend(extra_args)
+
+    # Apply fingerprint via Chrome command-line flags (persistent)
+    env = os.environ.copy()
+    fp_profile = None
+    if fingerprint is not None:
+        from .fingerprint import load_fingerprint
+        fp_profile = load_fingerprint(path=fingerprint)
+        args.append(f"--user-agent={fp_profile.user_agent}")
+        args.append(f"--window-size={fp_profile.viewport['width']},{fp_profile.viewport['height']}")
+        args.append(f"--lang={fp_profile.locale}")
+        env["TZ"] = fp_profile.timezone
+
+    # Phase 4: Launch subprocess
+    process = subprocess.Popen(
+        args,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        env=env,
+    )
+    # Capture the process's start-time identity token immediately, while the
+    # PID is guaranteed to still be this process (wrapper installs can exit
+    # fast). (pid, pid_start) lets liveness checks detect PID recycling.
+    pid_start = process_start_time(pid=process.pid)
+    logger.info("Launched Chrome PID %d on port %d", process.pid, port)
+
+    # Phase 5: Wait for CDP port to be ready
+    deadline = asyncio.get_event_loop().time() + 30.0
+    status = None
+    while asyncio.get_event_loop().time() < deadline:
+        # Check if process died
+        if process.poll() is not None:
+            stderr_output = process.stderr.read().decode(errors="replace") if process.stderr else ""
+            raise RuntimeError(
+                f"Chrome exited immediately with code {process.returncode}. "
+                f"stderr: {stderr_output[:500]}"
+            )
+        status = check_cdp_port(port=port)
+        if status.listening:
+            break
+        await asyncio.sleep(0.2)
+    else:
+        # Timeout -- kill the process and fail
+        process.kill()
+        raise TimeoutError("Browser did not start within 30 seconds")
+
+    # Phase 6: Pin to desktop (Linux/X11, best-effort)
+    if pin_to_desktop and not headless:
+        await _move_to_launching_desktop(pid=process.pid)
+
+    # Phase 7: Register in the instance registry
+    if working_dir is None:
+        working_dir = os.getcwd()
+
+    instance_info = register(
+        working_dir=working_dir,
+        pid=process.pid,
+        browser_version=status.browser_version or "unknown",
+        user_data_dir=session_dir,
+        port_override=port,
+        registry_path=registry_path,
+        pid_start=pid_start,
+    )
+
+    # Phase 8: Spawn the per-instance supervisor (headed launches only). It is a
+    # detached process -- it must survive the caller exiting (fire-and-forget
+    # launch model) -- that holds a CDP connection and, when the browser/window
+    # closes, retires the instance from the registry (and removes its session
+    # dir). While the browser is alive it also draws the window border, unless:
+    #   - --no-window-border (window_border is False), or
+    #   - a fingerprint profile is active: the in-page border/badge/title are
+    #     page-observable (a findable host element + a modified document.title),
+    #     and bot-defended sites -- exactly where fingerprinting is used -- are
+    #     where DOM/title-diffing detectors live. See the detection audit.
+    # Headless launches get no supervisor (no window to close or mark); their
+    # registry entries are reclaimed by the launch-time prune above / cleanup.
+    if not headless:
+        from .supervisor import spawn_supervisor
+        spawn_supervisor(
+            port=port,
+            name=instance_info.name,
+            registry_path=_resolve_path(registry_path),
+            draw_border=window_border and fp_profile is None,
+        )
+
+    return instance_info
+
+
+def cleanup_sessions(registry_path: str | None = None) -> list[str]:
+    """Remove stale instances and their session directories.
+
+    Delegates to the Instance Registry's cleanup() which removes stale
+    registry entries and their session directories. Also removes any
+    orphaned session directories under /tmp/chrome-agent/ that don't
+    have a running Chrome process (for backward compatibility with
+    pre-registry session directories).
+
+    Returns the list of removed instance names from the registry.
+    """
+    # Registry cleanup (iteration 2)
+    removed = cleanup(registry_path=registry_path)
+
+    # Session dirs still referenced by a registry entry (i.e. instances the
+    # cleanup above judged alive) are never orphans. Without this guard, the
+    # SingletonLock heuristic below can misjudge a LIVE sandbox-launched
+    # browser: its lock records a namespace-local PID, which on the host can
+    # alias to a dead or foreign process -- and the sweep would delete the
+    # profile out from under a running browser.
+    registry_data = _load_registry(_resolve_path(registry_path))
+    tracked_dirs = {e.get("user_data_dir") for e in registry_data.values()}
+    # The session root is shared by ALL registries: callers (tests, tools) can
+    # pass an isolated registry path, but their sweep still walks the global
+    # _SESSION_ROOT. Honor the default registry's instances too -- otherwise an
+    # isolated-registry invocation reads default-registry dirs as "untracked"
+    # and deletes profile dirs out from under live registered browsers (whose
+    # recreated-after-deletion dirs carry no SingletonLock to protect them).
+    if _resolve_path(registry_path) != REGISTRY_PATH:
+        default_data = _load_registry(REGISTRY_PATH)
+        tracked_dirs |= {e.get("user_data_dir") for e in default_data.values()}
+
+    # Legacy cleanup: remove session dirs not tracked by the registry
+    if os.path.isdir(_SESSION_ROOT):
+        for entry in os.listdir(_SESSION_ROOT):
+            session_dir = os.path.join(_SESSION_ROOT, entry)
+            if not os.path.isdir(session_dir):
+                continue
+            # Skip the registry file itself
+            if entry == "registry.json" or entry.endswith(".tmp"):
+                continue
+            if session_dir in tracked_dirs:
+                continue
+
+            lock_file = os.path.join(session_dir, "SingletonLock")
+            if not os.path.exists(lock_file) and not os.path.islink(lock_file):
+                logger.info("Removing orphaned session directory: %s", session_dir)
+                shutil.rmtree(session_dir, ignore_errors=True)
+            else:
+                # Identity check, not bare existence: the lock's PID is written
+                # by Chrome as it saw itself, so a sandboxed (PID-namespaced)
+                # ghost's lock aliases to a foreign host process. A PID that is
+                # not our own live process cannot be a browser holding this
+                # (untracked) profile.
+                pid = _read_lock_pid(lock_file=lock_file)
+                if pid is not None and not process_is_ours(pid=pid):
+                    logger.info("Removing orphaned session directory (PID %d not ours): %s", pid, session_dir)
+                    shutil.rmtree(session_dir, ignore_errors=True)
+
+    return removed
+
+
+def _read_lock_pid(lock_file: str) -> int | None:
+    """Read the PID from Chrome's SingletonLock file.
+
+    Chrome creates SingletonLock as a symlink with target "hostname-PID".
+    Returns the PID, or None if the format can't be parsed.
+    """
+    try:
+        # SingletonLock is a symlink, not a regular file
+        target = os.readlink(lock_file)
+        # Format: "hostname-PID"
+        parts = target.rsplit("-", 1)
+        if len(parts) == 2:
+            return int(parts[1])
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def _process_is_running(pid: int) -> bool:
+    """Check if a process with the given PID is still running.
+
+    Legacy wrapper -- delegates to the shared utility in utils.py.
+    Kept for backward compatibility with any code importing from launcher.
+    """
+    return process_is_running(pid=pid)
+
+
+async def _move_to_launching_desktop(pid: int) -> None:
+    """Move the browser window to the launching terminal's virtual desktop.
+
+    Linux/X11 only. Requires xdotool. Silently does nothing if
+    xdotool is unavailable or on non-X11 systems.
+
+    Uses $WINDOWID to determine the terminal's desktop. Falls back to
+    xdotool get_desktop (the currently viewed desktop) if $WINDOWID is
+    not set. Searches for browser windows by PID (Chrome ignores the
+    --class flag). Polls at 30ms intervals to minimize the time the
+    browser is visible on the wrong desktop.
+    """
+    try:
+        # Determine target desktop from the terminal's window
+        window_id = os.environ.get("WINDOWID", "")
+        if window_id:
+            result = subprocess.run(
+                ["xdotool", "get_desktop_for_window", window_id],
+                capture_output=True, text=True,
+            )
+            desktop = result.stdout.strip()
+        else:
+            result = subprocess.run(
+                ["xdotool", "get_desktop"],
+                capture_output=True, text=True,
+            )
+            desktop = result.stdout.strip()
+
+        if not desktop:
+            return
+
+        # Poll for the browser window to appear, move it immediately.
+        # Internal Chrome windows report desktop -1; skip those.
+        for _ in range(80):
+            result = subprocess.run(
+                ["xdotool", "search", "--pid", str(pid)],
+                capture_output=True, text=True,
+            )
+            for wid in result.stdout.strip().split("\n"):
+                wid = wid.strip()
+                if not wid:
+                    continue
+                wid_desktop = subprocess.run(
+                    ["xdotool", "get_desktop_for_window", wid],
+                    capture_output=True, text=True,
+                ).stdout.strip()
+                if wid_desktop != "-1" and wid_desktop != "":
+                    if wid_desktop != desktop:
+                        # Wait briefly for window manager registration to settle
+                        await asyncio.sleep(0.05)
+                        subprocess.run(
+                            ["xdotool", "set_desktop_for_window", wid, desktop],
+                        )
+                        # Verify the move succeeded -- retry if needed
+                        verify = subprocess.run(
+                            ["xdotool", "get_desktop_for_window", wid],
+                            capture_output=True, text=True,
+                        ).stdout.strip()
+                        if verify != desktop:
+                            await asyncio.sleep(0.1)
+                            subprocess.run(
+                                ["xdotool", "set_desktop_for_window", wid, desktop],
+                            )
+                        logger.info("Moved browser window to desktop %s", desktop)
+                    else:
+                        logger.info("Browser window already on desktop %s", desktop)
+                    return
+            await asyncio.sleep(0.03)
+
+        logger.debug("Browser window did not appear within polling timeout")
+    except FileNotFoundError:
+        logger.debug("xdotool not available -- skipping desktop move")
+    except Exception as exc:
+        logger.debug("Could not move browser to desktop: %s", exc)

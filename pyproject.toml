@@ -90,6 +90,12 @@ reportUnknownParameterType = false
 [tool.ruff]
 line-length = 100
 target-version = "py313"
+# src/browser_tools/core/ is chrome-agent vendored verbatim (RFC-01, "Vendoring
+# rules"): only an import rewrite is permitted inside it, so it is excluded from
+# lint rather than reformatted to this project's rules. force-exclude keeps the
+# exclusion in effect even when the path is passed explicitly on the CLI.
+extend-exclude = ["src/browser_tools/core"]
+force-exclude = true
 
 [tool.ruff.lint]
 select = [
