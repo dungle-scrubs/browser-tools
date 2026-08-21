@@ -52,10 +52,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         from camoufox.sync_api import Camoufox
     except ImportError:
-        sys.stderr.write(
-            "The camoufox engine requires the 'camoufox' extra. "
-            "Install it with: pip install 'browser-tools[camoufox]'\n"
-        )
+        from .extras import missing_extra_message
+
+        sys.stderr.write(missing_extra_message("camoufox", "The camoufox engine") + "\n")
         return 3
 
     stop = threading.Event()

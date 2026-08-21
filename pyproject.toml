@@ -31,14 +31,35 @@ classifiers = [
     "Topic :: Utilities",
     "Typing :: Typed",
 ]
+# Default install is CLI-first and Node-free: the native engine backs
+# snapshot/click/fill (RFC-01 Phase 2 flip, #41), so the base package needs
+# only the vendored core's websockets transport. Everything heavier lives
+# behind an extra below (RFC-01 "Packaging", Question 4). The websockets floor
+# is >=16.0 -- the higher of the two merged projects' floors, required by the
+# vendored core.
 dependencies = [
+    "websockets>=16.0",
+]
+
+[project.optional-dependencies]
+# The Camoufox anti-detect engine (launch --engine camoufox) and its geoip
+# fingerprint data. camoufox pulls in aiohttp 3.13.x, which has known CVEs
+# (PYSEC-2026-237, etc.), so the >=3.14.1 override travels with this extra --
+# it is moot when Camoufox is not installed, so it does not belong in the
+# default set.
+camoufox = [
     "camoufox[geoip]>=0.4.11",
-    "pillow>=10.0.0",
-    "websockets>=14.0",
-    # Security overrides for transitive dependencies.
-    # camoufox pulls in aiohttp 3.13.x which has 11 known CVEs (PYSEC-2026-237, etc.).
-    # Force >=3.14.1 until camoufox updates its own pin.
     "aiohttp>=3.14.1",
+]
+# pillow sharpens screenshot blank-frame detection; without it that check falls
+# back to a byte-ratio heuristic (screenshot_utils), so it is optional rather
+# than required. Grouped under `profiling` per RFC-01 Question 4.
+profiling = [
+    "pillow>=10.0.0",
+]
+# Everything at once.
+all = [
+    "browser-tools[camoufox,profiling]",
 ]
 
 [project.urls]
