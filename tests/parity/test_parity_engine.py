@@ -182,6 +182,12 @@ class FakeNativeCdpSession:
         self.calls.append("get_full_ax_tree")
         return self._ax_tree
 
+    def get_stitched_ax_tree(self) -> dict[str, Any]:
+        # The native engines read the cross-frame-stitched tree (#41); the fake's
+        # canned single-frame tree needs no stitching, so it serves it directly.
+        self.calls.append("get_stitched_ax_tree")
+        return self._ax_tree
+
     def evaluate(self, script: str) -> Any:
         self.calls.append("evaluate")
         if "document.body.innerText" in script:
@@ -229,9 +235,9 @@ def test_native_capture_navigates_settles_then_reads_tree_in_order():
     session = FakeNativeCdpSession(_NATIVE_AX_TREE, {}, "")
     NativeSnapshotEngine(session).capture(corpus_page("plain"))
     assert session.calls[0].startswith("navigate:")
-    assert "get_full_ax_tree" in session.calls
+    assert "get_stitched_ax_tree" in session.calls
     # A settle evaluate must run before the AX tree read.
-    assert session.calls.index("evaluate") < session.calls.index("get_full_ax_tree")
+    assert session.calls.index("evaluate") < session.calls.index("get_stitched_ax_tree")
 
 
 def test_native_engine_is_self_parity_on_a_stable_page():

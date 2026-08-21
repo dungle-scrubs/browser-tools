@@ -96,6 +96,46 @@ class PlaywrightChromiumSession:
     def get_full_ax_tree(self) -> dict[str, Any]:
         return self._cdp.send("Accessibility.getFullAXTree")
 
+    def get_stitched_ax_tree(self) -> dict[str, Any]:
+        """Full accessibility tree stitched across child frames (ticket #41).
+
+        The synchronous counterpart of
+        :func:`~browser_tools.native_snapshot.read_stitched_ax_tree`: it drives the
+        same discovery (``Page.getFrameTree`` -> ``DOM.getFrameOwner`` ->
+        per-frame ``Accessibility.getFullAXTree``) over Playwright's sync CDP
+        session and reuses the production :func:`stitch_ax_frames` transform, so
+        the native parity engines read the cross-frame node set the flipped native
+        backend serves.
+        """
+        from browser_tools.native_snapshot import stitch_ax_frames
+
+        top = self._cdp.send("Accessibility.getFullAXTree")
+        self._cdp.send("Page.enable")
+        frame_tree = self._cdp.send("Page.getFrameTree")
+
+        frame_ids: list[str] = []
+
+        def walk(node: dict[str, Any], is_root: bool) -> None:
+            frame = node.get("frame", {})
+            frame_id = frame.get("id")
+            if not is_root and frame_id is not None:
+                frame_ids.append(str(frame_id))
+            for child in node.get("childFrames", []) or []:
+                walk(child, False)
+
+        walk(frame_tree.get("frameTree", {}), True)
+
+        child_frames: list[tuple[int, dict[str, Any]]] = []
+        for frame_id in frame_ids:
+            owner = self._cdp.send("DOM.getFrameOwner", {"frameId": frame_id})
+            backend = owner.get("backendNodeId")
+            if not isinstance(backend, int):
+                continue
+            child = self._cdp.send("Accessibility.getFullAXTree", {"frameId": frame_id})
+            child_frames.append((backend, child))
+
+        return stitch_ax_frames(top, child_frames)
+
     def evaluate(self, script: str) -> Any:
         return self._page.evaluate(script)
 

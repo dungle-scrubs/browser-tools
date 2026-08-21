@@ -222,6 +222,9 @@ class NativeCdpSession(Protocol):
     def get_full_ax_tree(self) -> dict[str, Any]:  # pragma: no cover - protocol
         ...
 
+    def get_stitched_ax_tree(self) -> dict[str, Any]:  # pragma: no cover - protocol
+        ...
+
     def evaluate(self, script: str) -> Any:  # pragma: no cover - protocol
         ...
 
@@ -262,7 +265,7 @@ class NativeSnapshotEngine:
         # Settle so dynamic / post-paint content is present before capture.
         self._session.evaluate(_SETTLE_SCRIPT)
 
-        ax_result = self._session.get_full_ax_tree()
+        ax_result = self._session.get_stitched_ax_tree()
         snapshot = self._reader.build(ax_result)
         nodes = tuple(
             SnapshotNode(
@@ -332,7 +335,7 @@ class NativeInteractionEngine:
         self._reader.note_navigation()
         self._session.evaluate(_SETTLE_SCRIPT)
 
-        ax_result = self._session.get_full_ax_tree()
+        ax_result = self._session.get_stitched_ax_tree()
         snapshot = self._reader.build(ax_result)
         nodes = tuple(
             SnapshotNode(
@@ -362,6 +365,184 @@ class NativeInteractionEngine:
             url=page.file_url(),
             nodes=nodes,
             uid_targets=uid_targets,
+            text=str(text),
+        )
+
+
+# --------------------------------------------------------------------------- #
+# Node engine: the authoritative chrome-devtools-mcp baseline (ticket #41).
+# --------------------------------------------------------------------------- #
+
+# chrome-devtools-mcp renders its accessibility snapshot one node per line:
+#   uid=1_4 textbox "Email" value="a@b" checked
+# The role token follows ``uid=<uid>``; the accessible name is the first quoted
+# string; ``value="..."`` (when present) is the node value.
+_NODE_SNAPSHOT_LINE = re.compile(
+    r'^\s*uid=(?P<uid>\S+)\s+(?P<role>\S+)(?:\s+"(?P<name>(?:[^"\\]|\\.)*)")?(?P<rest>.*)$'
+)
+
+
+def node_engine_available() -> tuple[bool, str]:
+    """Report whether the chrome-devtools-mcp Node engine can be launched here."""
+    import shutil
+
+    if shutil.which("npx") is None:
+        return False, "npx (Node.js) is not on PATH"
+    return True, ""
+
+
+def parse_node_snapshot(text: str) -> list[SnapshotNode]:
+    """Parse a chrome-devtools-mcp textual accessibility snapshot into nodes.
+
+    Only lines carrying a ``uid=`` token are nodes; the header (``## Latest page
+    snapshot``) and any trailing prose are skipped. ``(role, name, value)`` is
+    extracted for the operator; the Node engine's own uid is not carried (UID
+    resolution is compared through the shared JS, as for the ARIA engine).
+    """
+    nodes: list[SnapshotNode] = []
+    for raw in text.splitlines():
+        line = raw.rstrip()
+        if "uid=" not in line:
+            continue
+        match = _NODE_SNAPSHOT_LINE.match(line)
+        if match is None:
+            continue
+        role = match.group("role")
+        name = match.group("name")
+        if name is not None:
+            name = name.replace('\\"', '"').replace("\\\\", "\\")
+        value_match = re.search(r'\bvalue="((?:[^"\\]|\\.)*)"', match.group("rest") or "")
+        value = value_match.group(1) if value_match else None
+        nodes.append(SnapshotNode(role=role, name=name or "", value=value))
+    return nodes
+
+
+def _node_response_text(response: dict[str, Any]) -> str:
+    """Join the text items of a chrome-devtools-mcp tool response."""
+    content = response.get("result", {}).get("content", []) or []
+    return "".join(item.get("text", "") for item in content if item.get("type") == "text")
+
+
+def _extract_eval_value(response: dict[str, Any]) -> Any:
+    """Extract the returned value from a chrome-devtools-mcp evaluate_script reply.
+
+    chrome-devtools-mcp wraps a script result as ``Script ran on page and
+    returned:`` followed by a fenced ```json`` block. Pull the JSON payload out
+    and decode it so the shared-JS text / UID-target dimensions are directly
+    comparable with the native and ARIA engines.
+    """
+    text = _node_response_text(response)
+    fenced = re.search(r"```(?:json)?\s*\n(.*)\n```", text, re.DOTALL)
+    payload = fenced.group(1) if fenced else text
+    try:
+        import json
+
+        return json.loads(payload)
+    except (ValueError, TypeError):
+        return payload
+
+
+class NodeMcpSession:
+    """A live chrome-devtools-mcp subprocess exposed to :class:`NodeEngine`.
+
+    Use as a context manager so the subprocess (and the Chrome it launches) are
+    always torn down::
+
+        with NodeMcpSession() as node:
+            engine = NodeEngine(node)
+
+    It drives the real Node engine over the repo's :class:`McpBroker` -- the same
+    JSON-RPC-over-stdio broker the production daemon uses -- so the parity gate
+    compares native against chrome-devtools-mcp itself, not a stand-in.
+    """
+
+    _INIT_TIMEOUT = 120.0
+    _CALL_TIMEOUT = 60.0
+
+    def __init__(self, *, headless: bool = True, channel: str = "stable") -> None:
+        self._headless = headless
+        self._channel = channel
+        self._broker: Any = None
+
+    def __enter__(self) -> NodeMcpSession:
+        from browser_tools.mcp_broker import McpBroker
+
+        cmd = ["npx", "-y", "chrome-devtools-mcp@latest", "--isolated", "--channel", self._channel]
+        if self._headless:
+            cmd.append("--headless")
+        self._broker = McpBroker(cmd)
+        self._broker.start()
+        init = self._broker.request(
+            "initialize",
+            {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "browser-tools-parity", "version": "1.0.0"},
+            },
+            timeout=self._INIT_TIMEOUT,
+        )
+        if "error" in init:
+            raise RuntimeError(f"chrome-devtools-mcp initialize failed: {init['error']}")
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        if self._broker is not None:
+            self._broker.terminate()
+
+    def _call(self, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        response = self._broker.request(
+            "tools/call", {"name": tool, "arguments": arguments}, timeout=self._CALL_TIMEOUT
+        )
+        if "error" in response:
+            raise RuntimeError(f"chrome-devtools-mcp {tool} failed: {response['error']}")
+        return response
+
+    def navigate(self, url: str) -> None:
+        self._call("navigate_page", {"type": "url", "url": url})
+
+    def take_snapshot_text(self) -> str:
+        return _node_response_text(self._call("take_snapshot", {}))
+
+    def evaluate(self, expression: str) -> Any:
+        """Run a JS expression via evaluate_script and return the decoded value."""
+        function = f"() => ({expression})"
+        return _extract_eval_value(self._call("evaluate_script", {"function": function}))
+
+    def settle(self) -> None:
+        """Await the shared settle script through the Node engine."""
+        function = f"async () => {{ await {_SETTLE_SCRIPT.strip()}; return true; }}"
+        self._call("evaluate_script", {"function": function})
+
+
+class NodeEngine:
+    """Capture a corpus page via the real chrome-devtools-mcp Node engine.
+
+    This is the authoritative baseline the RFC-01 Phase 2 parity gate compares
+    the native engine against (Testing Strategy, "Parity gate"). The node set is
+    parsed from the Node engine's own ``take_snapshot`` output; text and UID
+    targets are computed with the *same* shared JS the ARIA and native engines
+    use, so the operator's signal is isolated to the snapshot node set.
+    """
+
+    name = "node-cdmcp"
+
+    def __init__(self, session: NodeMcpSession) -> None:
+        self._session = session
+
+    def capture(self, page: CorpusPage) -> PageCapture:
+        """Navigate to ``page`` and capture its Node snapshot, UIDs, and text."""
+        self._session.navigate(page.file_url())
+        self._session.settle()
+
+        nodes = tuple(parse_node_snapshot(self._session.take_snapshot_text()))
+        uid_targets = self._session.evaluate(_UID_TARGETS_SCRIPT.strip()) or {}
+        text = self._session.evaluate("document.body.innerText")
+
+        return PageCapture(
+            page_id=page.page_id,
+            url=page.file_url(),
+            nodes=nodes,
+            uid_targets={str(k): str(v) for k, v in dict(uid_targets).items()},
             text=str(text),
         )
 

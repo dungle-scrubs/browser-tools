@@ -104,12 +104,23 @@ class FakeCdpHandler:
     def __init__(self, mode: str = "full", detection: dict[str, Any] | None = None) -> None:
         self.mode = mode
         self.calls: list[tuple[str, dict[str, Any]]] = []
+        self.native_calls: list[tuple[str, dict[str, Any]]] = []
+        self.navigation_marks = 0
         self.detection = detection
         self.detection_runs = 0
 
     def call_tool(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
         self.calls.append((name, args))
         return {"jsonrpc": "2.0", "result": {"content": [{"type": "text", "text": "cdp-ok"}]}}
+
+    def call_native(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
+        # Native backend (RFC-01 Phase 2 flip): returns the SAME bare envelope
+        # shape the Node engine returned, so the frozen response shape holds.
+        self.native_calls.append((name, args))
+        return {"jsonrpc": "2.0", "result": {"content": [{"type": "text", "text": "native-ok"}]}}
+
+    def mark_native_navigation(self) -> None:
+        self.navigation_marks += 1
 
     def run_post_navigation_detection(self) -> dict[str, Any] | None:
         self.detection_runs += 1
@@ -912,17 +923,34 @@ class TestCdpDispatchRouting:
         assert resp == canned
 
     def test_default_forwarded_tool_passes_through_unchanged(self) -> None:
+        # RFC-01 Phase 2 flip (#41): take_snapshot's DEFAULT backend is now native,
+        # so under the default engine it routes to the native path, not the Node
+        # broker. The argument shape it is called with is unchanged (same params
+        # dict), and the response is the same bare envelope shape.
         broker = FakeBroker()
         cdp = FakeCdpHandler()
-        ctx = DispatchContext(broker, cdp)  # type: ignore[arg-type]
-        # take_snapshot is the canonical default-forwarded tool not in TOOLS CDP/screenshot sets
+        ctx = DispatchContext(broker, cdp)  # type: ignore[arg-type]  # engine defaults to native
+        req = _request("take_snapshot", {"compact": True})
+        resp = dispatch_tool(req, 2, ctx)
+        assert cdp.native_calls == [("take_snapshot", {"compact": True})]
+        assert broker.requests == []
+        assert resp["id"] == 2
+        _assert_bare_envelope(resp)
+
+    def test_default_forwarded_tool_still_forwards_under_engine_mcp(self) -> None:
+        # The --engine mcp escape hatch keeps the Node path intact: take_snapshot
+        # forwards to the broker with its params unchanged, exactly as before the
+        # flip. This preserves the pre-flip pass-through contract on the mcp path.
+        broker = FakeBroker()
+        cdp = FakeCdpHandler()
+        ctx = DispatchContext(broker, cdp, engine="mcp")  # type: ignore[arg-type]
         req = _request("take_snapshot", {"compact": True})
         resp = dispatch_tool(req, 2, ctx)
         assert len(broker.requests) == 1
         assert broker.requests[0]["method"] == "tools/call"
         assert broker.requests[0]["params"] == req["params"]
         assert resp["id"] == 2
-        assert cdp.calls == []
+        assert cdp.native_calls == []
 
     def test_default_forwarded_arbitrary_tool(self) -> None:
         broker = FakeBroker()
@@ -954,10 +982,16 @@ class TestCdpDispatchRouting:
         assert "list_pages" in text
 
     def test_inspect_mode_allows_unblocked_tool(self) -> None:
+        # take_snapshot is not inspect-blocked; it is allowed in inspect mode. Under
+        # the native default (#41) it routes to the native backend rather than the
+        # broker. The point this pins -- an unblocked tool is not refused in inspect
+        # mode -- is unchanged; only the backend it reaches moved.
         broker = FakeBroker()
-        ctx = DispatchContext(broker, FakeCdpHandler(mode="inspect"))  # type: ignore[arg-type]
+        cdp = FakeCdpHandler(mode="inspect")
+        ctx = DispatchContext(broker, cdp)  # type: ignore[arg-type]
         dispatch_tool(_request("take_snapshot"), 1, ctx)
-        assert len(broker.requests) == 1
+        assert cdp.native_calls == [("take_snapshot", {})]
+        assert broker.requests == []
 
     def test_navigation_triggers_interstitial(self) -> None:
         cdp = FakeCdpHandler(

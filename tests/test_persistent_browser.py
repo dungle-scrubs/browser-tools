@@ -290,6 +290,69 @@ class TestBrowserStateDaemonFields:
         assert loaded.daemon_pid is None
         assert loaded.daemon_socket is None
 
+    def test_ensure_forwards_engine_to_spawn(self, monkeypatch, tmp_path: Path) -> None:
+        """``ensure(engine=...)`` reaches ``_spawn`` so the daemon gets the flag (#41)."""
+        from browser_tools.daemon_supervisor import McpDaemonSupervisor
+
+        monkeypatch.setattr("browser_tools.session_layout.CACHE_DIR", tmp_path)
+        supervisor = McpDaemonSupervisor("deadbeefdeadbeef")
+        state = BrowserState(browser_url="http://127.0.0.1:9222", daemon_pid=None, daemon_socket=None)
+
+        captured: dict[str, object] = {}
+
+        def fake_spawn(self_ref, st, cmd, **kwargs):
+            captured.update(kwargs)
+            st.daemon_pid = 1
+            st.daemon_socket = str(tmp_path / "s.sock")
+
+        monkeypatch.setattr(McpDaemonSupervisor, "_spawn", fake_spawn)
+        supervisor.ensure(state, ["npx", "test"], engine="mcp")
+        assert captured["engine"] == "mcp"
+
+    def test_ensure_defaults_engine_native(self, monkeypatch, tmp_path: Path) -> None:
+        from browser_tools.daemon_supervisor import McpDaemonSupervisor
+
+        monkeypatch.setattr("browser_tools.session_layout.CACHE_DIR", tmp_path)
+        supervisor = McpDaemonSupervisor("deadbeefdeadbeef")
+        state = BrowserState(browser_url="http://127.0.0.1:9222", daemon_pid=None, daemon_socket=None)
+
+        captured: dict[str, object] = {}
+        monkeypatch.setattr(
+            McpDaemonSupervisor,
+            "_spawn",
+            lambda self_ref, st, cmd, **kw: (captured.update(kw), setattr(st, "daemon_pid", 1), setattr(st, "daemon_socket", "x")),
+        )
+        supervisor.ensure(state, ["npx", "test"])
+        assert captured["engine"] == "native"
+
+
+class TestResolveEngine:
+    """The BROWSER_TOOLS_ENGINE escape hatch (RFC-01 --engine mcp), #41."""
+
+    def test_defaults_to_native(self, monkeypatch) -> None:
+        from browser_tools.daemon_supervisor import resolve_engine
+
+        monkeypatch.delenv("BROWSER_TOOLS_ENGINE", raising=False)
+        assert resolve_engine() == "native"
+
+    def test_env_selects_mcp(self, monkeypatch) -> None:
+        from browser_tools.daemon_supervisor import resolve_engine
+
+        monkeypatch.setenv("BROWSER_TOOLS_ENGINE", "mcp")
+        assert resolve_engine() == "mcp"
+
+    def test_env_is_case_insensitive_and_trimmed(self, monkeypatch) -> None:
+        from browser_tools.daemon_supervisor import resolve_engine
+
+        monkeypatch.setenv("BROWSER_TOOLS_ENGINE", "  MCP ")
+        assert resolve_engine() == "mcp"
+
+    def test_unknown_value_falls_back_to_native(self, monkeypatch) -> None:
+        from browser_tools.daemon_supervisor import resolve_engine
+
+        monkeypatch.setenv("BROWSER_TOOLS_ENGINE", "chrome-devtools")
+        assert resolve_engine() == "native"
+
 
 class TestSingletonLockHelpers:
     """Tests for stale-lock detection and recovery on auto-launch."""

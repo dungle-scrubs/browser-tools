@@ -19,9 +19,14 @@ import pytest
 from browser_tools.native_snapshot import (
     AX_ENABLE,
     AX_GET_FULL_TREE,
+    DOM_GET_FRAME_OWNER,
+    PAGE_ENABLE,
+    PAGE_GET_FRAME_TREE,
     AxUidNode,
     NativeSnapshot,
     NativeSnapshotReader,
+    read_stitched_ax_tree,
+    stitch_ax_frames,
 )
 
 
@@ -329,3 +334,126 @@ def test_native_snapshot_type_is_frozen():
     assert isinstance(snap, NativeSnapshot)
     with pytest.raises(AttributeError):
         snap.generation = 99  # type: ignore[misc]
+
+
+# --------------------------------------------------------------------------- #
+# Cross-frame stitching (ticket #41)
+# --------------------------------------------------------------------------- #
+
+
+def _top_with_iframe() -> dict[str, Any]:
+    """Top-frame tree: a root, a heading, and an Iframe node owning backend 14."""
+    return {
+        "nodes": [
+            _node("1", "RootWebArea", "Host", children=["2", "3"], backend=4),
+            _node("2", "heading", "Host heading", parent="1", backend=12),
+            _node("3", "Iframe", "Child frame", parent="1", backend=14),
+        ]
+    }
+
+
+def _child_tree() -> dict[str, Any]:
+    """Child-frame tree with its own colliding node ids (1, 2)."""
+    return {
+        "nodes": [
+            _node("1", "RootWebArea", "Child", children=["2"], backend=5),
+            _node("2", "button", "Framed button", parent="1", backend=23),
+        ]
+    }
+
+
+def test_stitch_splices_child_under_its_owner_iframe_node():
+    merged = stitch_ax_frames(_top_with_iframe(), [(14, _child_tree())])
+    snap = NativeSnapshotReader().build(merged)
+    roles = [(n.role, n.name) for n in snap.visible_nodes()]
+    # The child frame's nodes now appear, spliced under the Iframe node.
+    assert ("Iframe", "Child frame") in roles
+    assert ("RootWebArea", "Child") in roles
+    assert ("button", "Framed button") in roles
+    # The Iframe node's child is the child frame's (namespaced) root.
+    iframe = next(n for n in snap.nodes if n.role == "Iframe")
+    child_root = next(n for n in snap.nodes if n.role == "RootWebArea" and n.name == "Child")
+    assert child_root.uid in iframe.child_uids
+    assert child_root.parent_uid == iframe.uid
+
+
+def test_stitch_namespaces_colliding_child_ids():
+    """The child's ax_node_id 1/2 collide with the top's; both survive stitching."""
+    merged = stitch_ax_frames(_top_with_iframe(), [(14, _child_tree())])
+    ids = [n["nodeId"] for n in merged["nodes"]]
+    assert ids.count("1") == 1  # only the top root keeps bare id "1"
+    assert "f1:1" in ids and "f1:2" in ids
+
+
+def test_stitch_with_no_children_is_identity():
+    top = _top_with_iframe()
+    assert stitch_ax_frames(top, []) == {"nodes": top["nodes"]}
+
+
+def test_stitch_skips_frame_with_no_matching_owner():
+    """An owner backend absent from the top tree drops the frame's link, not its nodes."""
+    merged = stitch_ax_frames(_top_with_iframe(), [(999, _child_tree())])
+    iframe = next(n for n in merged["nodes"] if n.get("role", {}).get("value") == "Iframe")
+    # The Iframe node gains no child link when its owner backend is unknown.
+    assert "f1:1" not in (iframe.get("childIds") or [])
+
+
+class _FrameSend:
+    """Async CDP fake for the stitched read: serves top + one child frame."""
+
+    def __init__(self, top: dict[str, Any], child: dict[str, Any]) -> None:
+        self._top = top
+        self._child = child
+        self.calls: list[tuple[str, dict[str, Any]]] = []
+
+    async def __call__(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        params = params or {}
+        self.calls.append((method, params))
+        if method == AX_GET_FULL_TREE:
+            return self._child if params.get("frameId") else self._top
+        if method == PAGE_GET_FRAME_TREE:
+            return {
+                "frameTree": {
+                    "frame": {"id": "TOP"},
+                    "childFrames": [{"frame": {"id": "CHILD"}}],
+                }
+            }
+        if method == DOM_GET_FRAME_OWNER:
+            return {"backendNodeId": 14}
+        return {}
+
+
+@pytest.mark.asyncio
+async def test_read_stitched_ax_tree_discovers_and_splices_child_frame():
+    send = _FrameSend(_top_with_iframe(), _child_tree())
+    merged = await read_stitched_ax_tree(send)
+    methods = [m for m, _ in send.calls]
+    assert AX_ENABLE in methods and PAGE_ENABLE in methods and PAGE_GET_FRAME_TREE in methods
+    # The child frame's tree was read with its frameId.
+    assert (AX_GET_FULL_TREE, {"frameId": "CHILD"}) in send.calls
+    snap = NativeSnapshotReader().build(merged)
+    assert ("button", "Framed button") in {(n.role, n.name) for n in snap.visible_nodes()}
+
+
+@pytest.mark.asyncio
+async def test_read_stitched_ax_tree_degrades_to_top_frame_when_no_children():
+    class _NoFrames:
+        async def __call__(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+            if method == AX_GET_FULL_TREE:
+                return _form_tree()
+            if method == PAGE_GET_FRAME_TREE:
+                return {"frameTree": {"frame": {"id": "TOP"}}}
+            return {}
+
+    merged = await read_stitched_ax_tree(_NoFrames())
+    # With no child frames the merged tree is exactly the top tree.
+    assert merged == _form_tree()
+
+
+@pytest.mark.asyncio
+async def test_snapshot_stitched_builds_from_merged_tree():
+    send = _FrameSend(_top_with_iframe(), _child_tree())
+    reader = NativeSnapshotReader()
+    snap = await reader.snapshot_stitched(send)
+    assert reader.current is snap
+    assert ("button", "Framed button") in {(n.role, n.name) for n in snap.visible_nodes()}

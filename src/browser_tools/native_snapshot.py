@@ -54,6 +54,12 @@ from typing import Any
 # CDP methods this read path uses.
 AX_ENABLE = "Accessibility.enable"
 AX_GET_FULL_TREE = "Accessibility.getFullAXTree"
+# Cross-frame stitching (see ``stitch_ax_frames``): discover child frames and
+# the DOM node that owns each, so a child frame's accessibility tree can be
+# spliced under its ``Iframe`` node.
+PAGE_ENABLE = "Page.enable"
+PAGE_GET_FRAME_TREE = "Page.getFrameTree"
+DOM_GET_FRAME_OWNER = "DOM.getFrameOwner"
 
 # Async CDP transport: ``send(method, params) -> result``.
 CdpSend = Callable[..., Awaitable[dict[str, Any]]]
@@ -294,6 +300,22 @@ class NativeSnapshotReader:
         result = await send(AX_GET_FULL_TREE)
         return self.build(result)
 
+    async def snapshot_stitched(self, send: CdpSend) -> NativeSnapshot:
+        """Read the full tree stitched across child frames, then build a snapshot.
+
+        The cross-frame counterpart of :meth:`snapshot`: it reaches across iframe
+        boundaries (see :func:`read_stitched_ax_tree`) so the node set matches the
+        Node baseline's on framed pages. This is the read the flipped native
+        backend uses for ``take_snapshot`` (ticket #41).
+
+        Args:
+            send: Async CDP transport, ``send(method, params) -> result``.
+
+        Returns:
+            The freshly built, current :class:`NativeSnapshot`.
+        """
+        return self.build(await read_stitched_ax_tree(send))
+
     def resolve_uid(self, uid: str) -> AxUidNode | None:
         """Resolve a UID against the current snapshot only.
 
@@ -318,6 +340,132 @@ class NativeSnapshotReader:
         """
         self._current = None
         self._generation += 1
+
+
+def stitch_ax_frames(
+    top_result: dict[str, Any],
+    child_frames: list[tuple[int, dict[str, Any]]],
+) -> dict[str, Any]:
+    """Splice child-frame accessibility trees into the top frame's tree.
+
+    ``Accessibility.getFullAXTree`` returns only the frame it is called on: the
+    top-frame result carries an ``Iframe`` node for each child frame but not the
+    child document's own nodes. chrome-devtools-mcp (the parity baseline) stitches
+    child frames in; this reproduces that so the native node set reaches across a
+    frame boundary (RFC-01 parity corpus's iframe case, ticket #41).
+
+    The transform is pure -- it takes the already-fetched CDP results and returns
+    one merged ``{"nodes": [...]}`` dict the existing :meth:`NativeSnapshotReader.build`
+    consumes unchanged. It never touches CDP transport, so it is unit-testable on
+    synthetic dicts.
+
+    Two facts make the splice sound:
+
+    - AX ``nodeId`` values are per-frame and collide across frames, so every child
+      frame's ids (its ``nodeId``, ``parentId``, and ``childIds``) are namespaced
+      with a per-frame prefix before merging.
+    - A child frame's ``DOM.getFrameOwner`` ``backendNodeId`` equals the
+      ``backendDOMNodeId`` of the top tree's ``Iframe`` node for that frame, so the
+      child's root is linked as a child of that ``Iframe`` node.
+
+    Args:
+        top_result: The top frame's ``getFullAXTree`` result.
+        child_frames: ``(owner_backend_node_id, child_ax_result)`` for each child
+            frame, where ``owner_backend_node_id`` is the frame owner's DOM
+            ``backendNodeId`` from ``DOM.getFrameOwner``.
+
+    Returns:
+        A merged ``{"nodes": [...]}`` with child frames spliced under their owners.
+    """
+    merged: list[dict[str, Any]] = [dict(node) for node in top_result.get("nodes", []) or []]
+    backend_to_node: dict[int, dict[str, Any]] = {}
+    for node in merged:
+        backend = node.get("backendDOMNodeId")
+        if isinstance(backend, int):
+            backend_to_node[backend] = node
+
+    for index, (owner_backend, child_result) in enumerate(child_frames):
+        prefix = f"f{index + 1}:"
+        child_root_id: str | None = None
+        child_nodes: list[dict[str, Any]] = []
+        for raw in child_result.get("nodes", []) or []:
+            node = dict(raw)
+            node["nodeId"] = prefix + str(node.get("nodeId"))
+            parent_id = node.get("parentId")
+            if parent_id is not None:
+                node["parentId"] = prefix + str(parent_id)
+            else:
+                child_root_id = node["nodeId"]
+            node["childIds"] = [prefix + str(cid) for cid in (node.get("childIds") or [])]
+            child_nodes.append(node)
+
+        owner = backend_to_node.get(owner_backend)
+        if owner is not None and child_root_id is not None:
+            owner["childIds"] = [*(owner.get("childIds") or []), child_root_id]
+            for node in child_nodes:
+                if node["nodeId"] == child_root_id:
+                    node["parentId"] = owner["nodeId"]
+        merged.extend(child_nodes)
+
+    return {"nodes": merged}
+
+
+def _iter_frame_ids(frame_tree_node: dict[str, Any]) -> list[str]:
+    """Collect child (non-root) frame ids from a ``Page.getFrameTree`` node."""
+    ids: list[str] = []
+
+    def walk(node: dict[str, Any], is_root: bool) -> None:
+        frame = node.get("frame", {})
+        frame_id = frame.get("id")
+        if not is_root and frame_id is not None:
+            ids.append(str(frame_id))
+        for child in node.get("childFrames", []) or []:
+            walk(child, False)
+
+    walk(frame_tree_node, True)
+    return ids
+
+
+async def read_stitched_ax_tree(send: CdpSend) -> dict[str, Any]:
+    """Read the full accessibility tree, stitched across child frames.
+
+    Enables the Accessibility and Page domains, reads the top frame's tree,
+    discovers each child frame and its owner DOM node, reads each child frame's
+    tree, and returns the single merged result (see :func:`stitch_ax_frames`).
+    A frame whose owner or tree cannot be read is skipped rather than failing the
+    whole snapshot, so a broken child frame degrades to the top-frame tree.
+
+    Args:
+        send: Async CDP transport, ``send(method, params) -> result``.
+
+    Returns:
+        A merged ``{"nodes": [...]}`` ready for :meth:`NativeSnapshotReader.build`.
+    """
+    await send(AX_ENABLE)
+    top = await send(AX_GET_FULL_TREE)
+
+    try:
+        await send(PAGE_ENABLE)
+        frame_tree = await send(PAGE_GET_FRAME_TREE)
+    except Exception:
+        return top
+    frame_ids = _iter_frame_ids(frame_tree.get("frameTree", {}))
+    if not frame_ids:
+        return top
+
+    child_frames: list[tuple[int, dict[str, Any]]] = []
+    for frame_id in frame_ids:
+        try:
+            owner = await send(DOM_GET_FRAME_OWNER, {"frameId": frame_id})
+            backend = owner.get("backendNodeId")
+            if not isinstance(backend, int):
+                continue
+            child = await send(AX_GET_FULL_TREE, {"frameId": frame_id})
+        except Exception:
+            continue
+        child_frames.append((backend, child))
+
+    return stitch_ax_frames(top, child_frames)
 
 
 def _find_root_ax_id(

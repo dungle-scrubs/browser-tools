@@ -33,6 +33,7 @@ from .daemon_supervisor import (
     McpDaemonSupervisor,
     build_daemon_command,  # type: ignore[reportUnusedImport]  # noqa: F401  # re-exported
     is_recoverable_daemon_error,
+    resolve_engine,
 )
 from .live_chrome import LiveChrome, resolve_live_chrome
 from .page_selection import PageSelection
@@ -408,6 +409,7 @@ class PersistentChromeController:
             chrome_owned=chrome_owned,
             mode=self.mode,
             stealth=getattr(self, "stealth", False),
+            engine=resolve_engine(),
         )
 
     def _invalidate_daemon(self, state: BrowserState) -> None:

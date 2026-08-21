@@ -214,6 +214,123 @@ def corpus_matches(results: dict[str, ParityResult]) -> bool:
 
 
 # --------------------------------------------------------------------------- #
+# Superset gate (RFC-01 Phase 2, ticket #41): how the authoritative Node-vs-
+# native gate treats native's *correct superset* nodes.
+#
+# The native engine reads the raw CDP accessibility tree; the Node baseline
+# (chrome-devtools-mcp) reports a filtered view of it. Two consequences the gate
+# must not misread as regressions:
+#
+#   1. Native surfaces AX-internal detail the Node snapshot omits -- ``InlineTextBox``
+#      leaves, empty structural ``generic`` / ``LabelText`` / ``paragraph``
+#      containers, and the ``StaticText`` under a labelled control. These are
+#      strictly *additional* nodes; native never drops one the baseline has.
+#   2. Native pierces an open shadow root (ticket #40's finding); the Node
+#      baseline pierces it too, so those nodes are shared, not extra -- but where
+#      native's detail differs it is again additive.
+#
+# So the gate is a *coverage* test, not strict equality: native MUST contain every
+# ``(role, name, value)`` node the Node baseline reports (multiset subset), MUST
+# resolve every UID the baseline resolves to the same backend node, and MUST
+# extract identical text. Native MAY report additional nodes. A *missing* baseline
+# node, a diverging UID target, or any text difference is still a failure -- which
+# is exactly what caught the pre-#41 cross-frame gap (native missing the iframe
+# child's nodes) before stitching closed it. The strict :func:`compare_captures`
+# is unchanged and still backs the operator's unit tests.
+# --------------------------------------------------------------------------- #
+
+
+def _uid_target_superset_diffs(
+    baseline: dict[str, str],
+    candidate: dict[str, str],
+) -> list[ParityDiff]:
+    """Superset UID comparison: candidate must cover baseline, may resolve more.
+
+    Fails only when the candidate does not resolve a UID the baseline resolves,
+    or resolves it to a different backend node. A UID the candidate resolves and
+    the baseline does not is an *additional* resolution (native pierces shadow
+    roots and iframes the top-document ``querySelectorAll`` baseline cannot see),
+    and is not a failure -- the superset counterpart of the node-set rule.
+    """
+    diffs: list[ParityDiff] = []
+    for uid in sorted(baseline):
+        base_target = baseline[uid]
+        cand_target = candidate.get(uid)
+        if cand_target is None:
+            diffs.append(
+                ParityDiff(
+                    "uid_target",
+                    f"uid {uid!r} does not resolve in candidate (baseline -> {base_target!r})",
+                )
+            )
+        elif cand_target != base_target:
+            diffs.append(
+                ParityDiff(
+                    "uid_target",
+                    f"uid {uid!r} resolves to {cand_target!r}, baseline resolves to {base_target!r}",
+                )
+            )
+    return diffs
+
+
+def superset_diffs(baseline: PageCapture, candidate: PageCapture) -> list[ParityDiff]:
+    """Diffs where ``candidate`` fails to *cover* ``baseline`` (see module note).
+
+    A node-set diff is raised only for a baseline node the candidate lacks (an
+    under-count), never for a candidate node absent from the baseline. UID
+    resolution is compared under the same superset rule. Text is compared exactly
+    (both engines run identical JS on identical DOM, so text is not a superset
+    dimension).
+    """
+    diffs: list[ParityDiff] = []
+
+    base_counts = Counter(node.key() for node in baseline.nodes)
+    cand_counts = Counter(node.key() for node in candidate.nodes)
+    missing = base_counts - cand_counts
+    for key, count in sorted(missing.items(), key=lambda kv: tuple(str(p) for p in kv[0])):
+        diffs.append(
+            ParityDiff(
+                "node_set",
+                f"baseline node not covered by candidate x{count}: "
+                f"role={key[0]!r} name={key[1]!r} value={key[2]!r}",
+            )
+        )
+
+    diffs.extend(_uid_target_superset_diffs(baseline.uid_targets, candidate.uid_targets))
+    diffs.extend(_text_diffs(baseline.text, candidate.text))
+    return diffs
+
+
+def compare_superset(baseline: PageCapture, candidate: PageCapture) -> ParityResult:
+    """Gate one page under superset semantics: candidate must cover baseline."""
+    return ParityResult(page_id=baseline.page_id, diffs=tuple(superset_diffs(baseline, candidate)))
+
+
+def corpus_covers(
+    baseline: dict[str, PageCapture],
+    candidate: dict[str, PageCapture],
+) -> dict[str, ParityResult]:
+    """Superset-gate a whole captured corpus, page by page.
+
+    A page present in only one run is a failure, reported as a synthetic diff so
+    the gate never silently drops a page (mirrors :func:`compare_corpus`).
+    """
+    results: dict[str, ParityResult] = {}
+    for page_id in sorted(set(baseline) | set(candidate)):
+        if page_id not in candidate:
+            results[page_id] = ParityResult(
+                page_id, (ParityDiff("node_set", "page missing from candidate run"),)
+            )
+        elif page_id not in baseline:
+            results[page_id] = ParityResult(
+                page_id, (ParityDiff("node_set", "page missing from baseline run"),)
+            )
+        else:
+            results[page_id] = compare_superset(baseline[page_id], candidate[page_id])
+    return results
+
+
+# --------------------------------------------------------------------------- #
 # Serialization: a baseline captured from one engine is persisted as JSON so a
 # later native-engine run can be compared against it without re-launching the
 # first engine.

@@ -28,6 +28,8 @@ try:
         detect_with_retry,
     )
     from .mcp_response import make_error, make_text
+    from .native_interaction import NativeInteractor, UidResolutionError
+    from .native_snapshot import NativeSnapshotReader
     from .screencast import ScreencastRecorder
     from .tool_registry import CDP_TOOLS
 except ImportError:
@@ -44,6 +46,11 @@ except ImportError:
         make_error,
         make_text,
     )
+    from native_interaction import (  # type: ignore[import-untyped,no-redef]
+        NativeInteractor,
+        UidResolutionError,
+    )
+    from native_snapshot import NativeSnapshotReader  # type: ignore[import-untyped,no-redef]
     from screencast import ScreencastRecorder  # type: ignore[import-untyped,no-redef]
     from tool_registry import CDP_TOOLS  # type: ignore[import-untyped,no-redef]
 
@@ -544,6 +551,14 @@ class CDPHandler:
         self._handlers: dict[str, Any] = {
             name: getattr(self, method) for name, method in _CDP_HANDLERS.items()
         }
+        # Native snapshot/UID backend (RFC-01 Phase 2, ticket #41). One reader
+        # per handler owns the snapshot lifecycle for this session; the
+        # interactor resolves a UID against the reader's current snapshot, so a
+        # ``take_snapshot`` populates the UIDs a subsequent ``click``/``fill``
+        # resolves. This is the default snapshot backend; ``--engine mcp`` keeps
+        # the Node path (these methods are then never reached).
+        self._native_reader = NativeSnapshotReader()
+        self._native_interactor = NativeInteractor(self._native_reader)
 
     # --- Daemon-facing surface: delegate to the runtime ---
     @property
@@ -615,6 +630,70 @@ class CDPHandler:
             logger.warning("call_tool(%s) error: %s", name, exc)
             future.cancel()
             return make_error(str(exc))
+
+    def call_native(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        """Execute a native snapshot/UID tool on the CDP loop (thread-safe).
+
+        The flipped default backend for ``take_snapshot`` / ``click`` / ``fill``
+        (RFC-01 Phase 2, #41). It runs the native read/interaction path built in
+        #39/#40 over this session's CDP client and returns the same bare MCP
+        envelope shape the Node engine returned, so the frozen tool response
+        shape is preserved. Mirrors :meth:`call_tool`'s loop scheduling.
+
+        Args:
+            name: One of ``take_snapshot``, ``click``, ``fill``.
+            arguments: Tool arguments (``uid``/``value`` for interactions).
+
+        Returns:
+            JSON-RPC style response dict.
+        """
+        if not self._loop or not self._loop.is_running():
+            return make_error("CDP handler not initialized")
+
+        future = asyncio.run_coroutine_threadsafe(self._dispatch_native(name, arguments), self._loop)
+        try:
+            return future.result(timeout=REQUEST_TIMEOUT_SECONDS)
+        except Exception as exc:
+            logger.warning("call_native(%s) error: %s", name, exc)
+            future.cancel()
+            return make_error(str(exc))
+
+    def mark_native_navigation(self) -> None:
+        """Invalidate the native snapshot's UIDs after a navigation.
+
+        A navigation replaces the document, so every outstanding native UID is
+        stale. Called by the daemon dispatcher after a navigation tool so a UID
+        from a pre-navigation snapshot no longer resolves (native's stability
+        contract). No-op cost when the Node engine is selected.
+        """
+        self._native_reader.note_navigation()
+
+    async def _dispatch_native(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        """Route a native tool call to the snapshot or interaction path."""
+        cdp, err = self._cdp_or_error()
+        if err is not None:
+            return err
+        send = cdp.send
+
+        if name == "take_snapshot":
+            snapshot = await self._native_reader.snapshot_stitched(send)
+            return make_text(snapshot.format_tree())
+
+        if name in ("click", "fill"):
+            uid = str(arguments.get("uid", "")).strip()
+            if not uid:
+                return make_error(f"E008: native '{name}' requires a 'uid' from a prior take_snapshot")
+            try:
+                if name == "click":
+                    result = await self._native_interactor.click_async(send, uid)
+                    return make_text(f"Clicked uid={result.uid} at ({result.point[0]:.0f}, {result.point[1]:.0f}).")
+                value = str(arguments.get("value", ""))
+                result = await self._native_interactor.fill_async(send, uid, value)
+                return make_text(f"Filled uid={result.uid} (value now {result.value_after!r}).")
+            except UidResolutionError as exc:
+                return make_error(str(exc))
+
+        return make_error(f"Unknown native tool: {name}")
 
     async def _dispatch_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         """Route a tool call to its registered handler.

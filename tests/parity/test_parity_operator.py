@@ -20,10 +20,13 @@ from parity_comparison import (
     capture_to_dict,
     compare_captures,
     compare_corpus,
+    compare_superset,
+    corpus_covers,
     corpus_from_dict,
     corpus_matches,
     corpus_to_dict,
 )
+from parity_engines import parse_node_snapshot
 
 
 def _capture(page_id="p", nodes=(), uid_targets=None, text="") -> PageCapture:
@@ -258,3 +261,98 @@ def test_corpus_json_round_trip():
     }
     restored = corpus_from_dict(json.loads(json.dumps(corpus_to_dict(corpus))))
     assert corpus_matches(compare_corpus(corpus, restored))
+
+
+# --------------------------------------------------------------------------- #
+# Superset gate (ticket #41): candidate must COVER baseline, may report more.
+# --------------------------------------------------------------------------- #
+
+
+def test_superset_passes_when_candidate_adds_nodes():
+    """Native's extra AX-internal detail is allowed: candidate ⊇ baseline matches."""
+    base = _capture(nodes=(SnapshotNode("button", "Go"),))
+    cand = _capture(
+        nodes=(
+            SnapshotNode("button", "Go"),
+            SnapshotNode("InlineTextBox", "Go"),  # extra detail native surfaces
+            SnapshotNode("generic", ""),
+        )
+    )
+    assert compare_superset(base, cand).matched
+
+
+def test_superset_fails_when_candidate_misses_a_baseline_node():
+    base = _capture(nodes=(SnapshotNode("button", "Go"), SnapshotNode("heading", "Hi")))
+    cand = _capture(nodes=(SnapshotNode("button", "Go"),))
+    result = compare_superset(base, cand)
+    assert not result.matched
+    assert any("not covered" in d.detail and "heading" in d.detail for d in result.diffs)
+
+
+def test_superset_respects_multiplicity():
+    """Two baseline buttons need two in the candidate; one is under-coverage."""
+    base = _capture(nodes=(SnapshotNode("button", "Go"), SnapshotNode("button", "Go")))
+    cand = _capture(nodes=(SnapshotNode("button", "Go"),))
+    assert not compare_superset(base, cand).matched
+
+
+def test_superset_allows_candidate_only_uid_but_requires_baseline_uids():
+    """Native may resolve extra UIDs (shadow/iframe), but must cover baseline UIDs."""
+    base = _capture(uid_targets={"#a": "path-a"})
+    cand = _capture(uid_targets={"#a": "path-a", "#framed": "path-framed"})
+    assert compare_superset(base, cand).matched  # extra #framed is a superset, ok
+
+    missing = compare_superset(_capture(uid_targets={"#a": "path-a"}), _capture(uid_targets={}))
+    assert not missing.matched
+    assert missing.diffs[0].dimension == "uid_target"
+
+
+def test_superset_fails_on_diverging_uid_target():
+    base = _capture(uid_targets={"#a": "path-a"})
+    cand = _capture(uid_targets={"#a": "path-b"})
+    result = compare_superset(base, cand)
+    assert not result.matched
+    assert result.diffs[0].dimension == "uid_target"
+
+
+def test_superset_text_is_still_exact():
+    assert not compare_superset(_capture(text="a"), _capture(text="a ")).matched
+
+
+def test_corpus_covers_flags_missing_page():
+    base = {"a": _capture("a"), "b": _capture("b")}
+    cand = {"a": _capture("a")}
+    results = corpus_covers(base, cand)
+    assert not corpus_matches(results)
+    assert not results["b"].matched
+
+
+# --------------------------------------------------------------------------- #
+# chrome-devtools-mcp snapshot parser (Node baseline node set)
+# --------------------------------------------------------------------------- #
+
+
+def test_parse_node_snapshot_extracts_role_name_value():
+    text = (
+        "## Latest page snapshot\n"
+        'uid=1_0 RootWebArea "Parity Form Page" url="file:///x"\n'
+        '  uid=1_1 heading "Parity Form Page" level="1"\n'
+        '  uid=1_4 textbox "Email" value="a@b.com"\n'
+        '  uid=1_8 button "Submit"\n'
+    )
+    nodes = parse_node_snapshot(text)
+    keys = [(n.role, n.name, n.value) for n in nodes]
+    assert ("RootWebArea", "Parity Form Page", None) in keys
+    assert ("heading", "Parity Form Page", None) in keys
+    assert ("textbox", "Email", "a@b.com") in keys
+    assert ("button", "Submit", None) in keys
+
+
+def test_parse_node_snapshot_skips_non_node_lines():
+    text = "## Latest page snapshot\nsome prose without a uid token\n"
+    assert parse_node_snapshot(text) == []
+
+
+def test_parse_node_snapshot_handles_unnamed_node():
+    nodes = parse_node_snapshot("uid=2_3 generic\n")
+    assert nodes == [SnapshotNode("generic", "", None)]
