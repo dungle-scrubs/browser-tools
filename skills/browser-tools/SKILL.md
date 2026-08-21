@@ -43,6 +43,16 @@ attach
 wait
 console-list
 network-list
+snapshot
+click
+fill
+wait-idle
+wait-stable
+detect
+frames
+storage
+screenshot
+screencast
 ```
 
 Two more forms do not appear in that list because they are not fixed argparse
@@ -141,12 +151,45 @@ browser**, not a bundled copy — so it matches exactly what the installed brows
 supports. Without a running instance it prints static usage. A `Domain` or
 `Domain.method` argument narrows the schema.
 
-Curated high-level actions (snapshot, click, fill, screenshot, and similar) are
-**not** their own verbs in this CLI. Reach them today through the passthrough by
-sending the underlying CDP methods; `references/passthrough-recipes.md` has
-worked examples. (The RFC reserves dedicated verbs for these in a later phase;
-until they exist, they are not documented here, because this skill matches the
-CLI as it actually is.)
+Curated high-level actions also have dedicated verbs (see "Curated tools"); the
+passthrough remains the escape hatch for any CDP method a curated verb does not
+cover. `references/passthrough-recipes.md` has worked examples.
+
+## Curated tools
+
+Curated verbs front the same high-level actions the frozen MCP surface exposes,
+each dispatching to that tool's own implementation over a live CDP session
+against the running instance. Every verb takes a leading `[INSTANCE]`, omittable
+when exactly one instance runs.
+
+```
+snapshot [INSTANCE]
+click [INSTANCE] --uid N
+fill [INSTANCE] --uid N --text T
+wait-idle [INSTANCE] [--timeout-ms MS] [--idle-ms MS]
+wait-stable [INSTANCE] [--timeout-ms MS] [--stable-ms MS]
+detect [INSTANCE]
+frames list [INSTANCE] | frames select PATTERN [INSTANCE] | frames reset [INSTANCE]
+storage get [INSTANCE] [--key PATTERN]
+screenshot [INSTANCE] [--path FILE] [--target SPEC | --url SUBSTRING]
+screencast start [INSTANCE] [--format jpeg|png] [--max-frames N] | screencast stop [INSTANCE] --dir DIR
+```
+
+- `snapshot` returns the native UID accessibility tree; `click --uid` / `fill
+  --uid` resolve that UID over the native interaction path. Each `click`/`fill`
+  takes a fresh snapshot first, so a UID printed by an earlier `snapshot`
+  resolves against the unchanged page in this one-shot invocation.
+- `wait-idle` / `wait-stable` map to the `wait_idle` / `wait_stable` tools.
+- `detect` runs the same post-navigation interstitial detection the daemon runs
+  automatically (`inspect_blocked` / `inspect_warn`).
+- `frames` maps to `list_frames` / `select_frame` / `reset_frame`; `storage get`
+  maps to `get_frame_storage`. Frame selection does not persist between one-shot
+  CLI processes, so `storage get --key PATTERN` selects the frame to read within
+  the single invocation.
+- `screenshot` maps to `take_screenshot` (CDP-native `Page.captureScreenshot`
+  with the blank-frame guard). `screencast start|stop` map to `screencast_start`
+  / `screencast_stop`; because capture is stateful, an end-to-end recording is
+  meaningful only against the persistent MCP front.
 
 ## Events
 
@@ -223,11 +266,10 @@ peers) — over the same merged dispatch the CLI uses. It is optional at import
 time and is not required for any CLI verb.
 
 Prefer the CLI. Use the MCP front only when the harness genuinely cannot invoke
-a command-line program. The two are two spellings of one surface; some CLI verbs
+a command-line program. The two are two spellings of one surface; the curated CLI verbs
 map to frozen MCP tool names (for example `frames list` ↔ `list_frames`,
-`screenshot` ↔ `take_screenshot`, `detect` ↔ `inspect_blocked`/`inspect_warn`),
-but those curated verbs are not in the current CLI verb set — see "Raw protocol
-and live help".
+`screenshot` ↔ `take_screenshot`, `detect` ↔ `inspect_blocked`/`inspect_warn`) —
+see "Curated tools".
 
 ## Keeping this skill honest
 
