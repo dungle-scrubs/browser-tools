@@ -686,6 +686,7 @@ class CDPHandler:
             try:
                 if name == "click":
                     result = await self._native_interactor.click_async(send, uid)
+                    assert result.point is not None  # click_steps always sets point
                     return make_text(f"Clicked uid={result.uid} at ({result.point[0]:.0f}, {result.point[1]:.0f}).")
                 value = str(arguments.get("value", ""))
                 result = await self._native_interactor.fill_async(send, uid, value)

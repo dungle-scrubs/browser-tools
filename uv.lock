@@ -146,6 +146,7 @@ profiling = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "camoufox", extra = ["geoip"] },
     { name = "pyright" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
@@ -164,6 +165,7 @@ provides-extras = ["camoufox", "profiling", "all"]
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "camoufox", extras = ["geoip"], specifier = ">=0.4.11" },
     { name = "pyright", specifier = ">=1.1.0" },
     { name = "pytest", specifier = ">=8.0.0" },
     { name = "pytest-asyncio", specifier = ">=1.3.0" },

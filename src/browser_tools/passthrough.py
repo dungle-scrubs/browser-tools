@@ -33,6 +33,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+from typing import Any
 
 from . import lifecycle
 from .core import protocol as core_protocol
@@ -161,10 +162,10 @@ def extract_target_flags(argv: list[str]) -> tuple[list[str], str | None, str | 
 async def _send_one_shot(
     port: int,
     method: str,
-    params: dict | None,
+    params: dict[str, Any] | None,
     target_spec: str | None,
     target_by: str | None,
-) -> dict:
+) -> dict[str, Any]:
     """Open a browser-level CDP connection, resolve a target, and send.
 
     Same ``core.cdp_client.CDPClient.send`` path a curated tool would use
@@ -174,9 +175,14 @@ async def _send_one_shot(
     browser_ws_url = get_ws_url(port=port, target_type="browser")
     async with CDPClient(ws_url=browser_ws_url) as cdp:
         targets_result = await cdp.send(method="Target.getTargets")
+        target_infos: list[dict[str, Any]] = targets_result.get("targetInfos", [])
+
+        def _target_id(t: dict[str, Any]) -> str:
+            return t.get("targetId", "")
+
         page_targets = sorted(
-            (t for t in targets_result.get("targetInfos", []) if t.get("type") == "page"),
-            key=lambda t: t.get("targetId", ""),
+            (t for t in target_infos if t.get("type") == "page"),
+            key=_target_id,
         )
         if not page_targets:
             raise LifecycleError("No page targets in browser")
@@ -210,7 +216,7 @@ def send(
     target: str | None = None,
     url: str | None = None,
     registry_path: str | None = None,
-) -> dict:
+) -> dict[str, Any]:
     """Send one raw CDP ``Domain.method`` call and return its JSON result.
 
     ``instance`` omitted resolves via ``lifecycle.resolve_single_instance``
@@ -227,7 +233,7 @@ def send(
     except InstanceNotFoundError as exc:
         raise LifecycleError(str(exc)) from exc
 
-    params: dict | None = None
+    params: dict[str, Any] | None = None
     if params_json is not None:
         try:
             parsed = json.loads(params_json)

@@ -35,6 +35,7 @@ import asyncio
 import contextlib
 import json
 import time
+from typing import Any
 
 from . import lifecycle
 from .core import attach as core_attach
@@ -170,7 +171,7 @@ async def wait_on_session(
     event: str,
     match: str | None,
     timeout: float,
-) -> dict:
+) -> dict[str, Any]:
     """Block on one CDP session for a matching event; SUBSCRIBE-FIRST.
 
     The ordering is the whole point (RFC-01 "wait design"): the event handler
@@ -185,9 +186,9 @@ async def wait_on_session(
     bounds the wait. Returns the ``{"method", "params"}`` event dict on match;
     raises ``WaitTimeout`` on deadline.
     """
-    buffer: asyncio.Queue[dict] = asyncio.Queue()
+    buffer: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
 
-    def handler(params: dict) -> None:
+    def handler(params: dict[str, Any]) -> None:
         buffer.put_nowait({"method": event, "params": params})
 
     # SUBSCRIBE FIRST. Registration is synchronous and precedes every await
@@ -232,7 +233,7 @@ async def _wait_one_shot(
     timeout: float,
     target_spec: str | None,
     target_by: str | None,
-) -> dict:
+) -> dict[str, Any]:
     """Open a browser-level connection, resolve a target, and wait on it.
 
     Mirrors ``passthrough._send_one_shot``'s connect/resolve/attach plumbing so
@@ -243,9 +244,14 @@ async def _wait_one_shot(
     browser_ws_url = get_ws_url(port=port, target_type="browser")
     async with CDPClient(ws_url=browser_ws_url) as cdp:
         targets_result = await cdp.send(method="Target.getTargets")
+        target_infos: list[dict[str, Any]] = targets_result.get("targetInfos", [])
+
+        def _target_id(t: dict[str, Any]) -> str:
+            return t.get("targetId", "")
+
         page_targets = sorted(
-            (t for t in targets_result.get("targetInfos", []) if t.get("type") == "page"),
-            key=lambda t: t.get("targetId", ""),
+            (t for t in target_infos if t.get("type") == "page"),
+            key=_target_id,
         )
         if not page_targets:
             raise NoPageError()
@@ -280,7 +286,7 @@ def wait(
     target: str | None = None,
     url: str | None = None,
     registry_path: str | None = None,
-) -> dict:
+) -> dict[str, Any]:
     """Block for one matching event and return its JSON dict.
 
     ``instance`` omitted resolves via ``lifecycle.resolve_single_instance``.
