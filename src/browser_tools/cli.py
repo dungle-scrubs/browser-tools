@@ -27,7 +27,7 @@ import argparse
 import json
 import sys
 
-from . import events, lifecycle, passthrough
+from . import events, lifecycle, list_verbs, passthrough
 from .lifecycle import LifecycleError
 from .passthrough import UsageError as PassthroughUsageError
 
@@ -42,7 +42,18 @@ EXIT_USAGE = 2
 #: resolves as an instance name if the registry knows it, else as a
 #: Domain.method); a token that fits neither shape falls through to argparse,
 #: which rejects it as an unknown verb, unchanged from before this ticket.
-_KNOWN_VERBS = {"launch", "status", "stop", "cleanup", "guide", "help", "attach", "wait"}
+_KNOWN_VERBS = {
+    "launch",
+    "status",
+    "stop",
+    "cleanup",
+    "guide",
+    "help",
+    "attach",
+    "wait",
+    "console-list",
+    "network-list",
+}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -120,6 +131,34 @@ def build_parser() -> argparse.ArgumentParser:
     )
     wait.add_argument("--target", metavar="SPEC", help="Select the page target (index or id)")
     wait.add_argument("--url", metavar="SUBSTRING", help="Select the page target by URL substring")
+
+    console_list = sub.add_parser(
+        "console-list", help="Collect console messages over a short attach window"
+    )
+    console_list.add_argument("instance", nargs="?", metavar="INSTANCE", help="Instance (omit if only one)")
+    console_list.add_argument("--target", metavar="SPEC", help="Select the page target (index or id)")
+    console_list.add_argument("--url", metavar="SUBSTRING", help="Select the page target by URL substring")
+    console_list.add_argument(
+        "--duration",
+        type=float,
+        default=list_verbs.DEFAULT_LIST_WINDOW_SECONDS,
+        metavar="SECONDS",
+        help="Collection window in seconds (default: 2.0)",
+    )
+
+    network_list = sub.add_parser(
+        "network-list", help="Collect network requests/responses over a short attach window"
+    )
+    network_list.add_argument("instance", nargs="?", metavar="INSTANCE", help="Instance (omit if only one)")
+    network_list.add_argument("--target", metavar="SPEC", help="Select the page target (index or id)")
+    network_list.add_argument("--url", metavar="SUBSTRING", help="Select the page target by URL substring")
+    network_list.add_argument(
+        "--duration",
+        type=float,
+        default=list_verbs.DEFAULT_LIST_WINDOW_SECONDS,
+        metavar="SECONDS",
+        help="Collection window in seconds (default: 2.0)",
+    )
 
     return parser
 
@@ -220,6 +259,32 @@ def _run(args: argparse.Namespace) -> int:
             registry_path=registry_path,
         )
         _print_json(event)
+        return EXIT_OK
+
+    if args.command == "console-list":
+        if args.target is not None and args.url is not None:
+            raise PassthroughUsageError("cannot specify both --target and --url")
+        messages = list_verbs.console_list(
+            instance=args.instance,
+            target=args.target,
+            url=args.url,
+            duration=args.duration,
+            registry_path=registry_path,
+        )
+        _print_json(messages)
+        return EXIT_OK
+
+    if args.command == "network-list":
+        if args.target is not None and args.url is not None:
+            raise PassthroughUsageError("cannot specify both --target and --url")
+        requests = list_verbs.network_list(
+            instance=args.instance,
+            target=args.target,
+            url=args.url,
+            duration=args.duration,
+            registry_path=registry_path,
+        )
+        _print_json(requests)
         return EXIT_OK
 
     # No verb given: usage.
