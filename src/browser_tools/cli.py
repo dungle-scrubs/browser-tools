@@ -27,7 +27,7 @@ import argparse
 import json
 import sys
 
-from . import lifecycle, passthrough
+from . import events, lifecycle, passthrough
 from .lifecycle import LifecycleError
 from .passthrough import UsageError as PassthroughUsageError
 
@@ -42,7 +42,7 @@ EXIT_USAGE = 2
 #: resolves as an instance name if the registry knows it, else as a
 #: Domain.method); a token that fits neither shape falls through to argparse,
 #: which rejects it as an unknown verb, unchanged from before this ticket.
-_KNOWN_VERBS = {"launch", "status", "stop", "cleanup", "guide", "help"}
+_KNOWN_VERBS = {"launch", "status", "stop", "cleanup", "guide", "help", "attach", "wait"}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -96,6 +96,30 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="[INSTANCE] [Domain.method]",
         help="Optional instance name and/or a Domain or Domain.method query",
     )
+
+    attach = sub.add_parser("attach", help="Stream subscribed CDP events as JSON lines")
+    attach.add_argument(
+        "args",
+        nargs="*",
+        metavar="[INSTANCE] +Domain.event ...",
+        help="Optional instance name followed by one or more +Domain.event subscriptions",
+    )
+    attach.add_argument("--target", metavar="SPEC", help="Select the page target (index or id)")
+    attach.add_argument("--url", metavar="SUBSTRING", help="Select the page target by URL substring")
+
+    wait = sub.add_parser("wait", help="Block until one matching CDP event fires")
+    wait.add_argument("instance", nargs="?", metavar="INSTANCE", help="Instance (omit if only one)")
+    wait.add_argument("--event", required=True, metavar="Domain.event", help="CDP event to wait for")
+    wait.add_argument("--match", metavar="SUBSTRING", help="Substring the event JSON must contain")
+    wait.add_argument(
+        "--timeout",
+        type=float,
+        default=events.DEFAULT_WAIT_TIMEOUT,
+        metavar="SECONDS",
+        help="Deadline in seconds (default: 30; 0 means no deadline)",
+    )
+    wait.add_argument("--target", metavar="SPEC", help="Select the page target (index or id)")
+    wait.add_argument("--url", metavar="SUBSTRING", help="Select the page target by URL substring")
 
     return parser
 
@@ -168,6 +192,34 @@ def _run(args: argparse.Namespace) -> int:
     if args.command == "help":
         instance, query = passthrough.resolve_help_args(args.args, registry_path=registry_path)
         passthrough.run_help(instance, query, registry_path=registry_path)
+        return EXIT_OK
+
+    if args.command == "attach":
+        if args.target is not None and args.url is not None:
+            raise PassthroughUsageError("cannot specify both --target and --url")
+        instance, subscriptions = events.resolve_attach_args(args.args)
+        events.run_attach(
+            instance=instance,
+            events=subscriptions,
+            target=args.target,
+            url=args.url,
+            registry_path=registry_path,
+        )
+        return EXIT_OK
+
+    if args.command == "wait":
+        if args.target is not None and args.url is not None:
+            raise PassthroughUsageError("cannot specify both --target and --url")
+        event = events.wait(
+            instance=args.instance,
+            event=args.event,
+            match=args.match,
+            timeout=args.timeout,
+            target=args.target,
+            url=args.url,
+            registry_path=registry_path,
+        )
+        _print_json(event)
         return EXIT_OK
 
     # No verb given: usage.
