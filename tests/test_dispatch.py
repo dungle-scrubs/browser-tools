@@ -44,17 +44,26 @@ class FakeBroker:
 
 
 class FakeCdpHandler:
-    """Records CDP calls and serves a configurable interstitial detection."""
+    """Records CDP + native calls and serves a configurable interstitial detection."""
 
     def __init__(self, mode: str = "full", detection: dict[str, Any] | None = None) -> None:
         self.mode = mode
         self.calls: list[tuple[str, dict[str, Any]]] = []
+        self.native_calls: list[tuple[str, dict[str, Any]]] = []
+        self.navigation_marks = 0
         self.detection = detection
         self.detection_runs = 0
 
     def call_tool(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
         self.calls.append((name, args))
         return {"jsonrpc": "2.0", "result": {"content": [{"type": "text", "text": "cdp-ok"}]}}
+
+    def call_native(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
+        self.native_calls.append((name, args))
+        return {"jsonrpc": "2.0", "result": {"content": [{"type": "text", "text": "native-ok"}]}}
+
+    def mark_native_navigation(self) -> None:
+        self.navigation_marks += 1
 
     def run_post_navigation_detection(self) -> dict[str, Any] | None:
         self.detection_runs += 1
@@ -64,8 +73,12 @@ class FakeCdpHandler:
         return True
 
 
-def _ctx(broker: FakeBroker | None = None, cdp: FakeCdpHandler | None = None) -> DispatchContext:
-    return DispatchContext(broker or FakeBroker(), cdp or FakeCdpHandler())  # type: ignore[arg-type]
+def _ctx(
+    broker: FakeBroker | None = None,
+    cdp: FakeCdpHandler | None = None,
+    engine: str = "native",
+) -> DispatchContext:
+    return DispatchContext(broker or FakeBroker(), cdp or FakeCdpHandler(), engine)  # type: ignore[arg-type]
 
 
 def _text(response: dict[str, Any]) -> str:
@@ -90,11 +103,12 @@ def test_inspect_gate_refuses_blocked_tool() -> None:
 
 def test_inspect_gate_allows_observation_tool() -> None:
     broker = FakeBroker()
-    response = dispatch_tool(
-        _request("take_snapshot"), 1, _ctx(broker, FakeCdpHandler(mode="inspect"))
-    )
-    # take_snapshot is a default-forwarded tool; it is allowed in inspect mode.
-    assert len(broker.requests) == 1
+    cdp = FakeCdpHandler(mode="inspect")
+    response = dispatch_tool(_request("take_snapshot"), 1, _ctx(broker, cdp))
+    # take_snapshot is an observation tool; it is allowed in inspect mode. Under
+    # the native default it now routes to the native backend, not the broker.
+    assert cdp.native_calls == [("take_snapshot", {})]
+    assert broker.requests == []
     assert response["id"] == 1
 
 
@@ -132,6 +146,59 @@ def test_default_tool_forwards_to_broker() -> None:
     assert broker.requests[0]["method"] == "tools/call"
     assert broker.requests[0]["params"] == request["params"]
     assert response["id"] == 2
+
+
+# --------------------------------------------------------------------------- #
+# Engine flip: native backend by default; --engine mcp keeps the Node path
+# --------------------------------------------------------------------------- #
+
+
+def test_take_snapshot_routes_to_native_backend_by_default() -> None:
+    broker = FakeBroker()
+    cdp = FakeCdpHandler()
+    response = dispatch_tool(_request("take_snapshot", {"compact": True}), 5, _ctx(broker, cdp))
+    assert cdp.native_calls == [("take_snapshot", {"compact": True})]
+    assert broker.requests == []
+    assert response["id"] == 5
+    assert _text(response) == "native-ok"
+
+
+def test_click_and_fill_route_to_native_backend_by_default() -> None:
+    for tool, args in (("click", {"uid": "1-2"}), ("fill", {"uid": "1-3", "value": "x"})):
+        broker = FakeBroker()
+        cdp = FakeCdpHandler()
+        dispatch_tool(_request(tool, args), 1, _ctx(broker, cdp))
+        assert cdp.native_calls == [(tool, args)]
+        assert broker.requests == []
+
+
+def test_native_tools_forward_to_broker_under_engine_mcp() -> None:
+    for tool, args in (
+        ("take_snapshot", {"compact": True}),
+        ("click", {"uid": "1-2"}),
+        ("fill", {"uid": "1-3", "value": "x"}),
+    ):
+        broker = FakeBroker()
+        cdp = FakeCdpHandler()
+        request = _request(tool, args)
+        response = dispatch_tool(request, 2, _ctx(broker, cdp, engine="mcp"))
+        # --engine mcp: the Node broker gets the call, unchanged; native untouched.
+        assert cdp.native_calls == []
+        assert len(broker.requests) == 1
+        assert broker.requests[0]["params"] == request["params"]
+        assert response["id"] == 2
+
+
+def test_native_navigation_invalidates_snapshot_uids() -> None:
+    cdp = FakeCdpHandler()
+    dispatch_tool(_request("navigate_page", {"url": "https://x"}), 1, _ctx(cdp=cdp))
+    assert cdp.navigation_marks == 1
+
+
+def test_navigation_does_not_mark_native_under_engine_mcp() -> None:
+    cdp = FakeCdpHandler()
+    dispatch_tool(_request("navigate_page", {"url": "https://x"}), 1, _ctx(cdp=cdp, engine="mcp"))
+    assert cdp.navigation_marks == 0
 
 
 # --------------------------------------------------------------------------- #

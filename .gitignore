@@ -27,3 +27,6 @@ Thumbs.db
 
 # Build
 *.whl
+
+# Agent worktrees (transient)
+.claude/worktrees/

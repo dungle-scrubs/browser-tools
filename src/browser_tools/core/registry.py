@@ -1,0 +1,620 @@
+# Vendored from chrome-agent v0.5.7 (https://github.com/captivus/chrome-agent).
+# Copyright (c) 2026 Corey Gallon.
+# SPDX-License-Identifier: MIT
+# See /NOTICE for the full vendoring notice.
+#
+# This file is a verbatim vendored copy; the only permitted modification is
+# rewriting intra-package imports to browser_tools.core. See RFC-01, section
+# "Vendoring rules".
+
+"""Instance registry for chrome-agent.
+
+Manages named browser instances: auto-allocates ports, derives names
+from directory basenames, stores name-to-port-to-PID mappings, supports
+lookup by name, and detects/cleans up stale entries.
+
+Registry data is stored under /tmp/chrome-agent/registry.json by default.
+All public functions accept an optional registry_path parameter for test
+isolation.
+"""
+
+import json
+import logging
+import os
+import re
+import shutil
+import socket
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+
+from .utils import process_is_ours
+
+logger = logging.getLogger(__name__)
+
+REGISTRY_PATH = "/tmp/chrome-agent/registry.json"
+BASE_PORT = 9222
+MAX_PORT = BASE_PORT + 100
+
+
+@dataclass
+class InstanceInfo:
+    """Information about a registered browser instance."""
+    name: str
+    port: int
+    pid: int
+    browser_version: str
+    user_data_dir: str = ""
+    alive: bool = True
+    pid_start: str | None = None
+
+
+class InstanceNotFoundError(Exception):
+    """Named instance not found in the registry."""
+    def __init__(self, name: str, available: list[str]):
+        self.name = name
+        self.available = available
+        if available:
+            avail_str = ", ".join(available)
+            super().__init__(
+                f"Instance '{name}' not found. Available: {avail_str}"
+            )
+        else:
+            super().__init__(
+                f"Instance '{name}' not found. No instances registered. "
+                f"Launch one with: chrome-agent launch"
+            )
+
+
+def _resolve_path(registry_path: str | None) -> str:
+    """Resolve registry path, using default if None."""
+    return registry_path if registry_path is not None else REGISTRY_PATH
+
+
+def _load_registry(registry_path: str) -> dict:
+    """Load the registry from disk. Returns empty dict on missing or corrupt file."""
+    if not os.path.exists(registry_path):
+        return {}
+    try:
+        with open(registry_path) as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError) as exc:
+        logger.warning("Corrupted registry at %s, resetting to empty: %s", registry_path, exc)
+        return {}
+
+
+def _save_registry(registry: dict, registry_path: str) -> None:
+    """Save the registry atomically via temp-file-and-rename."""
+    os.makedirs(os.path.dirname(registry_path), exist_ok=True)
+    tmp_path = registry_path + ".tmp"
+    with open(tmp_path, "w") as f:
+        json.dump(registry, f, indent=2)
+    os.rename(tmp_path, registry_path)
+
+
+def _port_is_listening(port: int) -> bool:
+    """Quick socket check for an active listener on a port."""
+    try:
+        sock = socket.create_connection(("localhost", port), timeout=0.25)
+        sock.close()
+        return True
+    except (ConnectionRefusedError, OSError):
+        return False
+
+
+def _cdp_port_claimants(port: int) -> set[str]:
+    """Profile dirs of every process claiming CDP ``port`` on its command line.
+
+    Scans ``/proc`` command lines for ``--remote-debugging-port=<port>``.
+    Chrome always carries that flag together with ``--user-data-dir``, and
+    browsers launched inside PID-namespaced sandboxes still appear here under
+    their real host PIDs -- so this attributes a listening port to profile
+    directories regardless of how the browser was launched.
+
+    Returns the SET of ``--user-data-dir`` values ("" for a claimant without
+    one). Multiple processes can claim the same port (observed in practice:
+    two browsers launched with the same ``--remote-debugging-port``; only one
+    won the bind) -- callers must ask "is OUR dir among the claimants", never
+    "who is THE owner". An empty set means nothing attributable was found
+    (non-Linux, or no claiming process).
+    """
+    needle = f"--remote-debugging-port={port}"
+    claimants: set[str] = set()
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return claimants
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        try:
+            with open(f"/proc/{entry}/cmdline", "rb") as f:
+                raw = f.read()
+        except OSError:
+            continue
+        # Chrome REWRITES its argv into a single space-joined string (one
+        # trailing NUL), so a plain NUL split yields one giant element.
+        # Normalize NULs to spaces and tokenize on whitespace -- correct for
+        # both encodings. (A --user-data-dir path containing spaces would
+        # truncate at the first space; chrome-agent's own session dirs never
+        # contain spaces, and a truncated foreign path simply mismatches,
+        # which is the conservative direction.)
+        tokens = raw.replace(b"\0", b" ").decode(errors="replace").split()
+        if needle not in tokens:
+            continue
+        for token in tokens:
+            if token.startswith("--user-data-dir="):
+                claimants.add(token.split("=", 1)[1])
+                break
+        else:
+            claimants.add("")
+    return claimants
+
+
+def _instance_is_alive(
+    pid: int,
+    port: int,
+    pid_start: str | None = None,
+    user_data_dir: str = "",
+) -> bool:
+    """Whether a registered instance is still usable.
+
+    Liveness ladder, strongest evidence first:
+
+    1. **PID identity** -- the recorded PID is a live process of ours
+       (signalable, and matching the recorded start-time token when one
+       exists). PermissionError means *not ours*: chrome-agent launches
+       Chrome as the invoking user, and a PID recorded from inside a
+       PID-namespaced sandbox (e.g. an agent CLI's bwrap) aliases to an
+       unrelated host process -- often a root kernel thread -- that a bare
+       existence check misreads as our live browser forever.
+    2. **Port dead** -- nothing listening means nothing drivable: dead.
+    3. **Port attribution** -- a bare listener is not proof: the recorded
+       port can since have been claimed by a *different* instance's browser
+       (observed in practice) or an unrelated service. Attribute the
+       listener via ``_cdp_port_claimants``; alive only if *this* entry's
+       profile dir is among the claimants. This also keeps the snap/wrapper
+       fork case alive (recorded PID exits immediately, real browser claims
+       the port with our profile).
+    4. **Unattributable listener** -- no ``/proc`` evidence either way:
+       treat as alive (conservative; never destroy on ambiguity).
+    """
+    if process_is_ours(pid=pid, expected_start=pid_start):
+        return True
+    if not _port_is_listening(port):
+        return False
+    claimants = _cdp_port_claimants(port=port)
+    if not claimants:
+        return True
+    return bool(user_data_dir) and user_data_dir in claimants
+
+
+def _derive_base_name(working_dir: str) -> str:
+    """Derive a cleaned base name from a directory path.
+
+    Lowercases, replaces spaces with hyphens, strips non-alphanumeric
+    characters (keeping hyphens and dots), collapses multiple hyphens,
+    and strips leading/trailing hyphens and dots.
+    Falls back to "chrome" for empty/unusable names.
+    """
+    basename = os.path.basename(working_dir)
+    cleaned = basename.lower()
+    cleaned = cleaned.replace(" ", "-")
+    cleaned = re.sub(r"[^a-z0-9.\-]", "", cleaned)
+    cleaned = re.sub(r"-{2,}", "-", cleaned)
+    cleaned = cleaned.strip("-.")
+    if not cleaned:
+        cleaned = "chrome"
+    return cleaned
+
+
+def _derive_unique_name(base_name: str, registry: dict) -> str:
+    """Find the next available suffixed name (base-01, base-02, etc.)."""
+    suffix = 1
+    while True:
+        candidate = f"{base_name}-{suffix:02d}"
+        if candidate not in registry:
+            return candidate
+        suffix += 1
+
+
+def allocate_port(registry: dict) -> int:
+    """Find the next available port starting from BASE_PORT.
+
+    Skips ports used by live registry entries and ports with active
+    listeners. Raises RuntimeError if no ports available in range.
+    """
+    used_ports = set()
+    for entry in registry.values():
+        # Identity check, not bare existence: a ghost entry whose namespace-local
+        # PID aliases to a foreign host process must not reserve a port forever.
+        # (Live browsers whose recorded PID died -- wrapper forks -- still hold
+        # their port via the active-listener check below.)
+        if process_is_ours(pid=entry["pid"], expected_start=entry.get("pid_start")):
+            used_ports.add(entry["port"])
+
+    port = BASE_PORT
+    while port < MAX_PORT:
+        if port not in used_ports and not _port_is_listening(port):
+            return port
+        port += 1
+
+    raise RuntimeError(f"No available ports in range {BASE_PORT}-{MAX_PORT}")
+
+
+def register(
+    working_dir: str,
+    pid: int,
+    browser_version: str,
+    user_data_dir: str,
+    port_override: int | None = None,
+    registry_path: str | None = None,
+    pid_start: str | None = None,
+) -> InstanceInfo:
+    """Register a new browser instance in the registry.
+
+    Derives the instance name from working_dir basename.
+    Auto-allocates a port unless port_override is specified.
+    """
+    path = _resolve_path(registry_path)
+    registry = _load_registry(path)
+
+    if port_override is not None:
+        port = port_override
+    else:
+        port = allocate_port(registry)
+
+    base_name = _derive_base_name(working_dir)
+    instance_name = _derive_unique_name(base_name, registry)
+
+    registry[instance_name] = {
+        "port": port,
+        "pid": pid,
+        "browser_version": browser_version,
+        "user_data_dir": user_data_dir,
+        "launched": datetime.now(timezone.utc).isoformat(),
+        "pid_start": pid_start,
+    }
+    _save_registry(registry, path)
+
+    logger.info("Registered instance %s on port %d (pid %d)", instance_name, port, pid)
+
+    return InstanceInfo(
+        name=instance_name,
+        port=port,
+        pid=pid,
+        browser_version=browser_version,
+        user_data_dir=user_data_dir,
+        pid_start=pid_start,
+    )
+
+
+def lookup(
+    instance_name: str,
+    registry_path: str | None = None,
+) -> InstanceInfo:
+    """Look up a registered instance by name.
+
+    Raises InstanceNotFoundError if the name is not in the registry.
+    Checks PID liveness and sets alive accordingly.
+    """
+    path = _resolve_path(registry_path)
+    registry = _load_registry(path)
+
+    if instance_name not in registry:
+        raise InstanceNotFoundError(
+            name=instance_name,
+            available=list(registry.keys()),
+        )
+
+    entry = registry[instance_name]
+    alive = _instance_is_alive(
+        entry["pid"],
+        entry["port"],
+        pid_start=entry.get("pid_start"),
+        user_data_dir=entry.get("user_data_dir", ""),
+    )
+
+    return InstanceInfo(
+        name=instance_name,
+        port=entry["port"],
+        pid=entry["pid"],
+        browser_version=entry.get("browser_version", ""),
+        user_data_dir=entry.get("user_data_dir", ""),
+        alive=alive,
+        pid_start=entry.get("pid_start"),
+    )
+
+
+def enumerate_instances(
+    registry_path: str | None = None,
+) -> list[InstanceInfo]:
+    """List all registered instances with liveness status."""
+    path = _resolve_path(registry_path)
+    registry = _load_registry(path)
+
+    results = []
+    for name, entry in registry.items():
+        alive = _instance_is_alive(
+            entry["pid"],
+            entry["port"],
+            pid_start=entry.get("pid_start"),
+            user_data_dir=entry.get("user_data_dir", ""),
+        )
+        results.append(InstanceInfo(
+            name=name,
+            port=entry["port"],
+            pid=entry["pid"],
+            browser_version=entry.get("browser_version", ""),
+            user_data_dir=entry.get("user_data_dir", ""),
+            alive=alive,
+            pid_start=entry.get("pid_start"),
+        ))
+    return results
+
+
+def instance_is_alive(info: InstanceInfo) -> bool:
+    """Whether the browser behind a resolved instance is still usable and ours.
+
+    Public wrapper over the ``_instance_is_alive`` liveness ladder for callers
+    that hold an ``InstanceInfo`` captured earlier (e.g. an attach observer
+    re-checking its own instance on a timer). A browser's pid/port/profile do
+    not change for its lifetime, so the fields captured at startup stay valid.
+    """
+    return _instance_is_alive(
+        info.pid,
+        info.port,
+        pid_start=info.pid_start,
+        user_data_dir=info.user_data_dir,
+    )
+
+
+def registration_status(
+    instance_name: str,
+    registry_path: str | None = None,
+) -> str:
+    """Whether an instance name is still registered -- a three-way verdict.
+
+    Distinguishes a genuine deregister from a transient/corrupt registry read,
+    which matters for any consumer that exits when its instance is retired: a
+    corrupt file must not be misread as "everyone is gone".
+
+    Returns:
+      "present"  -- the name is a key in a readable, parseable registry.
+      "retired"  -- the registry parsed to a NON-EMPTY dict and the name is
+                    absent. The other entries prove the file is healthy, so the
+                    absence is a real deregister, not a torn/empty read.
+      "unknown"  -- the registry is missing, empty ({}), or unparseable.
+                    Absence here is ambiguous and must NOT be read as retired.
+
+    Reads and parses the file directly rather than via ``_load_registry``,
+    which collapses a corrupt file to {} and would erase the corrupt-vs-empty
+    distinction this function exists to preserve.
+    """
+    path = _resolve_path(registry_path)
+    if not os.path.exists(path):
+        return "unknown"
+    try:
+        with open(path) as f:
+            registry = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return "unknown"
+    if not isinstance(registry, dict) or not registry:
+        return "unknown"
+    return "present" if instance_name in registry else "retired"
+
+
+def stop(
+    instance_name: str,
+    target_id: str | None = None,
+    registry_path: str | None = None,
+) -> str:
+    """Stop a browser instance or close a specific tab.
+
+    Without target_id: sends Browser.close to shut down the entire browser,
+    waits for the process to exit, removes the registry entry and session dir.
+
+    With target_id: sends Target.closeTarget for that specific tab. The
+    browser and other tabs remain alive.
+
+    Returns a status message describing what was done.
+    Raises InstanceNotFoundError if the instance name is not in the registry.
+    """
+    import asyncio
+    import time
+
+    path = _resolve_path(registry_path)
+    info = lookup(instance_name=instance_name, registry_path=registry_path)
+
+    if not info.alive:
+        # Already dead -- just clean up the registry entry
+        registry = _load_registry(path)
+        entry = registry.pop(instance_name, None)
+        if entry:
+            session_dir = entry.get("user_data_dir")
+            if session_dir and os.path.exists(session_dir):
+                shutil.rmtree(session_dir, ignore_errors=True)
+        _save_registry(registry, path)
+        logger.info("Instance %s was already dead, cleaned up", instance_name)
+        return f"{instance_name} was already dead, cleaned up"
+
+    if target_id is not None:
+        # Close a specific tab via Target.closeTarget
+        async def _close_target():
+            from .cdp_client import CDPClient, get_ws_url
+            browser_ws = get_ws_url(port=info.port, target_type="browser")
+            async with CDPClient(ws_url=browser_ws) as cdp:
+                result = await cdp.send(
+                    method="Target.closeTarget",
+                    params={"targetId": target_id},
+                )
+                return result.get("success", False)
+
+        success = asyncio.run(_close_target())
+        if success:
+            logger.info("Closed target %s in instance %s", target_id[:8], instance_name)
+            return f"Closed tab {target_id[:8]} in {instance_name}"
+        else:
+            return f"Failed to close tab {target_id[:8]} in {instance_name}"
+
+    # The entry reads alive, but before firing Browser.close at the recorded
+    # port, make sure the LISTENER is our browser. Two observed hazards: a
+    # ghost entry whose recorded port was since claimed by a different
+    # instance's browser, and a live-but-CDP-less browser that lost the bind
+    # race for its port (two launches given the same --remote-debugging-port).
+    # In both, Browser.close at the port would kill the WRONG browser.
+    claimants = _cdp_port_claimants(port=info.port)
+    port_is_ours = (not claimants) or (info.user_data_dir in claimants)
+    if not port_is_ours:
+        if process_is_ours(pid=info.pid, expected_start=info.pid_start):
+            # Our browser process is alive but does not own its recorded port:
+            # terminate it directly by (verified) PID instead of via CDP.
+            try:
+                os.kill(info.pid, 15)
+            except ProcessLookupError:
+                pass
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline:
+                if not process_is_ours(pid=info.pid, expected_start=info.pid_start):
+                    break
+                time.sleep(0.1)
+            outcome = (
+                f"Stopped {instance_name} (terminated by PID; port {info.port} "
+                f"was serving a different browser)"
+            )
+        else:
+            outcome = (
+                f"{instance_name} was stale (port {info.port} serves a different "
+                f"browser), cleaned up without touching it"
+            )
+        registry = _load_registry(path)
+        entry = registry.pop(instance_name, None)
+        if entry:
+            session_dir = entry.get("user_data_dir")
+            if session_dir and os.path.exists(session_dir):
+                shutil.rmtree(session_dir, ignore_errors=True)
+        _save_registry(registry, path)
+        logger.info("%s", outcome)
+        return outcome
+
+    # Close the entire browser via Browser.close
+    async def _close_browser():
+        from .cdp_client import CDPClient, get_ws_url
+        try:
+            browser_ws = get_ws_url(port=info.port, target_type="browser")
+            async with CDPClient(ws_url=browser_ws) as cdp:
+                await cdp.send(method="Browser.close")
+        except Exception as exc:
+            logger.warning("Browser.close failed for %s: %s", instance_name, exc)
+            # Verify the target immediately before the destructive fallback:
+            # only SIGTERM a PID that is verifiably OUR browser process. A
+            # stale or namespace-local PID may alias to an unrelated process
+            # (even a root kernel thread) that must never be signalled.
+            if process_is_ours(pid=info.pid, expected_start=info.pid_start):
+                try:
+                    os.kill(info.pid, 15)  # SIGTERM fallback
+                except ProcessLookupError:
+                    pass
+            else:
+                logger.warning(
+                    "Skipping SIGTERM fallback for %s: pid %d is not our browser",
+                    instance_name, info.pid,
+                )
+
+    asyncio.run(_close_browser())
+
+    # Wait for OUR process to exit (up to 5 seconds). The identity check also
+    # ends the wait immediately when the recorded PID was never ours (a foreign
+    # alias would otherwise read as "still running" for the whole window).
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        if not process_is_ours(pid=info.pid, expected_start=info.pid_start):
+            break
+        time.sleep(0.1)
+
+    # Clean up registry entry and session directory
+    registry = _load_registry(path)
+    entry = registry.pop(instance_name, None)
+    if entry:
+        session_dir = entry.get("user_data_dir")
+        if session_dir and os.path.exists(session_dir):
+            shutil.rmtree(session_dir, ignore_errors=True)
+    _save_registry(registry, path)
+
+    logger.info("Stopped instance %s", instance_name)
+    return f"Stopped {instance_name}"
+
+
+def _remove_session_dir(session_dir: str) -> None:
+    """Remove a session directory, retrying while Chrome releases its files.
+
+    Called right after a browser closes, where helper processes can briefly
+    outlive the listening socket and still hold profile files -- a single
+    ``rmtree(ignore_errors=True)`` would then leave the tree behind. Retry for
+    a few seconds until the directory is actually gone.
+    """
+    import time
+    for _ in range(20):
+        if not os.path.exists(session_dir):
+            return
+        shutil.rmtree(session_dir, ignore_errors=True)
+        if not os.path.exists(session_dir):
+            return
+        time.sleep(0.3)
+    # If Chrome is still releasing files after the retry window, leave the
+    # orphan -- the launch-time sweep (cleanup_sessions) reclaims it later.
+
+
+def deregister(
+    instance_name: str,
+    registry_path: str | None = None,
+) -> bool:
+    """Remove an instance from the registry and delete its session directory.
+
+    Unlike stop(), this does NOT contact the browser -- it is used by the
+    per-instance supervisor after the browser has already closed. Idempotent:
+    a no-op if the instance is not (or no longer) registered, so it is safe to
+    race with stop() / cleanup().
+
+    Returns True if an entry was removed.
+    """
+    path = _resolve_path(registry_path)
+    registry = _load_registry(path)
+    entry = registry.pop(instance_name, None)
+    if entry is None:
+        return False
+    _save_registry(registry, path)
+    session_dir = entry.get("user_data_dir")
+    if session_dir:
+        _remove_session_dir(session_dir)
+    logger.info("Deregistered instance %s (browser closed)", instance_name)
+    return True
+
+
+def cleanup(
+    registry_path: str | None = None,
+) -> list[str]:
+    """Remove stale registry entries and their session directories.
+
+    Returns the list of removed instance names.
+    """
+    path = _resolve_path(registry_path)
+    registry = _load_registry(path)
+
+    removed = []
+    for name, entry in list(registry.items()):
+        if not _instance_is_alive(
+            entry["pid"],
+            entry["port"],
+            pid_start=entry.get("pid_start"),
+            user_data_dir=entry.get("user_data_dir", ""),
+        ):
+            del registry[name]
+            removed.append(name)
+            session_dir = entry.get("user_data_dir")
+            if session_dir and os.path.exists(session_dir):
+                shutil.rmtree(session_dir, ignore_errors=True)
+            logger.info("Cleaned up stale instance %s", name)
+
+    _save_registry(registry, path)
+    return removed

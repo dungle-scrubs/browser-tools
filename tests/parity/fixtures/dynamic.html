@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Parity Dynamic Page</title>
+</head>
+<body>
+  <h1>Parity Dynamic Page</h1>
+  <p id="status">Loading deferred content...</p>
+  <div id="late"></div>
+  <script>
+    // Content appears after the initial paint. A parity run must settle the
+    // page before capturing, or the two engines will disagree on timing alone.
+    function addLateContent() {
+      document.getElementById("status").textContent = "Deferred content ready";
+      const late = document.getElementById("late");
+      const heading = document.createElement("h2");
+      heading.textContent = "Deferred section";
+      const button = document.createElement("button");
+      button.id = "late-button";
+      button.type = "button";
+      button.textContent = "Deferred button";
+      late.appendChild(heading);
+      late.appendChild(button);
+      late.setAttribute("data-ready", "true");
+    }
+    setTimeout(addLateContent, 150);
+  </script>
+</body>
+</html>

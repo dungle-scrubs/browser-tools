@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Parity Shadow DOM Page</title>
+</head>
+<body>
+  <h1>Parity Shadow DOM Page</h1>
+  <p>Host document. The interactive control below lives in an open shadow root.</p>
+  <div id="host"></div>
+  <script>
+    const host = document.getElementById("host");
+    const root = host.attachShadow({ mode: "open" });
+    root.innerHTML = `
+      <section aria-label="Shadow section">
+        <h2>Shadow heading</h2>
+        <label for="shadow-input">Shadow field</label>
+        <input id="shadow-input" type="text" value="" />
+        <button id="shadow-button" type="button">Shadow button</button>
+      </section>
+    `;
+  </script>
+</body>
+</html>

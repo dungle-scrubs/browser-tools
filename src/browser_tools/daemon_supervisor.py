@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import fcntl
 import json
+import os
 import shutil
 import socket
 import subprocess
@@ -68,6 +69,7 @@ class McpDaemonSupervisor:
         chrome_owned: bool = False,
         mode: str | None = None,
         stealth: bool = False,
+        engine: str = "native",
     ) -> DaemonClient:
         """Return a client connected to the daemon, spawning it if needed.
 
@@ -76,6 +78,9 @@ class McpDaemonSupervisor:
             chrome_owned: Whether the daemon may quit this Chrome on idle.
             mode: Access mode forwarded to the daemon.
             stealth: Whether stealth patches are forwarded to the daemon.
+            engine: Snapshot/UID backend forwarded to the daemon: ``"native"``
+                (the default, CDP-native) or ``"mcp"`` (the transitional Node
+                engine, RFC-01 Phase 2 escape hatch).
 
         Returns:
             A ``DaemonClient`` context manager ready to be entered with ``with``.
@@ -84,7 +89,7 @@ class McpDaemonSupervisor:
             MCPInvocationError: If the daemon cannot be started or reached.
         """
         command = get_mcp_command(browser_url=state.browser_url)
-        self.ensure(state, command, chrome_owned=chrome_owned, mode=mode, stealth=stealth)
+        self.ensure(state, command, chrome_owned=chrome_owned, mode=mode, stealth=stealth, engine=engine)
         assert state.daemon_socket is not None
         return DaemonClient(state.daemon_socket)
 
@@ -96,6 +101,7 @@ class McpDaemonSupervisor:
         chrome_owned: bool = False,
         mode: str | None = None,
         stealth: bool = False,
+        engine: str = "native",
     ) -> None:
         """Ensure the MCP daemon broker is running.
 
@@ -108,6 +114,7 @@ class McpDaemonSupervisor:
             chrome_owned: Whether the daemon may quit this Chrome on idle.
             mode: Access mode forwarded to the daemon.
             stealth: Whether stealth patches are forwarded to the daemon.
+            engine: Snapshot/UID backend forwarded to the daemon ("native"/"mcp").
 
         Raises:
             MCPInvocationError: If the daemon cannot be started.
@@ -132,6 +139,7 @@ class McpDaemonSupervisor:
                     chrome_owned=chrome_owned,
                     mode=mode,
                     stealth=stealth,
+                    engine=engine,
                 )
             finally:
                 fcntl.flock(lock_file, fcntl.LOCK_UN)
@@ -216,6 +224,7 @@ class McpDaemonSupervisor:
         chrome_owned: bool,
         mode: str | None,
         stealth: bool,
+        engine: str = "native",
     ) -> None:
         """Spawn a new MCP daemon broker process.
 
@@ -250,6 +259,11 @@ class McpDaemonSupervisor:
         # Pass stealth mode to daemon.
         if stealth:
             daemon_cmd.append("--stealth")
+        # Pass the snapshot/UID backend to the daemon. Native is the default
+        # (RFC-01 Phase 2 flip); only the transitional "mcp" engine needs the
+        # flag, so the default command stays unchanged.
+        if engine and engine != "native":
+            daemon_cmd.extend(["--engine", engine])
         # Pass the tool-launched Chrome to the daemon so it can quit it on idle
         # timeout or shutdown - but only when it is a private automation profile
         # we own. External / real-profile Chrome is left running.
@@ -328,6 +342,26 @@ def is_recoverable_daemon_error(exc: MCPInvocationError) -> bool:
     )
 
 
+#: The snapshot/UID dispatch backends. ``native`` is the CDP-native default
+#: (RFC-01 Phase 2 flip); ``mcp`` is the transitional Node engine kept as the
+#: escape hatch until its removal in packaging (#47).
+VALID_DISPATCH_ENGINES = ("native", "mcp")
+DEFAULT_DISPATCH_ENGINE = "native"
+DISPATCH_ENGINE_ENV = "BROWSER_TOOLS_ENGINE"
+
+
+def resolve_engine() -> str:
+    """Resolve the snapshot/UID backend for a new daemon.
+
+    Native is the default. Setting ``BROWSER_TOOLS_ENGINE=mcp`` routes snapshot
+    and UID interaction through the transitional Node engine (RFC-01's
+    ``--engine mcp`` escape hatch), which keeps the frozen MCP tool argument
+    shapes untouched. Any other value falls back to native.
+    """
+    value = (os.environ.get(DISPATCH_ENGINE_ENV) or DEFAULT_DISPATCH_ENGINE).strip().lower()
+    return value if value in VALID_DISPATCH_ENGINES else DEFAULT_DISPATCH_ENGINE
+
+
 def build_daemon_command(
     socket_path: str,
     pid_file: str,
@@ -361,7 +395,11 @@ def build_daemon_command(
 __all__ = [
     "BROWSER_TOOLS_ROOT",
     "DAEMON_STARTUP_TIMEOUT_SECONDS",
+    "DEFAULT_DISPATCH_ENGINE",
+    "DISPATCH_ENGINE_ENV",
+    "VALID_DISPATCH_ENGINES",
     "McpDaemonSupervisor",
     "build_daemon_command",
     "is_recoverable_daemon_error",
+    "resolve_engine",
 ]

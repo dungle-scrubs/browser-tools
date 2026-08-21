@@ -28,6 +28,8 @@ try:
         detect_with_retry,
     )
     from .mcp_response import make_error, make_text
+    from .native_interaction import NativeInteractor, UidResolutionError
+    from .native_snapshot import NativeSnapshotReader
     from .screencast import ScreencastRecorder
     from .tool_registry import CDP_TOOLS
 except ImportError:
@@ -44,6 +46,11 @@ except ImportError:
         make_error,
         make_text,
     )
+    from native_interaction import (  # type: ignore[import-untyped,no-redef]
+        NativeInteractor,
+        UidResolutionError,
+    )
+    from native_snapshot import NativeSnapshotReader  # type: ignore[import-untyped,no-redef]
     from screencast import ScreencastRecorder  # type: ignore[import-untyped,no-redef]
     from tool_registry import CDP_TOOLS  # type: ignore[import-untyped,no-redef]
 
@@ -274,11 +281,11 @@ class CDPRuntime:
     calls (``await_paint_ready``, ``run_post_navigation_detection``).
 
     The deep half of the CDP layer: a lot of machinery (thread + loop +
-    WebSocket connection + frame-tree subscriptions + stealth injection + two
-    marshal hooks) behind a small surface. :class:`CDPHandler` sits above it and
-    reaches the browser through ``client`` / ``frame_manager`` / ``screencast``
-    rather than owning them, so the two depths - runtime versus tool handlers -
-    have a seam instead of sharing one class.
+    WebSocket connection + frame-tree subscriptions + two marshal hooks) behind
+    a small surface. :class:`CDPHandler` sits above it and reaches the browser
+    through ``client`` / ``frame_manager`` / ``screencast`` rather than owning
+    them, so the two depths - runtime versus tool handlers - have a seam
+    instead of sharing one class.
     """
 
     def __init__(
@@ -292,7 +299,12 @@ class CDPRuntime:
         Args:
             browser_url: Chrome remote debugging URL.
             mode: Access mode ('full' or 'inspect').
-            stealth: Whether to inject stealth patches to reduce automation fingerprinting.
+            stealth: Accepted for MCP surface compatibility only. No JavaScript
+                is injected for fingerprint purposes (RFC-01, "Anti-detection":
+                each JS override is independently detectable). Chrome
+                fingerprinting is launch-flag profiles (``core/fingerprint.py``)
+                via ``launch --fingerprint``; Camoufox is the engine-level path
+                via ``launch --engine camoufox``.
         """
         self._browser_url = browser_url
         self._mode = mode
@@ -395,10 +407,6 @@ class CDPRuntime:
             await self._cdp_client.send("Page.enable")
             await self._cdp_client.send("Runtime.enable")
 
-            # Inject stealth patches before any page JS runs
-            if self._stealth:
-                await self._inject_stealth()
-
             # Get initial frame tree
             result = await self._cdp_client.send("Page.getFrameTree")
             if "frameTree" in result:
@@ -419,24 +427,6 @@ class CDPRuntime:
         except Exception:
             logger.exception("CDP connection failed for %s", self._browser_url)
             self._cdp_client = None
-
-    async def _inject_stealth(self) -> None:
-        """Inject stealth.js via Page.addScriptToEvaluateOnNewDocument.
-
-        Runs before any page JavaScript on every navigation. Reduces
-        automation fingerprinting by patching navigator.webdriver,
-        plugins, WebGL renderer, etc.
-        """
-        stealth_path = Path(__file__).parent / "stealth.js"
-        try:
-            script = stealth_path.read_text()
-            await self._cdp_client.send(
-                "Page.addScriptToEvaluateOnNewDocument",
-                {"source": script},
-            )
-        except Exception:
-            logger.debug("Stealth injection failed", exc_info=True)
-            # Non-fatal -- stealth is best-effort
 
     def stop(self) -> None:
         """Signal the background loop to stop."""
@@ -552,7 +542,8 @@ class CDPHandler:
         Args:
             browser_url: Chrome remote debugging URL.
             mode: Access mode ('full' or 'inspect').
-            stealth: Whether to inject stealth patches to reduce automation fingerprinting.
+            stealth: Accepted for MCP surface compatibility only; see
+                :class:`CDPRuntime`. No JavaScript is injected.
         """
         self._rt = CDPRuntime(browser_url, mode, stealth=stealth)
         # Tool name -> bound handler. Built from the class-level _CDP_HANDLERS
@@ -560,6 +551,14 @@ class CDPHandler:
         self._handlers: dict[str, Any] = {
             name: getattr(self, method) for name, method in _CDP_HANDLERS.items()
         }
+        # Native snapshot/UID backend (RFC-01 Phase 2, ticket #41). One reader
+        # per handler owns the snapshot lifecycle for this session; the
+        # interactor resolves a UID against the reader's current snapshot, so a
+        # ``take_snapshot`` populates the UIDs a subsequent ``click``/``fill``
+        # resolves. This is the default snapshot backend; ``--engine mcp`` keeps
+        # the Node path (these methods are then never reached).
+        self._native_reader = NativeSnapshotReader()
+        self._native_interactor = NativeInteractor(self._native_reader)
 
     # --- Daemon-facing surface: delegate to the runtime ---
     @property
@@ -631,6 +630,70 @@ class CDPHandler:
             logger.warning("call_tool(%s) error: %s", name, exc)
             future.cancel()
             return make_error(str(exc))
+
+    def call_native(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        """Execute a native snapshot/UID tool on the CDP loop (thread-safe).
+
+        The flipped default backend for ``take_snapshot`` / ``click`` / ``fill``
+        (RFC-01 Phase 2, #41). It runs the native read/interaction path built in
+        #39/#40 over this session's CDP client and returns the same bare MCP
+        envelope shape the Node engine returned, so the frozen tool response
+        shape is preserved. Mirrors :meth:`call_tool`'s loop scheduling.
+
+        Args:
+            name: One of ``take_snapshot``, ``click``, ``fill``.
+            arguments: Tool arguments (``uid``/``value`` for interactions).
+
+        Returns:
+            JSON-RPC style response dict.
+        """
+        if not self._loop or not self._loop.is_running():
+            return make_error("CDP handler not initialized")
+
+        future = asyncio.run_coroutine_threadsafe(self._dispatch_native(name, arguments), self._loop)
+        try:
+            return future.result(timeout=REQUEST_TIMEOUT_SECONDS)
+        except Exception as exc:
+            logger.warning("call_native(%s) error: %s", name, exc)
+            future.cancel()
+            return make_error(str(exc))
+
+    def mark_native_navigation(self) -> None:
+        """Invalidate the native snapshot's UIDs after a navigation.
+
+        A navigation replaces the document, so every outstanding native UID is
+        stale. Called by the daemon dispatcher after a navigation tool so a UID
+        from a pre-navigation snapshot no longer resolves (native's stability
+        contract). No-op cost when the Node engine is selected.
+        """
+        self._native_reader.note_navigation()
+
+    async def _dispatch_native(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        """Route a native tool call to the snapshot or interaction path."""
+        cdp, err = self._cdp_or_error()
+        if err is not None:
+            return err
+        send = cdp.send
+
+        if name == "take_snapshot":
+            snapshot = await self._native_reader.snapshot_stitched(send)
+            return make_text(snapshot.format_tree())
+
+        if name in ("click", "fill"):
+            uid = str(arguments.get("uid", "")).strip()
+            if not uid:
+                return make_error(f"E008: native '{name}' requires a 'uid' from a prior take_snapshot")
+            try:
+                if name == "click":
+                    result = await self._native_interactor.click_async(send, uid)
+                    return make_text(f"Clicked uid={result.uid} at ({result.point[0]:.0f}, {result.point[1]:.0f}).")
+                value = str(arguments.get("value", ""))
+                result = await self._native_interactor.fill_async(send, uid, value)
+                return make_text(f"Filled uid={result.uid} (value now {result.value_after!r}).")
+            except UidResolutionError as exc:
+                return make_error(str(exc))
+
+        return make_error(f"Unknown native tool: {name}")
 
     async def _dispatch_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         """Route a tool call to its registered handler.

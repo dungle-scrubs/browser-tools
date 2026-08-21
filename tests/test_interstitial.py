@@ -401,57 +401,47 @@ class TestDetectWithRetry:
         assert result["retries_used"] == 1
 
 
-class TestStealthScript:
-    """Tests for the stealth.js anti-fingerprinting script."""
+class TestStealthRemoved:
+    """RFC-01 "Anti-detection": stealth.js and its injection path are deleted.
 
-    def test_stealth_script_exists(self) -> None:
-        """stealth.js must exist alongside detect_interstitial.js."""
-        stealth_path = Path(__file__).resolve().parents[1] / "src" / "browser_tools" / "stealth.js"
-        assert stealth_path.exists(), f"stealth.js not found at {stealth_path}"
+    Each JS override was independently detectable, so the merged tool MUST NOT
+    inject JavaScript for fingerprint purposes. These tests replace the old
+    ``TestStealthScript`` suite, which asserted the deleted script's content
+    (navigator.webdriver/plugins/WebGL/chrome.runtime/permissions patches) --
+    that content no longer exists, so those assertions are meaningless. Chrome
+    fingerprinting is now launch-flag profiles (``core/fingerprint.py``);
+    Camoufox remains the engine-level path.
+    """
 
-    def test_stealth_patches_webdriver(self) -> None:
-        """Stealth script must patch navigator.webdriver."""
+    def test_stealth_script_does_not_exist(self) -> None:
+        """stealth.js must be gone, not merely unused."""
         stealth_path = Path(__file__).resolve().parents[1] / "src" / "browser_tools" / "stealth.js"
-        script = stealth_path.read_text()
-        assert "webdriver" in script
+        assert not stealth_path.exists(), f"stealth.js still present at {stealth_path}"
 
-    def test_stealth_patches_plugins(self) -> None:
-        """Stealth script must populate navigator.plugins."""
-        stealth_path = Path(__file__).resolve().parents[1] / "src" / "browser_tools" / "stealth.js"
-        script = stealth_path.read_text()
-        assert "plugins" in script
-        assert "PDF" in script
+    def test_cdp_handler_has_no_injection_method(self) -> None:
+        """The JS-injection call site (_inject_stealth) must be gone from cdp_handler."""
+        from browser_tools.cdp_handler import CDPRuntime
 
-    def test_stealth_patches_webgl(self) -> None:
-        """Stealth script must spoof WebGL renderer."""
-        stealth_path = Path(__file__).resolve().parents[1] / "src" / "browser_tools" / "stealth.js"
-        script = stealth_path.read_text()
-        assert "UNMASKED_RENDERER" in script or "0x9246" in script
+        assert not hasattr(CDPRuntime, "_inject_stealth")
 
-    def test_stealth_patches_chrome_runtime(self) -> None:
-        """Stealth script must ensure window.chrome.runtime exists."""
-        stealth_path = Path(__file__).resolve().parents[1] / "src" / "browser_tools" / "stealth.js"
-        script = stealth_path.read_text()
-        assert "chrome" in script
-        assert "runtime" in script
-
-    def test_stealth_patches_permissions(self) -> None:
-        """Stealth script must patch Permissions.query for notifications."""
-        stealth_path = Path(__file__).resolve().parents[1] / "src" / "browser_tools" / "stealth.js"
-        script = stealth_path.read_text()
-        assert "notifications" in script
-        assert "prompt" in script
-
-    def test_stealth_is_iife(self) -> None:
-        """Stealth script must be wrapped in an IIFE to avoid polluting globals."""
-        stealth_path = Path(__file__).resolve().parents[1] / "src" / "browser_tools" / "stealth.js"
-        script = stealth_path.read_text()
-        assert script.strip().startswith("(function") or script.strip().startswith("/**")
-        assert script.strip().endswith("();") or script.strip().endswith("})();")
+    def test_cdp_handler_source_has_no_stealth_script_injection(self) -> None:
+        """No addScriptToEvaluateOnNewDocument call in cdp_handler.py reads stealth.js."""
+        cdp_handler_path = (
+            Path(__file__).resolve().parents[1] / "src" / "browser_tools" / "cdp_handler.py"
+        )
+        source = cdp_handler_path.read_text()
+        assert "stealth.js" not in source
+        assert "addScriptToEvaluateOnNewDocument" not in source
 
 
 class TestStealthDaemonWiring:
-    """Tests for stealth flag propagation through daemon."""
+    """Tests for stealth flag propagation through daemon.
+
+    The ``stealth`` argument stays on the frozen MCP surface (RFC-01, "MCP
+    compatibility contract") -- removing it would change a tool's argument
+    shape. It is accepted and stored but no longer triggers any JS injection
+    (see TestStealthRemoved): the flag is now inert.
+    """
 
     def test_cdp_handler_accepts_stealth_flag(self) -> None:
         """CDPHandler should propagate the stealth flag to its CDP runtime."""

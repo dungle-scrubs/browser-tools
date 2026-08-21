@@ -14,6 +14,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from .extras import require_camoufox
+
 try:
     from camoufox.sync_api import Camoufox
 except ImportError:
@@ -91,6 +93,10 @@ class CamoufoxSession:
         """
         if self._browser is not None:
             return {"status": "already_running", "fingerprint": "existing session"}
+
+        # Fail with the exact install line when the 'camoufox' extra is absent,
+        # rather than a TypeError from calling the None fallback below.
+        require_camoufox(Camoufox)
 
         camoufox_kwargs: dict[str, Any] = {}
 

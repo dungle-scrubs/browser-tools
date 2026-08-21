@@ -90,6 +90,14 @@ except ImportError:
 IDLE_TIMEOUT_SECONDS = 30 * 60  # 30 minutes
 MCP_INIT_TIMEOUT_SECONDS = 60
 
+#: Snapshot/UID tools the native backend serves by default (RFC-01 Phase 2 flip,
+#: ticket #41). Under the default ``native`` engine these route to the CDP-native
+#: read/interaction path; under ``--engine mcp`` they fall through to the Node
+#: broker exactly as before. Their name, argument, and response shapes are
+#: unchanged -- only the backend behind them moves.
+NATIVE_DISPATCH_TOOLS = frozenset({"take_snapshot", "click", "fill"})
+DEFAULT_DISPATCH_ENGINE = "native"
+
 
 def _terminate_owned_chrome(
     chrome_pid: int | None,
@@ -133,6 +141,7 @@ def main(
     chrome_pid: int | None = None,
     chrome_owned: bool = False,
     chrome_user_data_dir: str | None = None,
+    engine: str = DEFAULT_DISPATCH_ENGINE,
 ) -> None:
     """Run the MCP daemon broker.
 
@@ -150,6 +159,7 @@ def main(
         chrome_pid: PID of the tool-launched Chrome to quit on idle/shutdown.
         chrome_owned: Whether that Chrome is a private profile safe to quit.
         chrome_user_data_dir: That Chrome's profile directory, for stale-lock cleanup.
+        engine: Snapshot/UID backend: ``"native"`` (default) or ``"mcp"`` (Node).
 
     Returns:
         None.
@@ -258,7 +268,7 @@ def main(
 
         last_activity[0] = time.time()
         try:
-            _handle_client(client_sock, broker, cdp_handler, last_activity)
+            _handle_client(client_sock, broker, cdp_handler, last_activity, engine)
         except Exception:
             logger.exception("Client handler failed")
         finally:
@@ -271,6 +281,7 @@ def _handle_client(
     broker: McpBroker,
     cdp_handler: CDPHandler,
     last_activity: list[float],
+    engine: str = DEFAULT_DISPATCH_ENGINE,
 ) -> None:
     """Handle one client connection with sequential JSON-RPC requests.
 
@@ -288,7 +299,7 @@ def _handle_client(
     """
     client_sock.settimeout(REQUEST_TIMEOUT_SECONDS)
     buf = b""
-    ctx = DispatchContext(broker, cdp_handler)
+    ctx = DispatchContext(broker, cdp_handler, engine)
 
     while True:
         try:
@@ -388,12 +399,16 @@ def _take_screenshot_with_paint_gate(
 class DispatchContext:
     """Collaborators needed to route and execute a tool call.
 
-    Built once per client connection; ``broker`` and ``cdp_handler`` do not
-    change between requests on the same connection.
+    Built once per client connection; ``broker``, ``cdp_handler``, and ``engine``
+    do not change between requests on the same connection.
     """
 
     broker: McpBroker
     cdp_handler: CDPHandler
+    #: Snapshot/UID backend for this connection. ``"native"`` (default) routes
+    #: take_snapshot/click/fill to the CDP-native path; ``"mcp"`` keeps the Node
+    #: engine (RFC-01 Phase 2 escape hatch, removed in #47).
+    engine: str = DEFAULT_DISPATCH_ENGINE
 
 
 def dispatch_tool(request: dict[str, Any], client_id: Any, ctx: DispatchContext) -> dict[str, Any]:
@@ -436,8 +451,15 @@ def dispatch_tool(request: dict[str, Any], client_id: Any, ctx: DispatchContext)
             "id": client_id,
         }
 
+    # Native snapshot/UID backend is the default (RFC-01 Phase 2 flip): route
+    # take_snapshot/click/fill to the CDP-native path. Under ``--engine mcp``
+    # this branch is skipped and the tools fall through to the Node broker,
+    # exactly as before the flip. The response shape is identical either way.
+    if ctx.engine != "mcp" and tool_name in NATIVE_DISPATCH_TOOLS:
+        response = ctx.cdp_handler.call_native(tool_name, arguments)
+        response["id"] = client_id
     # Route by registry flags.
-    if tool_name in CDP_TOOLS:
+    elif tool_name in CDP_TOOLS:
         response = ctx.cdp_handler.call_tool(tool_name, arguments)
         response["id"] = client_id
     elif tool_name in SCREENSHOT_GATE_TOOLS:
@@ -449,6 +471,10 @@ def dispatch_tool(request: dict[str, Any], client_id: Any, ctx: DispatchContext)
 
     # Post-navigation interstitial detection with auto-retry.
     if tool_name in NAVIGATION_TOOLS and "error" not in response:
+        # A navigation invalidates the native snapshot's UIDs (native's
+        # stability contract). No-op cost under the Node engine.
+        if ctx.engine != "mcp":
+            ctx.cdp_handler.mark_native_navigation()
         _append_interstitial_warning(response, ctx.cdp_handler)
 
     return response
@@ -538,6 +564,12 @@ if __name__ == "__main__":
         default=None,
         help="Profile directory of the owned Chrome, for stale-lock cleanup on quit",
     )
+    parser.add_argument(
+        "--engine",
+        default=DEFAULT_DISPATCH_ENGINE,
+        choices=["native", "mcp"],
+        help="Snapshot/UID backend: 'native' (default, CDP-native) or 'mcp' (Node engine)",
+    )
     args = parser.parse_args()
 
     try:
@@ -555,4 +587,5 @@ if __name__ == "__main__":
         args.chrome_pid,
         args.chrome_owned,
         args.chrome_user_data_dir,
+        args.engine,
     )

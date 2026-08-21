@@ -127,10 +127,21 @@ name = "browser-tools"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "websockets" },
+]
+
+[package.optional-dependencies]
+all = [
     { name = "aiohttp" },
     { name = "camoufox", extra = ["geoip"] },
     { name = "pillow" },
-    { name = "websockets" },
+]
+camoufox = [
+    { name = "aiohttp" },
+    { name = "camoufox", extra = ["geoip"] },
+]
+profiling = [
+    { name = "pillow" },
 ]
 
 [package.dev-dependencies]
@@ -143,11 +154,13 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "aiohttp", specifier = ">=3.14.1" },
-    { name = "camoufox", extras = ["geoip"], specifier = ">=0.4.11" },
-    { name = "pillow", specifier = ">=10.0.0" },
-    { name = "websockets", specifier = ">=14.0" },
+    { name = "aiohttp", marker = "extra == 'camoufox'", specifier = ">=3.14.1" },
+    { name = "browser-tools", extras = ["camoufox", "profiling"], marker = "extra == 'all'" },
+    { name = "camoufox", extras = ["geoip"], marker = "extra == 'camoufox'", specifier = ">=0.4.11" },
+    { name = "pillow", marker = "extra == 'profiling'", specifier = ">=10.0.0" },
+    { name = "websockets", specifier = ">=16.0" },
 ]
+provides-extras = ["camoufox", "profiling", "all"]
 
 [package.metadata.requires-dev]
 dev = [
