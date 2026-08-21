@@ -1,7 +1,17 @@
 #!/usr/bin/env python3
 """
 Chrome CPU Profiler via CDP
-Direct Chrome DevTools Protocol access for JavaScript profiling
+
+Keeps its own long-lived process and the ``browser-tools-profiler`` entry
+point (RFC-01, "Profiling"). Target discovery and CDP transport go through
+the vendored ``core.cdp_client`` -- the same client every other adapted
+module uses -- instead of a standalone websocket/protocol path. The
+``Profiler``/``Performance`` CDP calls go through the generated
+``core.domains`` bindings over that same client.
+
+This module MUST NOT depend on the MCP front or the daemon: it has no
+imports from ``cli``, ``mcp_server``, ``daemon_supervisor``, or
+``tool_registry``, and runs standalone against a browser's CDP port.
 """
 
 from __future__ import annotations
@@ -12,71 +22,65 @@ import logging
 import time
 from typing import Any
 
-import websockets
+from .core.cdp_client import CDPClient, get_ws_url
+from .core.domains.performance import Performance
+from .core.domains.profiler import Profiler
 
 logger = logging.getLogger(__name__)
 
 
-async def get_ws_url(port: int = 9222) -> str:
-    """Get WebSocket debugger URL from Chrome"""
-    import urllib.request
-
-    try:
-        with urllib.request.urlopen(f"http://localhost:{port}/json") as response:
-            tabs = json.loads(response.read())
-            for tab in tabs:
-                if tab.get("type") == "page":
-                    return tab["webSocketDebuggerUrl"]
-    except OSError as e:
-        raise RuntimeError(
-            f"Cannot connect to Chrome on port {port}. "
-            f"Launch Chrome with: --remote-debugging-port={port}\n{e}"
-        ) from e
-    raise RuntimeError("No page found in Chrome")
-
-
 class CDPProfiler:
-    """Chrome DevTools Protocol Profiler"""
+    """CPU profiling session over the vendored core CDP client.
+
+    Wraps ``core.cdp_client.CDPClient`` for the websocket transport and the
+    generated ``core.domains.profiler.Profiler`` / ``core.domains.performance.
+    Performance`` domain bindings for the CDP calls themselves.
+    """
 
     def __init__(self, ws_url: str) -> None:
         self.ws_url = ws_url
-        self.ws: Any = None
-        self.msg_id = 0
+        self.cdp: CDPClient | None = None
+        self.profiler: Profiler | None = None
+        self.performance: Performance | None = None
         self.profile: dict[str, Any] | None = None
 
-    async def connect(self):
-        self.ws = await websockets.connect(self.ws_url, max_size=100_000_000)
+    async def connect(self) -> None:
+        self.cdp = CDPClient(ws_url=self.ws_url)
+        await self.cdp.connect()
+        self.profiler = Profiler(self.cdp)
+        self.performance = Performance(self.cdp)
 
-    async def send(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        if self.ws is None:
+    def _require_profiler(self) -> Profiler:
+        if self.profiler is None:
             raise RuntimeError("Not connected")
-        self.msg_id += 1
-        msg: dict[str, Any] = {"id": self.msg_id, "method": method}
-        if params:
-            msg["params"] = params
-        await self.ws.send(json.dumps(msg))
+        return self.profiler
 
-        while True:
-            response = json.loads(await self.ws.recv())
-            if response.get("id") == self.msg_id:
-                if "error" in response:
-                    raise RuntimeError(f"CDP error: {response['error']}")
-                return response.get("result", {})
+    def _require_performance(self) -> Performance:
+        if self.performance is None:
+            raise RuntimeError("Not connected")
+        return self.performance
 
-    async def start_profiling(self):
-        """Enable and start the profiler"""
-        await self.send("Profiler.enable")
-        await self.send("Profiler.start")
+    async def start_profiling(self) -> None:
+        """Enable and start the profiler."""
+        profiler = self._require_profiler()
+        await profiler.enable()
+        await profiler.start()
 
     async def stop_profiling(self) -> dict[str, Any]:
-        """Stop profiler and return profile data"""
-        result = await self.send("Profiler.stop")
+        """Stop the profiler and return the collected profile."""
+        result = await self._require_profiler().stop()
         self.profile = result.get("profile", {})
         return self.profile if self.profile is not None else {}
 
+    async def enable_performance_metrics(self) -> None:
+        await self._require_performance().enable()
+
+    async def get_performance_metrics(self) -> dict[str, Any]:
+        return await self._require_performance().get_metrics()
+
     async def close(self) -> None:
-        if self.ws:
-            await self.ws.close()
+        if self.cdp is not None:
+            await self.cdp.close()
 
 
 def analyze_profile(profile: dict[str, Any], top_n: int = 20) -> list[dict[str, Any]]:
@@ -160,7 +164,7 @@ async def profile_page(duration: float = 5.0, port: int = 9222, format_type: str
     Returns:
         Formatted profile results
     """
-    ws_url = await get_ws_url(port)
+    ws_url = get_ws_url(port=port, target_type="page")
     profiler = CDPProfiler(ws_url)
 
     try:
@@ -200,14 +204,14 @@ async def profile_until_high_cpu(
     Returns:
         Formatted profile results
     """
-    ws_url = await get_ws_url(port)
+    ws_url = get_ws_url(port=port, target_type="page")
     profiler = CDPProfiler(ws_url)
 
     try:
         await profiler.connect()
 
         # Enable performance metrics
-        await profiler.send("Performance.enable")
+        await profiler.enable_performance_metrics()
         await profiler.start_profiling()
 
         logger.info("Profiling... waiting for CPU > %d%% (timeout: %ds)", threshold, timeout)
@@ -217,7 +221,7 @@ async def profile_until_high_cpu(
         last_timestamp = None
 
         while time.time() - start < timeout:
-            metrics = await profiler.send("Performance.getMetrics")
+            metrics = await profiler.get_performance_metrics()
 
             # Look for TaskDuration metric increase
             for metric in metrics.get("metrics", []):
