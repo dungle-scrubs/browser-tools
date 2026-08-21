@@ -153,16 +153,25 @@ class TestSingleInstanceRule:
 
 
 class TestLaunch:
-    def test_camoufox_engine_is_a_seam(self, registry_path):
-        with pytest.raises(LifecycleError) as exc:
-            lifecycle.launch(engine="camoufox", registry_path=registry_path)
-        assert "#36" in str(exc.value)
+    def test_camoufox_engine_launches_and_registers(self, registry_path, monkeypatch, tmp_path):
+        # #36 wires the camoufox engine. The detached runner is stubbed so no
+        # real browser starts; the launch must still register engine=camoufox.
+        monkeypatch.setenv(lifecycle.PROFILES_ENV_VAR, str(tmp_path / "profiles"))
+        monkeypatch.setattr(
+            lifecycle, "_spawn_camoufox_process", lambda user_data_dir, headless: (7777, "tok")
+        )
+        inst = lifecycle.launch(engine="camoufox", registry_path=registry_path)
+        assert inst.engine == "camoufox"
+        raw = _read(registry_path)
+        assert raw[inst.name]["engine"] == "camoufox"
+        assert raw[inst.name]["pid"] == 7777
 
     def test_unknown_engine_errors(self, registry_path):
         with pytest.raises(LifecycleError):
             lifecycle.launch(engine="firefox", registry_path=registry_path)
 
-    def test_chrome_launch_records_engine_and_profile(self, registry_path, monkeypatch):
+    def test_chrome_launch_records_engine_and_profile(self, registry_path, monkeypatch, tmp_path):
+        monkeypatch.setenv(lifecycle.PROFILES_ENV_VAR, str(tmp_path / "profiles"))
         captured = {}
 
         async def fake_launch_browser(**kwargs):
@@ -194,6 +203,8 @@ class TestLaunch:
         assert inst.profile == "work"
         assert captured["binary"] == "/bin/chrome-beta"
         assert captured["headless"] is True
+        # The profile bound a persistent user-data-dir under the profiles root.
+        assert captured["user_data_dir"] == str(tmp_path / "profiles" / "work")
         # The extended fields are persisted on the entry.
         raw = _read(registry_path)
         assert raw["my-site-01"]["engine"] == "chrome"
@@ -287,9 +298,17 @@ class TestCliFront:
         assert cli.main(["stop", "ghost"]) == cli.EXIT_OPERATIONAL
         assert "error:" in capsys.readouterr().err
 
-    def test_launch_camoufox_seam_is_operational_error(self, capsys):
-        assert cli.main(["launch", "--engine", "camoufox"]) == cli.EXIT_OPERATIONAL
-        assert "#36" in capsys.readouterr().err
+    def test_launch_camoufox_reports_engine(self, capsys, monkeypatch, tmp_path):
+        # The camoufox engine is wired (#36); stub the detached runner so the
+        # CLI path registers and prints engine=camoufox without a real browser.
+        monkeypatch.setenv(lifecycle.PROFILES_ENV_VAR, str(tmp_path / "profiles"))
+        monkeypatch.setattr(
+            lifecycle, "_spawn_camoufox_process", lambda user_data_dir, headless: (8888, "tok")
+        )
+        assert cli.main(["launch", "--engine", "camoufox"]) == cli.EXIT_OK
+        out = json.loads(capsys.readouterr().out)
+        assert out["engine"] == "camoufox"
+        assert out["pid"] == 8888
 
     def test_unknown_verb_argparse_exits_2(self):
         with pytest.raises(SystemExit) as exc:

@@ -5,9 +5,11 @@
 #
 # This file is an ADAPTED vendored module (RFC-01, "Adapted modules"): a
 # `binary` parameter was added to launch_browser so the CLI front can resolve
-# the --channel policy flag to a Chrome binary before launch. Intra-package
-# imports are rewritten to browser_tools.core. Otherwise unchanged from
-# chrome-agent v0.5.7. See RFC-01, section "Vendoring rules".
+# the --channel policy flag to a Chrome binary before launch, and (#36) a
+# `user_data_dir` parameter so the CLI front can bind a persistent per-profile
+# user-data-dir instead of the throwaway session dir. Intra-package imports are
+# rewritten to browser_tools.core. Otherwise unchanged from chrome-agent
+# v0.5.7. See RFC-01, section "Vendoring rules".
 
 """Browser launch and session management.
 
@@ -91,6 +93,7 @@ async def launch_browser(
     extra_args: list[str] | None = None,
     window_border: bool = True,
     binary: str | None = None,
+    user_data_dir: str | None = None,
 ) -> InstanceInfo:
     """Launch Chrome with CDP enabled and register as a named instance.
 
@@ -132,9 +135,15 @@ async def launch_browser(
         registry_data = _load_registry(reg_path)
         port = allocate_port(registry=registry_data)
 
-    # Phase 3: Prepare launch arguments
-    os.makedirs(_SESSION_ROOT, exist_ok=True)
-    session_dir = tempfile.mkdtemp(prefix="session-", dir=_SESSION_ROOT)
+    # Phase 3: Prepare launch arguments. The CLI front (#36) may bind a
+    # persistent per-profile user-data-dir; otherwise a throwaway session dir
+    # under _SESSION_ROOT is created (and later reaped on stop/cleanup).
+    if user_data_dir is not None:
+        session_dir = user_data_dir
+        os.makedirs(session_dir, exist_ok=True)
+    else:
+        os.makedirs(_SESSION_ROOT, exist_ok=True)
+        session_dir = tempfile.mkdtemp(prefix="session-", dir=_SESSION_ROOT)
 
     # Write Chrome preferences to disable password save prompts
     default_dir = os.path.join(session_dir, "Default")
