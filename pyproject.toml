@@ -98,6 +98,10 @@ dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=1.3.0",
     "ruff>=0.8.0",
+    # camoufox is a runtime extra, not a default dependency; it is in the dev
+    # group so pyright can resolve `camoufox.sync_api` when type-checking the
+    # optional Camoufox engine paths.
+    "camoufox[geoip]>=0.4.11",
 ]
 
 [tool.pytest.ini_options]
@@ -113,6 +117,10 @@ reportUnknownMemberType = false
 reportUnknownArgumentType = false
 reportUnknownVariableType = false
 reportUnknownParameterType = false
+# src/browser_tools/core/ is chrome-agent vendored verbatim (RFC-01, "Vendoring
+# rules"): only import rewrites are permitted inside it, so it is excluded from
+# type checking rather than annotated to this project's strict rules.
+exclude = ["src/browser_tools/core"]
 
 [tool.ruff]
 line-length = 100
