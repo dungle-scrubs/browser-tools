@@ -848,6 +848,19 @@ LIFECYCLE VERBS
   guide
       Print this manual.
 
+RAW PROTOCOL
+
+  [INSTANCE] Domain.method '{...json params...}' [--target SPEC]
+      Send any CDP method the installed browser supports straight to it and
+      print the JSON result. No curated tool needs to exist for the method.
+      INSTANCE may be omitted only when exactly one instance is running.
+
+  help [INSTANCE] [Domain.method]
+      With a running instance, print the live CDP protocol schema read from
+      that browser. Without one, print static usage. A bare leading token is
+      resolved as an instance name if the registry knows it, else as a
+      Domain.method.
+
 OUTPUT AND EXIT CODES
 
   Machine-readable output is JSON on stdout; diagnostics go to stderr.
