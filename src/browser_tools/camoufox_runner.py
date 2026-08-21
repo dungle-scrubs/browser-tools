@@ -25,6 +25,10 @@ import signal
 import sys
 import threading
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from types import FrameType
 
 READY_SENTINEL = ".camoufox-ready"
 
@@ -59,7 +63,7 @@ def main(argv: list[str] | None = None) -> int:
 
     stop = threading.Event()
 
-    def _handle_signal(_signum, _frame):
+    def _handle_signal(_signum: int, _frame: FrameType | None) -> None:
         stop.set()
 
     signal.signal(signal.SIGTERM, _handle_signal)

@@ -51,6 +51,7 @@ import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from .core import instance_status as core_status
 from .core import launcher as core_launcher
@@ -122,7 +123,7 @@ def registry_path_from_env() -> str | None:
 # ---------------------------------------------------------------------------
 
 
-def read_engine_profile(entry: dict) -> tuple[str, str | None]:
+def read_engine_profile(entry: dict[str, Any]) -> tuple[str, str | None]:
     """Read (engine, profile) from a raw registry entry with defaults.
 
     An entry missing the fields (written by the vendored code) reads as
@@ -148,17 +149,17 @@ def annotate_entry(
     call-site augmentation, not a modification of the verbatim registry module.
     Idempotent and a no-op if the entry is gone (raced with stop/cleanup).
     """
-    path = core_registry._resolve_path(registry_path)
-    reg = core_registry._load_registry(path)
+    path = core_registry._resolve_path(registry_path)  # pyright: ignore[reportPrivateUsage]
+    reg = core_registry._load_registry(path)  # pyright: ignore[reportPrivateUsage]
     entry = reg.get(name)
     if entry is None:
         return
     entry["engine"] = engine
     entry["profile"] = profile
-    core_registry._save_registry(reg, path)
+    core_registry._save_registry(reg, path)  # pyright: ignore[reportPrivateUsage]
 
 
-def _entry_to_ext(name: str, entry: dict) -> ExtendedInstance:
+def _entry_to_ext(name: str, entry: dict[str, Any]) -> ExtendedInstance:
     """Build an ``ExtendedInstance`` from a raw registry entry."""
     engine, profile = read_engine_profile(entry)
     return ExtendedInstance(
@@ -176,8 +177,8 @@ def _entry_to_ext(name: str, entry: dict) -> ExtendedInstance:
 
 def read_instances(registry_path: str | None = None) -> list[ExtendedInstance]:
     """Read every registry entry through the extended schema (no liveness)."""
-    path = core_registry._resolve_path(registry_path)
-    reg = core_registry._load_registry(path)
+    path = core_registry._resolve_path(registry_path)  # pyright: ignore[reportPrivateUsage]
+    reg = core_registry._load_registry(path)  # pyright: ignore[reportPrivateUsage]
     return [_entry_to_ext(name, entry) for name, entry in reg.items()]
 
 
@@ -212,7 +213,7 @@ def instance_is_live(inst: ExtendedInstance) -> bool:
     """
     if inst.engine == "camoufox":
         return _camoufox_is_alive(inst.pid, inst.pid_start, inst.user_data_dir)
-    return core_registry._instance_is_alive(
+    return core_registry._instance_is_alive(  # pyright: ignore[reportPrivateUsage]
         inst.pid,
         inst.port,
         pid_start=inst.pid_start,
@@ -254,7 +255,7 @@ def registry_is_parseable(registry_path: str | None = None) -> bool:
     unparseable file is the ``unknown`` state: nothing may be signalled or
     deleted on its basis (RFC-01, "Registry corruption is not retirement").
     """
-    path = core_registry._resolve_path(registry_path)
+    path = core_registry._resolve_path(registry_path)  # pyright: ignore[reportPrivateUsage]
     if not os.path.exists(path):
         return True
     try:
@@ -270,7 +271,7 @@ def _quarantine_registry(registry_path: str | None = None) -> str | None:
 
     Returns the quarantine path, or None when nothing was moved.
     """
-    path = core_registry._resolve_path(registry_path)
+    path = core_registry._resolve_path(registry_path)  # pyright: ignore[reportPrivateUsage]
     if not os.path.exists(path):
         return None
     quarantine = f"{path}.corrupt-{int(time.time())}"
@@ -417,10 +418,15 @@ def launch(
         user_data_dir = None
 
     if engine == "camoufox":
+        # Guaranteed above: either `profile is not None` (user_data_dir is the
+        # persistent per-profile dir) or `engine == "camoufox"` (user_data_dir
+        # is the ephemeral tempdir). The only None-producing branch requires
+        # both `profile is None` and `engine != "camoufox"`.
+        assert user_data_dir is not None
         return _launch_camoufox(
             profile=profile,
             headless=headless,
-            user_data_dir=user_data_dir,  # never None on this path
+            user_data_dir=user_data_dir,
             registry_path=registry_path,
         )
 
@@ -565,7 +571,7 @@ def _launch_camoufox(
 def status(
     instance: str | None = None,
     registry_path: str | None = None,
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """Registry status enriched with liveness, page targets, engine, profile.
 
     Liveness is engine-aware (Chrome via the vendored ladder, Camoufox via the
@@ -593,7 +599,7 @@ def status(
                 str(InstanceNotFoundError(name=instance, available=available))
             )
 
-    out: list[dict] = []
+    out: list[dict[str, Any]] = []
     for ext in instances:
         alive = instance_is_live(ext)
         targets = (
@@ -635,10 +641,10 @@ def _remove_entry(
     Profile-bound instances keep their dir (it is the profile's identity);
     unbound/ephemeral instances have it reaped.
     """
-    path = core_registry._resolve_path(registry_path)
-    reg = core_registry._load_registry(path)
+    path = core_registry._resolve_path(registry_path)  # pyright: ignore[reportPrivateUsage]
+    reg = core_registry._load_registry(path)  # pyright: ignore[reportPrivateUsage]
     reg.pop(name, None)
-    core_registry._save_registry(reg, path)
+    core_registry._save_registry(reg, path)  # pyright: ignore[reportPrivateUsage]
     if reap_dir and user_data_dir and os.path.exists(user_data_dir):
         shutil.rmtree(user_data_dir, ignore_errors=True)
 
@@ -652,7 +658,9 @@ def _terminate_verified(ext: ExtendedInstance) -> None:
     (recycled, or a namespace alias) is never signalled.
     """
     if ext.engine == "chrome":
-        claimants = core_registry._cdp_port_claimants(port=ext.port)
+        claimants = core_registry._cdp_port_claimants(  # pyright: ignore[reportPrivateUsage]
+            port=ext.port
+        )
         if (not claimants) or (ext.user_data_dir in claimants):
             _try_cdp_browser_close(ext.port)
     if process_is_ours(pid=ext.pid, expected_start=ext.pid_start):
@@ -791,8 +799,8 @@ def cleanup(registry_path: str | None = None) -> list[str]:
     # the entry hides them from the vendored sweep, which would otherwise rmtree
     # the profile dir. Their dirs live outside the vendored session root, so the
     # orphan sweep never touches them either.
-    path = core_registry._resolve_path(registry_path)
-    reg = core_registry._load_registry(path)
+    path = core_registry._resolve_path(registry_path)  # pyright: ignore[reportPrivateUsage]
+    reg = core_registry._load_registry(path)  # pyright: ignore[reportPrivateUsage]
     preserved_removed: list[str] = []
     for name, entry in list(reg.items()):
         ext = _entry_to_ext(name, entry)
@@ -800,7 +808,7 @@ def cleanup(registry_path: str | None = None) -> list[str]:
             del reg[name]
             preserved_removed.append(name)
     if preserved_removed:
-        core_registry._save_registry(reg, path)
+        core_registry._save_registry(reg, path)  # pyright: ignore[reportPrivateUsage]
 
     removed = core_launcher.cleanup_sessions(registry_path=registry_path)
     return preserved_removed + removed

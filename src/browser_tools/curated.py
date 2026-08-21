@@ -63,7 +63,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Generator
 
 from . import lifecycle
 from .cdp_handler import CDPHandler
@@ -119,7 +119,7 @@ def _resolve_port(instance: str | None, registry_path: str | None) -> int:
 
 
 @contextlib.contextmanager
-def _cdp_handler_session(port: int) -> Iterator[CDPHandler]:
+def _cdp_handler_session(port: int) -> Generator[CDPHandler]:
     """Yield a connected one-shot :class:`CDPHandler`, then tear it down.
 
     Builds the handler against ``http://127.0.0.1:{port}``, runs its event loop
@@ -397,9 +397,14 @@ async def _capture_screenshot(
     browser_ws_url = get_ws_url(port=port, target_type="browser")
     async with CDPClient(ws_url=browser_ws_url) as cdp:
         targets_result = await cdp.send(method="Target.getTargets")
+        target_infos: list[dict[str, Any]] = targets_result.get("targetInfos", [])
+
+        def _target_id(t: dict[str, Any]) -> str:
+            return t.get("targetId", "")
+
         page_targets = sorted(
-            (t for t in targets_result.get("targetInfos", []) if t.get("type") == "page"),
-            key=lambda t: t.get("targetId", ""),
+            (t for t in target_infos if t.get("type") == "page"),
+            key=_target_id,
         )
         if not page_targets:
             raise LifecycleError("No page targets in browser")

@@ -261,7 +261,7 @@ def drive_sync(
         call = next(steps)
         while True:
             result = send(call.method, call.params)
-            call = steps.send(result if isinstance(result, dict) else {})
+            call = steps.send(result)
     except StopIteration as stop:
         return stop.value  # type: ignore[no-any-return]
 
@@ -275,7 +275,7 @@ async def drive_async(
         call = next(steps)
         while True:
             result = await send(call.method, call.params)
-            call = steps.send(result if isinstance(result, dict) else {})
+            call = steps.send(result)
     except StopIteration as stop:
         return stop.value  # type: ignore[no-any-return]
 

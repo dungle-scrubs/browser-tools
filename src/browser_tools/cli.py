@@ -175,7 +175,9 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _add_curated_verbs(sub: argparse._SubParsersAction) -> None:
+def _add_curated_verbs(
+    sub: argparse._SubParsersAction[argparse.ArgumentParser],  # pyright: ignore[reportPrivateUsage]
+) -> None:
     """Add the curated tool verbs (RFC-01 #50).
 
     Each verb fronts an existing curated tool through ``browser_tools.curated``.
