@@ -274,11 +274,11 @@ class CDPRuntime:
     calls (``await_paint_ready``, ``run_post_navigation_detection``).
 
     The deep half of the CDP layer: a lot of machinery (thread + loop +
-    WebSocket connection + frame-tree subscriptions + stealth injection + two
-    marshal hooks) behind a small surface. :class:`CDPHandler` sits above it and
-    reaches the browser through ``client`` / ``frame_manager`` / ``screencast``
-    rather than owning them, so the two depths - runtime versus tool handlers -
-    have a seam instead of sharing one class.
+    WebSocket connection + frame-tree subscriptions + two marshal hooks) behind
+    a small surface. :class:`CDPHandler` sits above it and reaches the browser
+    through ``client`` / ``frame_manager`` / ``screencast`` rather than owning
+    them, so the two depths - runtime versus tool handlers - have a seam
+    instead of sharing one class.
     """
 
     def __init__(
@@ -292,7 +292,12 @@ class CDPRuntime:
         Args:
             browser_url: Chrome remote debugging URL.
             mode: Access mode ('full' or 'inspect').
-            stealth: Whether to inject stealth patches to reduce automation fingerprinting.
+            stealth: Accepted for MCP surface compatibility only. No JavaScript
+                is injected for fingerprint purposes (RFC-01, "Anti-detection":
+                each JS override is independently detectable). Chrome
+                fingerprinting is launch-flag profiles (``core/fingerprint.py``)
+                via ``launch --fingerprint``; Camoufox is the engine-level path
+                via ``launch --engine camoufox``.
         """
         self._browser_url = browser_url
         self._mode = mode
@@ -395,10 +400,6 @@ class CDPRuntime:
             await self._cdp_client.send("Page.enable")
             await self._cdp_client.send("Runtime.enable")
 
-            # Inject stealth patches before any page JS runs
-            if self._stealth:
-                await self._inject_stealth()
-
             # Get initial frame tree
             result = await self._cdp_client.send("Page.getFrameTree")
             if "frameTree" in result:
@@ -419,24 +420,6 @@ class CDPRuntime:
         except Exception:
             logger.exception("CDP connection failed for %s", self._browser_url)
             self._cdp_client = None
-
-    async def _inject_stealth(self) -> None:
-        """Inject stealth.js via Page.addScriptToEvaluateOnNewDocument.
-
-        Runs before any page JavaScript on every navigation. Reduces
-        automation fingerprinting by patching navigator.webdriver,
-        plugins, WebGL renderer, etc.
-        """
-        stealth_path = Path(__file__).parent / "stealth.js"
-        try:
-            script = stealth_path.read_text()
-            await self._cdp_client.send(
-                "Page.addScriptToEvaluateOnNewDocument",
-                {"source": script},
-            )
-        except Exception:
-            logger.debug("Stealth injection failed", exc_info=True)
-            # Non-fatal -- stealth is best-effort
 
     def stop(self) -> None:
         """Signal the background loop to stop."""
@@ -552,7 +535,8 @@ class CDPHandler:
         Args:
             browser_url: Chrome remote debugging URL.
             mode: Access mode ('full' or 'inspect').
-            stealth: Whether to inject stealth patches to reduce automation fingerprinting.
+            stealth: Accepted for MCP surface compatibility only; see
+                :class:`CDPRuntime`. No JavaScript is injected.
         """
         self._rt = CDPRuntime(browser_url, mode, stealth=stealth)
         # Tool name -> bound handler. Built from the class-level _CDP_HANDLERS
