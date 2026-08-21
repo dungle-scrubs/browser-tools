@@ -30,6 +30,10 @@ from typing import Any, Protocol, runtime_checkable
 from parity_comparison import PageCapture, SnapshotNode
 from parity_corpus import CORPUS, CorpusPage
 
+from browser_tools.native_interaction import (
+    DOM_RESOLVE_NODE,
+    RUNTIME_CALL_FUNCTION_ON,
+)
 from browser_tools.native_snapshot import NativeSnapshotReader
 
 # A line in Playwright ARIA-snapshot YAML:
@@ -111,6 +115,24 @@ _UID_TARGETS_SCRIPT = f"""
   for (const el of els) out['#' + el.id] = domPath(el);
   return out;
 }})()
+"""
+
+# callFunctionOn body run with ``this`` bound to a resolved element: returns the
+# element's id (or null) and its stable DOM path. Used by the native
+# interaction engine to normalize a UID's *resolved backend node* to the same
+# DOM path the JS UID-targets script computes, so the two are comparable.
+# Same interactive tag set as ``_UID_TARGETS_SCRIPT`` so the resolved native
+# targets are keyed and filtered identically to the baseline.
+_INTERACTIVE_SELECTOR = "a[id], button[id], input[id], select[id], textarea[id]"
+
+_BACKEND_TARGET_FN = f"""
+function() {{
+  const domPath = {_DOM_PATH_FN};
+  const el = this;
+  if (!el || el.nodeType !== 1) return null;
+  const interactive = el.matches('{_INTERACTIVE_SELECTOR}');
+  return {{ id: el.id || null, path: domPath(el), interactive: interactive }};
+}}
 """
 
 # JS that settles the page: waits for load, then a beat past the dynamic
@@ -203,6 +225,9 @@ class NativeCdpSession(Protocol):
     def evaluate(self, script: str) -> Any:  # pragma: no cover - protocol
         ...
 
+    def cdp_send(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:  # pragma: no cover - protocol
+        ...
+
 
 class NativeSnapshotEngine:
     """Capture a corpus page via the native CDP Accessibility-domain read path.
@@ -258,6 +283,85 @@ class NativeSnapshotEngine:
             url=page.file_url(),
             nodes=nodes,
             uid_targets={str(k): str(v) for k, v in dict(uid_targets).items()},
+            text=str(text),
+        )
+
+
+class NativeInteractionEngine:
+    """Capture a corpus page's UID targets via the native *interaction* path.
+
+    Ticket #40. Where :class:`NativeSnapshotEngine` computes ``uid_targets`` by
+    a JS ``querySelectorAll`` (isolating the node-set signal for #39), this
+    engine computes them the way ``click`` / ``fill`` actually resolve a UID:
+    take each interactive accessibility node's stable native UID, read its
+    backend DOM node (#39's binding), then resolve that backend node to its DOM
+    element and path over CDP (``DOM.resolveNode`` + ``Runtime.callFunctionOn``)
+    -- the same resolution the real interaction performs before dispatching.
+
+    The result is keyed by the element's ``#id`` (as the ARIA/Node baseline is),
+    so #41 can compare native UID resolution against the Node baseline under the
+    operator's ``uid_target`` dimension: agreement means a native UID resolves
+    to the same DOM node a Node-engine click/fill would.
+
+    The node set and text are captured exactly as :class:`NativeSnapshotEngine`
+    does, so this engine is a drop-in candidate for the whole operator.
+    """
+
+    name = "native-interaction"
+
+    def __init__(self, session: NativeCdpSession) -> None:
+        self._session = session
+        self._reader = NativeSnapshotReader()
+
+    def _resolve_backend_target(self, backend_node_id: int) -> dict[str, Any] | None:
+        """Resolve a backend DOM node to ``{id, path}`` over CDP, or None."""
+        resolved = self._session.cdp_send(DOM_RESOLVE_NODE, {"backendNodeId": backend_node_id})
+        object_id = resolved.get("object", {}).get("objectId")
+        if not object_id:
+            return None
+        call = self._session.cdp_send(
+            RUNTIME_CALL_FUNCTION_ON,
+            {"objectId": object_id, "functionDeclaration": _BACKEND_TARGET_FN, "returnByValue": True},
+        )
+        value = call.get("result", {}).get("value")
+        return value if isinstance(value, dict) else None
+
+    def capture(self, page: CorpusPage) -> PageCapture:
+        """Navigate to ``page`` and capture its snapshot and native UID targets."""
+        self._session.navigate(page.file_url())
+        self._reader.note_navigation()
+        self._session.evaluate(_SETTLE_SCRIPT)
+
+        ax_result = self._session.get_full_ax_tree()
+        snapshot = self._reader.build(ax_result)
+        nodes = tuple(
+            SnapshotNode(
+                role=node.role,
+                name=node.name,
+                value=node.value,
+                uid=node.uid,
+                backend_node=str(node.backend_node_id) if node.backend_node_id is not None else None,
+            )
+            for node in snapshot.visible_nodes()
+        )
+
+        # UID resolution through the native path: native UID -> backend node ->
+        # DOM element/path, keyed by the element id for cross-engine comparison.
+        uid_targets: dict[str, str] = {}
+        for node in snapshot.visible_nodes():
+            if node.backend_node_id is None:
+                continue
+            target = self._resolve_backend_target(node.backend_node_id)
+            if target and target.get("id") and target.get("interactive"):
+                uid_targets["#" + str(target["id"])] = str(target["path"])
+
+        text = self._session.evaluate("document.body.innerText")
+
+        return PageCapture(
+            page_id=page.page_id,
+            url=page.file_url(),
+            nodes=nodes,
+            uid_targets=uid_targets,
             text=str(text),
         )
 

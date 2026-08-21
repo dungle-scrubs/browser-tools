@@ -69,6 +69,11 @@ class PlaywrightChromiumSession:
         self._page = self._context.new_page()
         self._cdp = self._context.new_cdp_session(self._page)
         self._cdp.send("Accessibility.enable")
+        # The native interaction path (ticket #40) addresses nodes by
+        # backendNodeId over the DOM/Runtime domains; enable them and prime the
+        # DOM node map so backendNodeId -> object resolution is available.
+        self._cdp.send("DOM.enable")
+        self._cdp.send("Runtime.enable")
         return self
 
     def __exit__(self, *exc: object) -> None:
@@ -84,12 +89,25 @@ class PlaywrightChromiumSession:
 
     def navigate(self, url: str) -> None:
         self._page.goto(url, wait_until="load")
+        # A fresh document invalidates the CDP DOM node map; re-prime it so
+        # backendNodeId addressing (getBoxModel / resolveNode) stays valid.
+        self._cdp.send("DOM.getDocument", {"depth": -1})
 
     def get_full_ax_tree(self) -> dict[str, Any]:
         return self._cdp.send("Accessibility.getFullAXTree")
 
     def evaluate(self, script: str) -> Any:
         return self._page.evaluate(script)
+
+    def cdp_send(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Synchronous CDP transport for the native interaction path (#40).
+
+        Matches the ``send(method, params) -> result`` shape the native
+        interaction drivers expect, so the production
+        :class:`~browser_tools.native_interaction.NativeInteractor` runs
+        unchanged against this live session via its synchronous driver.
+        """
+        return self._cdp.send(method, params or {})
 
     # -- AriaSnapshotEngine ``call_tool`` interface ------------------------ #
 
