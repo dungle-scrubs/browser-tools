@@ -30,6 +30,8 @@ from typing import Any, Protocol, runtime_checkable
 from parity_comparison import PageCapture, SnapshotNode
 from parity_corpus import CORPUS, CorpusPage
 
+from browser_tools.native_snapshot import NativeSnapshotReader
+
 # A line in Playwright ARIA-snapshot YAML:
 #   <indent>- role "name" [attr=val]: value
 # name, the attribute block, and the trailing value are each optional.
@@ -174,6 +176,82 @@ class AriaSnapshotEngine:
 
         uid_targets = self._evaluate(_UID_TARGETS_SCRIPT) or {}
         text = self._evaluate("document.body.innerText")
+
+        return PageCapture(
+            page_id=page.page_id,
+            url=page.file_url(),
+            nodes=nodes,
+            uid_targets={str(k): str(v) for k, v in dict(uid_targets).items()},
+            text=str(text),
+        )
+
+
+class NativeCdpSession(Protocol):
+    """The subset of a live Chromium+CDP session the native engine drives.
+
+    A concrete adapter (``tests/parity/live_chromium.py``) drives Playwright
+    Chromium: ``navigate`` does ``page.goto``, ``get_full_ax_tree`` sends
+    ``Accessibility.getFullAXTree`` over a CDP session, ``evaluate`` runs JS.
+    """
+
+    def navigate(self, url: str) -> None:  # pragma: no cover - protocol
+        ...
+
+    def get_full_ax_tree(self) -> dict[str, Any]:  # pragma: no cover - protocol
+        ...
+
+    def evaluate(self, script: str) -> Any:  # pragma: no cover - protocol
+        ...
+
+
+class NativeSnapshotEngine:
+    """Capture a corpus page via the native CDP Accessibility-domain read path.
+
+    This is the Phase 2 candidate engine (ticket #39). It builds the node set
+    from :class:`~browser_tools.native_snapshot.NativeSnapshotReader` over a real
+    ``Accessibility.getFullAXTree``, assigning the module's stable UIDs. It is a
+    live engine: :meth:`capture` navigates a real Chromium via CDP.
+
+    Text and UID targets are computed with the *same* JS the ARIA engine uses
+    (``document.body.innerText`` and :data:`_UID_TARGETS_SCRIPT`), so those two
+    parity dimensions are directly comparable across engines and the operator's
+    signal is isolated to the snapshot node set -- exactly the surface the
+    native rebuild changes. The node set carries each node's native UID and
+    backend node for debugging; only ``(role, name, value)`` enters node-set
+    equality (see ``parity_comparison``).
+    """
+
+    name = "native-cdp"
+
+    def __init__(self, session: NativeCdpSession) -> None:
+        self._session = session
+        self._reader = NativeSnapshotReader()
+
+    def capture(self, page: CorpusPage) -> PageCapture:
+        """Navigate to ``page`` and capture its native snapshot, UIDs, and text."""
+        self._session.navigate(page.file_url())
+        # A navigation invalidates any prior snapshot's UIDs, matching the
+        # module's stability contract before the fresh snapshot is taken.
+        self._reader.note_navigation()
+
+        # Settle so dynamic / post-paint content is present before capture.
+        self._session.evaluate(_SETTLE_SCRIPT)
+
+        ax_result = self._session.get_full_ax_tree()
+        snapshot = self._reader.build(ax_result)
+        nodes = tuple(
+            SnapshotNode(
+                role=node.role,
+                name=node.name,
+                value=node.value,
+                uid=node.uid,
+                backend_node=str(node.backend_node_id) if node.backend_node_id is not None else None,
+            )
+            for node in snapshot.visible_nodes()
+        )
+
+        uid_targets = self._session.evaluate(_UID_TARGETS_SCRIPT) or {}
+        text = self._session.evaluate("document.body.innerText")
 
         return PageCapture(
             page_id=page.page_id,

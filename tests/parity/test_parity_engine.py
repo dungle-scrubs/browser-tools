@@ -13,7 +13,13 @@ from typing import Any
 
 from parity_comparison import SnapshotNode, compare_captures
 from parity_corpus import corpus_page
-from parity_engines import AriaSnapshotEngine, capture_corpus, parse_aria_snapshot
+from parity_engines import (
+    AriaSnapshotEngine,
+    NativeSnapshotEngine,
+    ParityEngine,
+    capture_corpus,
+    parse_aria_snapshot,
+)
 
 SAMPLE = """
 - heading "Parity Form Page" [level=1]
@@ -139,3 +145,98 @@ def test_capture_corpus_runs_all_pages():
 
     captures = capture_corpus(OnePageEngine())
     assert set(captures) == {"plain", "form", "iframe", "shadow", "dynamic"}
+
+
+# --------------------------------------------------------------------------- #
+# Native CDP snapshot engine against a fake CDP session (no browser)
+# --------------------------------------------------------------------------- #
+
+# A recorded Accessibility.getFullAXTree response for a small form page.
+_NATIVE_AX_TREE = {
+    "nodes": [
+        {"nodeId": "1", "role": {"value": "RootWebArea"}, "name": {"value": "Parity Form Page"},
+         "childIds": ["2", "3"], "backendDOMNodeId": 1, "ignored": False},
+        {"nodeId": "2", "parentId": "1", "role": {"value": "heading"},
+         "name": {"value": "Parity Form Page"}, "childIds": [], "backendDOMNodeId": 2, "ignored": False},
+        {"nodeId": "3", "parentId": "1", "role": {"value": "textbox"}, "name": {"value": "Email"},
+         "value": {"value": "current@value.com"}, "childIds": [], "backendDOMNodeId": 3, "ignored": False},
+        {"nodeId": "4", "parentId": "1", "role": {"value": "presentation"}, "name": {"value": ""},
+         "childIds": [], "backendDOMNodeId": 4, "ignored": True},
+    ]
+}
+
+
+class FakeNativeCdpSession:
+    """A native-engine session that returns canned CDP responses, no browser."""
+
+    def __init__(self, ax_tree: dict[str, Any], uid_targets: dict[str, str], text: str) -> None:
+        self._ax_tree = ax_tree
+        self._uid_targets = uid_targets
+        self._text = text
+        self.calls: list[str] = []
+
+    def navigate(self, url: str) -> None:
+        self.calls.append(f"navigate:{url}")
+
+    def get_full_ax_tree(self) -> dict[str, Any]:
+        self.calls.append("get_full_ax_tree")
+        return self._ax_tree
+
+    def evaluate(self, script: str) -> Any:
+        self.calls.append("evaluate")
+        if "document.body.innerText" in script:
+            return self._text
+        if "querySelectorAll" in script:
+            return self._uid_targets
+        return True  # settle script
+
+
+def test_native_engine_satisfies_the_parity_engine_protocol():
+    engine = NativeSnapshotEngine(FakeNativeCdpSession(_NATIVE_AX_TREE, {}, ""))
+    assert isinstance(engine, ParityEngine)
+    assert engine.name == "native-cdp"
+
+
+def test_native_capture_builds_node_set_from_ax_tree():
+    session = FakeNativeCdpSession(
+        _NATIVE_AX_TREE,
+        uid_targets={"#email": "html>body>form#signup>input#email"},
+        text="Parity Form Page",
+    )
+    capture = NativeSnapshotEngine(session).capture(corpus_page("form"))
+
+    assert capture.page_id == "form"
+    keys = [n.key() for n in capture.nodes]
+    assert ("heading", "Parity Form Page", None) in keys
+    assert ("textbox", "Email", "current@value.com") in keys
+    # The ignored node is excluded from the node set.
+    assert all(n.role != "presentation" for n in capture.nodes)
+    assert capture.uid_targets == {"#email": "html>body>form#signup>input#email"}
+    assert capture.text == "Parity Form Page"
+
+
+def test_native_capture_carries_native_uid_and_backend_node():
+    session = FakeNativeCdpSession(_NATIVE_AX_TREE, {}, "")
+    capture = NativeSnapshotEngine(session).capture(corpus_page("form"))
+    textbox = next(n for n in capture.nodes if n.role == "textbox")
+    # Native snapshot UIDs are "<generation>-<ordinal>"; the textbox is the
+    # third node in document order of the first snapshot after navigation.
+    assert textbox.uid == "2-3"
+    assert textbox.backend_node == "3"
+
+
+def test_native_capture_navigates_settles_then_reads_tree_in_order():
+    session = FakeNativeCdpSession(_NATIVE_AX_TREE, {}, "")
+    NativeSnapshotEngine(session).capture(corpus_page("plain"))
+    assert session.calls[0].startswith("navigate:")
+    assert "get_full_ax_tree" in session.calls
+    # A settle evaluate must run before the AX tree read.
+    assert session.calls.index("evaluate") < session.calls.index("get_full_ax_tree")
+
+
+def test_native_engine_is_self_parity_on_a_stable_page():
+    """The native candidate captured twice matches itself (flake-free shape)."""
+    make = lambda: NativeSnapshotEngine(
+        FakeNativeCdpSession(_NATIVE_AX_TREE, {"#email": "path-a"}, "Parity Form Page")
+    ).capture(corpus_page("form"))
+    assert compare_captures(make(), make()).matched
