@@ -3,9 +3,11 @@
 # SPDX-License-Identifier: MIT
 # See /NOTICE for the full vendoring notice.
 #
-# This file is a verbatim vendored copy; the only permitted modification is
-# rewriting intra-package imports to browser_tools.core. See RFC-01, section
-# "Vendoring rules".
+# This file is an ADAPTED vendored module (RFC-01, "Adapted modules"): a
+# `binary` parameter was added to launch_browser so the CLI front can resolve
+# the --channel policy flag to a Chrome binary before launch. Intra-package
+# imports are rewritten to browser_tools.core. Otherwise unchanged from
+# chrome-agent v0.5.7. See RFC-01, section "Vendoring rules".
 
 """Browser launch and session management.
 
@@ -88,6 +90,7 @@ async def launch_browser(
     registry_path: str | None = None,
     extra_args: list[str] | None = None,
     window_border: bool = True,
+    binary: str | None = None,
 ) -> InstanceInfo:
     """Launch Chrome with CDP enabled and register as a named instance.
 
@@ -106,8 +109,10 @@ async def launch_browser(
     Raises TimeoutError if the browser doesn't start within 30 seconds.
     """
 
-    # Phase 1: Find Chrome binary
-    binary = find_chrome_binary()
+    # Phase 1: Find Chrome binary (the CLI front may pre-resolve one from
+    # --channel; fall back to auto-detection when it did not).
+    if binary is None:
+        binary = find_chrome_binary()
     if binary is None:
         raise BrowserNotFoundError(searched_paths=_platform_candidates())
 

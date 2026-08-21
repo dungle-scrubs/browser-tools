@@ -48,7 +48,8 @@ Issues = "https://github.com/dungle-scrubs/browser-tools/issues"
 Changelog = "https://github.com/dungle-scrubs/browser-tools/blob/main/CHANGELOG.md"
 
 [project.scripts]
-browser-tools = "browser_tools.browser_tools_session:main"
+browser-tools = "browser_tools.cli:main"
+bt = "browser_tools.cli:main"
 browser-tools-profiler = "browser_tools.profiler:main"
 
 [build-system]
