@@ -85,6 +85,17 @@ and code should use these terms, not ad-hoc synonyms.
   wrapping. Lifecycle and session tools (`launch_camoufox`, `attach_browser`,
   ...) are not automation tools and stay routed in `browser_session`. The
   implementation module is `automation_backend`.
+- **One-Shot Session** - the connect/resolve-target/attach/detach protocol
+  for a single CLI invocation: open the browser-level CDP connection, list
+  and sort page targets, resolve one, attach an isolated `Target` session,
+  yield it to the caller, and always detach afterward, best-effort. One seam
+  shared by `passthrough` (raw `Domain.method` dispatch), `events` (`wait`),
+  `list_verbs` (`console-list`/`network-list`), and `curated` (`screenshot`)
+  instead of four byte-identical copies. A matching `cli_cdp_errors`
+  decorator maps the seam's own failures (ambiguous/not-found target, no
+  page, CDP, connection, unknown instance) to `LifecycleError`; each verb's
+  own errors (`UsageError`, `WaitTimeout`) pass through untouched. The
+  implementation module is `one_shot`.
 
 ## Mode vocabulary
 

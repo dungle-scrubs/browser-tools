@@ -342,10 +342,20 @@ def _make_fake_cdp_client_cls(shot_data="Zm9v", targets=None):
 
 @pytest.fixture
 def fake_screenshot_transport(monkeypatch):
+    """Install a fake CDPClient/get_ws_url pair over the one-shot seam.
+
+    The connect/getTargets/attach/detach protocol itself is proven once,
+    directly, in ``tests/test_one_shot.py``; this double exists so
+    ``screenshot``'s own capture-and-retry body can be exercised end to end
+    without a real browser.
+    """
+
     def _install(shot_data="Zm9v", targets=None):
         fake_cls, calls = _make_fake_cdp_client_cls(shot_data=shot_data, targets=targets)
-        monkeypatch.setattr(curated, "CDPClient", fake_cls)
-        monkeypatch.setattr(curated, "get_ws_url", lambda **kw: "ws://fake/browser")
+        monkeypatch.setattr("browser_tools.one_shot.CDPClient", fake_cls)
+        monkeypatch.setattr(
+            "browser_tools.one_shot.get_ws_url", lambda **kw: "ws://fake/browser"
+        )
         return calls
 
     return _install
@@ -356,13 +366,10 @@ class TestScreenshot:
         _seed(registry_path, {"only-01": _entry()})
         calls = fake_screenshot_transport(shot_data="Zm9v")
         out = curated.screenshot(instance=None, registry_path=registry_path)
-        methods = [c[0] for c in calls]
-        assert methods == [
-            "Target.getTargets",
-            "Target.attachToTarget",
-            "Page.captureScreenshot",
-            "Target.detachFromTarget",
-        ]
+        # The capture reached Page.captureScreenshot over the isolated
+        # session the one-shot seam opened (the seam's own connect/attach/
+        # detach protocol is proven once in tests/test_one_shot.py).
+        assert any(c[0] == "Page.captureScreenshot" for c in calls)
         assert out["data"] == "data:image/png;base64,Zm9v"
 
     def test_path_writes_file(self, registry_path, fake_screenshot_transport, tmp_path):

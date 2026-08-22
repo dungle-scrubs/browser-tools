@@ -68,13 +68,11 @@ if TYPE_CHECKING:
 from . import lifecycle
 from .cdp_handler import CDPHandler
 from .core import registry as core_registry
-from .core.attach import AmbiguousTargetError, TargetNotFoundError, resolve_target
-from .core.cdp_client import CDPClient, get_ws_url
-from .core.errors import CDPError
 from .core.registry import InstanceNotFoundError
 from .interstitial import format_interstitials
 from .lifecycle import LifecycleError
 from .mcp_response import extract_text_items
+from .one_shot import cli_cdp_errors, one_shot_page_session
 from .passthrough import UsageError
 from .screenshot_utils import (
     SCREENSHOT_BLANK_MAX_RETRIES,
@@ -387,58 +385,29 @@ async def _capture_screenshot(
 ) -> str:
     """Capture a full-page PNG over a one-shot session, guarding blank frames.
 
-    Opens the browser-level connection, resolves a page target, attaches an
-    isolated ``Target`` session (the same plumbing ``passthrough`` uses), and
-    sends ``Page.captureScreenshot``. Reuses the existing blank-frame guard
-    (``screenshot_utils.screenshot_looks_blank`` plus the shared retry budget):
-    a near-uniform capture is retried after a short delay, matching the daemon's
-    ``take_screenshot`` post-capture check.
+    Opens the one-shot page session (the same seam ``passthrough``/``events``
+    use) and sends ``Page.captureScreenshot`` over it. Reuses the existing
+    blank-frame guard (``screenshot_utils.screenshot_looks_blank`` plus the
+    shared retry budget): a near-uniform capture is retried after a short
+    delay, matching the daemon's ``take_screenshot`` post-capture check.
     """
-    browser_ws_url = get_ws_url(port=port, target_type="browser")
-    async with CDPClient(ws_url=browser_ws_url) as cdp:
-        targets_result = await cdp.send(method="Target.getTargets")
-        target_infos: list[dict[str, Any]] = targets_result.get("targetInfos", [])
-
-        def _target_id(t: dict[str, Any]) -> str:
-            return t.get("targetId", "")
-
-        page_targets = sorted(
-            (t for t in target_infos if t.get("type") == "page"),
-            key=_target_id,
-        )
-        if not page_targets:
-            raise LifecycleError("No page targets in browser")
-
-        target_id = resolve_target(
-            page_targets=page_targets, target_spec=target_spec, target_by=target_by
-        )
-        session_result = await cdp.send(
-            method="Target.attachToTarget",
-            params={"targetId": target_id, "flatten": True},
-        )
-        session_id = session_result["sessionId"]
-        try:
-            data = ""
-            for attempt in range(SCREENSHOT_BLANK_MAX_RETRIES + 1):
-                result = await cdp.send(
-                    method="Page.captureScreenshot",
-                    params={"format": "png"},
-                    session_id=session_id,
-                )
-                data = result.get("data", "")
-                if not data or not screenshot_looks_blank(data):
-                    return data
-                if attempt < SCREENSHOT_BLANK_MAX_RETRIES:
-                    await asyncio.sleep(SCREENSHOT_BLANK_RETRY_DELAY_SECONDS)
-            return data
-        finally:
-            with contextlib.suppress(Exception):
-                await cdp.send(
-                    method="Target.detachFromTarget",
-                    params={"sessionId": session_id},
-                )
+    async with one_shot_page_session(port, target_spec, target_by) as (cdp, session_id):
+        data = ""
+        for attempt in range(SCREENSHOT_BLANK_MAX_RETRIES + 1):
+            result = await cdp.send(
+                method="Page.captureScreenshot",
+                params={"format": "png"},
+                session_id=session_id,
+            )
+            data = result.get("data", "")
+            if not data or not screenshot_looks_blank(data):
+                return data
+            if attempt < SCREENSHOT_BLANK_MAX_RETRIES:
+                await asyncio.sleep(SCREENSHOT_BLANK_RETRY_DELAY_SECONDS)
+        return data
 
 
+@cli_cdp_errors
 def screenshot(
     *,
     instance: str | None,
@@ -451,7 +420,8 @@ def screenshot(
 
     ``--path`` writes the PNG to a file; without it the base64 ``data:`` URI is
     returned. ``--target``/``--url`` pick the page target, as on the passthrough
-    line. Target-resolution and CDP failures become ``LifecycleError`` (exit 1).
+    line. Target-resolution and CDP failures become ``LifecycleError`` (exit 1),
+    via ``@cli_cdp_errors``.
     """
     if target is not None and url is not None:
         raise UsageError("cannot specify both --target and --url")
@@ -466,14 +436,7 @@ def screenshot(
         spec = url
         target_by = "url"
 
-    try:
-        data = asyncio.run(_capture_screenshot(port, spec, target_by))
-    except (AmbiguousTargetError, TargetNotFoundError) as exc:
-        raise LifecycleError(str(exc)) from exc
-    except CDPError as exc:
-        raise LifecycleError(f"CDP error {exc.code}: {exc.message}") from exc
-    except ConnectionError as exc:
-        raise LifecycleError(str(exc)) from exc
+    data = asyncio.run(_capture_screenshot(port, spec, target_by))
 
     if not data:
         raise LifecycleError("no screenshot data returned from the browser")

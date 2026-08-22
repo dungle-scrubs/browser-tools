@@ -41,14 +41,13 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from .core.cdp_client import CDPClient
+
 from . import lifecycle
 from .core import registry as core_registry
-from .core.attach import AmbiguousTargetError, TargetNotFoundError, resolve_target
-from .core.cdp_client import CDPClient, get_ws_url
-from .core.errors import CDPError, NoPageError
-from .core.registry import InstanceNotFoundError
+from .core.errors import CDPError
 from .events import _target_slot  # pyright: ignore[reportPrivateUsage]
-from .lifecycle import LifecycleError
+from .one_shot import cli_cdp_errors, one_shot_page_session
 
 #: The collection window's default duration in seconds. Short by design: this
 #: is a snapshot-over-a-beat, not an open-ended stream (that is ``attach``'s
@@ -118,57 +117,6 @@ async def collect_on_session(
             cdp.off(event=event_name, callback=handler)
 
 
-async def _collect_one_shot(
-    port: int,
-    events: list[str],
-    duration: float,
-    target_spec: str | None,
-    target_by: str | None,
-) -> list[dict[str, Any]]:
-    """Open an isolated attach session and collect its events for a window.
-
-    Mirrors ``events._wait_one_shot``'s connect/resolve/attach plumbing: opens
-    a browser-level connection, resolves a page target, attaches an isolated
-    ``Target`` session (RFC-01 "console-list and network-list ... implemented
-    as thin wrappers over a short attach session"), then delegates to
-    ``collect_on_session``, detaching best-effort afterward.
-    """
-    browser_ws_url = get_ws_url(port=port, target_type="browser")
-    async with CDPClient(ws_url=browser_ws_url) as cdp:
-        targets_result = await cdp.send(method="Target.getTargets")
-        target_infos: list[dict[str, Any]] = targets_result.get("targetInfos", [])
-
-        def _target_id(t: dict[str, Any]) -> str:
-            return t.get("targetId", "")
-
-        page_targets = sorted(
-            (t for t in target_infos if t.get("type") == "page"),
-            key=_target_id,
-        )
-        if not page_targets:
-            raise NoPageError()
-
-        target_id = resolve_target(
-            page_targets=page_targets,
-            target_spec=target_spec,
-            target_by=target_by,
-        )
-
-        session_result = await cdp.send(
-            method="Target.attachToTarget",
-            params={"targetId": target_id, "flatten": True},
-        )
-        session_id = session_result["sessionId"]
-        try:
-            return await collect_on_session(cdp, session_id, events, duration)
-        finally:
-            with contextlib.suppress(Exception):
-                await cdp.send(
-                    method="Target.detachFromTarget",
-                    params={"sessionId": session_id},
-                )
-
-
 def _run_collection(
     *,
     instance: str | None,
@@ -178,25 +126,24 @@ def _run_collection(
     url: str | None,
     registry_path: str | None,
 ) -> list[dict[str, Any]]:
-    """Shared resolve-instance-and-collect path for both list verbs."""
+    """Shared resolve-instance-and-collect path for both list verbs.
+
+    Opens the one-shot page session (RFC-01 "console-list and network-list
+    ... implemented as thin wrappers over a short attach session") and
+    delegates to ``collect_on_session`` over it.
+    """
     if instance is None:
         instance = lifecycle.resolve_single_instance(registry_path=registry_path)
 
-    try:
-        info = core_registry.lookup(instance_name=instance, registry_path=registry_path)
-    except InstanceNotFoundError as exc:
-        raise LifecycleError(str(exc)) from exc
+    info = core_registry.lookup(instance_name=instance, registry_path=registry_path)
 
     spec, target_by = _target_slot(target, url)
 
-    try:
-        return asyncio.run(_collect_one_shot(info.port, events, duration, spec, target_by))
-    except (AmbiguousTargetError, TargetNotFoundError, NoPageError) as exc:
-        raise LifecycleError(str(exc)) from exc
-    except CDPError as exc:
-        raise LifecycleError(f"CDP error {exc.code}: {exc.message}") from exc
-    except ConnectionError as exc:
-        raise LifecycleError(str(exc)) from exc
+    async def _collect() -> list[dict[str, Any]]:
+        async with one_shot_page_session(info.port, spec, target_by) as (cdp, session_id):
+            return await collect_on_session(cdp, session_id, events, duration)
+
+    return asyncio.run(_collect())
 
 
 # ---------------------------------------------------------------------------
@@ -231,6 +178,7 @@ def _render_console_entry(item: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+@cli_cdp_errors
 def console_list(
     *,
     instance: str | None,
@@ -243,7 +191,7 @@ def console_list(
 
     ``instance`` omitted resolves via ``lifecycle.resolve_single_instance``.
     Instance, target-resolution, no-page, CDP, and connection failures all
-    become ``LifecycleError`` (CLI exit 1).
+    become ``LifecycleError`` (CLI exit 1), via ``@cli_cdp_errors``.
     """
     raw = _run_collection(
         instance=instance,
@@ -306,6 +254,7 @@ def _render_network_entries(raw: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [entries[request_id] for request_id in order]
 
 
+@cli_cdp_errors
 def network_list(
     *,
     instance: str | None,
@@ -318,7 +267,7 @@ def network_list(
 
     ``instance`` omitted resolves via ``lifecycle.resolve_single_instance``.
     Instance, target-resolution, no-page, CDP, and connection failures all
-    become ``LifecycleError`` (CLI exit 1).
+    become ``LifecycleError`` (CLI exit 1), via ``@cli_cdp_errors``.
     """
     raw = _run_collection(
         instance=instance,

@@ -92,12 +92,20 @@ def make_fake_cdp_client_cls(responder=None, targets=None):
 
 @pytest.fixture
 def fake_transport(monkeypatch):
-    """Install a fake CDPClient/get_ws_url pair and return its call log."""
+    """Install a fake CDPClient/get_ws_url pair over the one-shot seam.
+
+    The connect/getTargets/attach/detach protocol itself is now proven once,
+    directly, in ``tests/test_one_shot.py``; this double exists so ``send``'s
+    own body (params reaching ``cdp.send``, verb-specific errors) can still be
+    exercised without a real browser.
+    """
 
     def _install(responder=None, targets=None):
         fake_cls, calls = make_fake_cdp_client_cls(responder=responder, targets=targets)
-        monkeypatch.setattr(passthrough, "CDPClient", fake_cls)
-        monkeypatch.setattr(passthrough, "get_ws_url", lambda **kw: "ws://fake/browser")
+        monkeypatch.setattr("browser_tools.one_shot.CDPClient", fake_cls)
+        monkeypatch.setattr(
+            "browser_tools.one_shot.get_ws_url", lambda **kw: "ws://fake/browser"
+        )
         return calls
 
     return _install
@@ -256,16 +264,10 @@ class TestSend:
             "echoed_method": "Page.navigate",
             "echoed_params": {"url": "https://example.com"},
         }
-        # The parsed params reached CDPClient.send, over an isolated session,
-        # via the same call path Target.attachToTarget just opened.
-        methods_sent = [c[0] for c in calls]
-        assert methods_sent == [
-            "Target.getTargets",
-            "Target.attachToTarget",
-            "Page.navigate",
-            "Target.detachFromTarget",
-        ]
-        nav_call = calls[2]
+        # The parsed params reached CDPClient.send over the isolated session
+        # the one-shot seam opened (the seam's own connect/attach/detach
+        # protocol is proven once in tests/test_one_shot.py).
+        nav_call = next(c for c in calls if c[0] == "Page.navigate")
         assert nav_call == ("Page.navigate", {"url": "https://example.com"}, "S1")
 
     def test_no_params_sends_none(self, registry_path, fake_transport):
