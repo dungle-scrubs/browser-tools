@@ -335,9 +335,21 @@ def _make_wait_transport(fired, targets=None):
 
 @pytest.fixture
 def wait_transport(monkeypatch):
+    """Install a fake CDPClient/get_ws_url pair over the one-shot seam.
+
+    The connect/getTargets/attach/detach protocol itself is proven once,
+    directly, in ``tests/test_one_shot.py``; this double exists so
+    ``wait``'s own subscribe-first body can be exercised end to end without a
+    real browser.
+    """
+
     def _install(fired, targets=None):
-        monkeypatch.setattr(events, "CDPClient", _make_wait_transport(fired, targets))
-        monkeypatch.setattr(events, "get_ws_url", lambda **kw: "ws://fake/browser")
+        monkeypatch.setattr(
+            "browser_tools.one_shot.CDPClient", _make_wait_transport(fired, targets)
+        )
+        monkeypatch.setattr(
+            "browser_tools.one_shot.get_ws_url", lambda **kw: "ws://fake/browser"
+        )
 
     return _install
 
@@ -393,8 +405,12 @@ class TestCliFront:
         monkeypatch.setenv(lifecycle.REGISTRY_ENV_VAR, self._registry_path)
 
     def _install_wait(self, monkeypatch, fired, targets=None):
-        monkeypatch.setattr(events, "CDPClient", _make_wait_transport(fired, targets))
-        monkeypatch.setattr(events, "get_ws_url", lambda **kw: "ws://fake/browser")
+        monkeypatch.setattr(
+            "browser_tools.one_shot.CDPClient", _make_wait_transport(fired, targets)
+        )
+        monkeypatch.setattr(
+            "browser_tools.one_shot.get_ws_url", lambda **kw: "ws://fake/browser"
+        )
 
     def test_wait_match_prints_json_exit_ok(self, monkeypatch, capsys):
         _seed(self._registry_path, {"only-01": _entry()})

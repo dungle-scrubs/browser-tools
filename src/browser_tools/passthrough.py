@@ -31,18 +31,15 @@ New layer-4 code, alongside ``cli.py`` and ``lifecycle.py``. It owns:
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 from typing import Any
 
 from . import lifecycle
 from .core import protocol as core_protocol
 from .core import registry as core_registry
-from .core.attach import AmbiguousTargetError, TargetNotFoundError, resolve_target
-from .core.cdp_client import CDPClient, get_ws_url
-from .core.errors import CDPError
 from .core.registry import InstanceNotFoundError
 from .lifecycle import LifecycleError
+from .one_shot import cli_cdp_errors, one_shot_page_session
 
 
 class UsageError(Exception):
@@ -159,55 +156,7 @@ def extract_target_flags(argv: list[str]) -> tuple[list[str], str | None, str | 
 # ---------------------------------------------------------------------------
 
 
-async def _send_one_shot(
-    port: int,
-    method: str,
-    params: dict[str, Any] | None,
-    target_spec: str | None,
-    target_by: str | None,
-) -> dict[str, Any]:
-    """Open a browser-level CDP connection, resolve a target, and send.
-
-    Same ``core.cdp_client.CDPClient.send`` path a curated tool would use
-    (RFC-01 invariant). Attaches an isolated ``Target`` session for the call
-    and always detaches afterward, best-effort.
-    """
-    browser_ws_url = get_ws_url(port=port, target_type="browser")
-    async with CDPClient(ws_url=browser_ws_url) as cdp:
-        targets_result = await cdp.send(method="Target.getTargets")
-        target_infos: list[dict[str, Any]] = targets_result.get("targetInfos", [])
-
-        def _target_id(t: dict[str, Any]) -> str:
-            return t.get("targetId", "")
-
-        page_targets = sorted(
-            (t for t in target_infos if t.get("type") == "page"),
-            key=_target_id,
-        )
-        if not page_targets:
-            raise LifecycleError("No page targets in browser")
-
-        target_id = resolve_target(
-            page_targets=page_targets,
-            target_spec=target_spec,
-            target_by=target_by,
-        )
-
-        session_result = await cdp.send(
-            method="Target.attachToTarget",
-            params={"targetId": target_id, "flatten": True},
-        )
-        session_id = session_result["sessionId"]
-        try:
-            return await cdp.send(method=method, params=params, session_id=session_id)
-        finally:
-            with contextlib.suppress(Exception):
-                await cdp.send(
-                    method="Target.detachFromTarget",
-                    params={"sessionId": session_id},
-                )
-
-
+@cli_cdp_errors
 def send(
     *,
     instance: str | None,
@@ -223,15 +172,13 @@ def send(
     (fails naming the candidates unless exactly one instance is registered).
     ``params_json`` must parse to a JSON object; a parse failure or a
     non-object payload is a ``UsageError`` (CLI exit 2). CDP-level and
-    target-resolution failures become ``LifecycleError`` (CLI exit 1).
+    target-resolution failures become ``LifecycleError`` (CLI exit 1), via
+    ``@cli_cdp_errors``.
     """
     if instance is None:
         instance = lifecycle.resolve_single_instance(registry_path=registry_path)
 
-    try:
-        info = core_registry.lookup(instance_name=instance, registry_path=registry_path)
-    except InstanceNotFoundError as exc:
-        raise LifecycleError(str(exc)) from exc
+    info = core_registry.lookup(instance_name=instance, registry_path=registry_path)
 
     params: dict[str, Any] | None = None
     if params_json is not None:
@@ -252,14 +199,11 @@ def send(
         spec = url
         target_by = "url"
 
-    try:
-        return asyncio.run(_send_one_shot(info.port, method, params, spec, target_by))
-    except (AmbiguousTargetError, TargetNotFoundError) as exc:
-        raise LifecycleError(str(exc)) from exc
-    except CDPError as exc:
-        raise LifecycleError(f"CDP error {exc.code}: {exc.message}") from exc
-    except ConnectionError as exc:
-        raise LifecycleError(str(exc)) from exc
+    async def _send() -> dict[str, Any]:
+        async with one_shot_page_session(info.port, spec, target_by) as (cdp, session_id):
+            return await cdp.send(method=method, params=params, session_id=session_id)
+
+    return asyncio.run(_send())
 
 
 # ---------------------------------------------------------------------------

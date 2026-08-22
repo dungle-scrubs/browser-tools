@@ -35,16 +35,19 @@ import asyncio
 import contextlib
 import json
 import time
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from .core.cdp_client import CDPClient
 
 from . import lifecycle
 from .core import attach as core_attach
 from .core import registry as core_registry
-from .core.attach import AmbiguousTargetError, TargetNotFoundError, resolve_target
-from .core.cdp_client import CDPClient, get_ws_url
+from .core.attach import AmbiguousTargetError, TargetNotFoundError
 from .core.errors import CDPError, NoPageError
 from .core.registry import InstanceNotFoundError
 from .lifecycle import LifecycleError
+from .one_shot import cli_cdp_errors, one_shot_page_session
 from .passthrough import UsageError
 
 #: ``wait``'s default deadline in seconds (RFC-01 "wait design").
@@ -226,57 +229,7 @@ def _timeout_message(event: str, match: str | None, timeout: float) -> str:
     return f"timeout: no {event} event{suffix} within {timeout}s"
 
 
-async def _wait_one_shot(
-    port: int,
-    event: str,
-    match: str | None,
-    timeout: float,
-    target_spec: str | None,
-    target_by: str | None,
-) -> dict[str, Any]:
-    """Open a browser-level connection, resolve a target, and wait on it.
-
-    Mirrors ``passthrough._send_one_shot``'s connect/resolve/attach plumbing so
-    ``wait`` opens its own isolated ``Target`` session (RFC-01 "wait design":
-    it MUST open an attach session), then delegates to ``wait_on_session`` for
-    the subscribe-first loop and always detaches afterward, best-effort.
-    """
-    browser_ws_url = get_ws_url(port=port, target_type="browser")
-    async with CDPClient(ws_url=browser_ws_url) as cdp:
-        targets_result = await cdp.send(method="Target.getTargets")
-        target_infos: list[dict[str, Any]] = targets_result.get("targetInfos", [])
-
-        def _target_id(t: dict[str, Any]) -> str:
-            return t.get("targetId", "")
-
-        page_targets = sorted(
-            (t for t in target_infos if t.get("type") == "page"),
-            key=_target_id,
-        )
-        if not page_targets:
-            raise NoPageError()
-
-        target_id = resolve_target(
-            page_targets=page_targets,
-            target_spec=target_spec,
-            target_by=target_by,
-        )
-
-        session_result = await cdp.send(
-            method="Target.attachToTarget",
-            params={"targetId": target_id, "flatten": True},
-        )
-        session_id = session_result["sessionId"]
-        try:
-            return await wait_on_session(cdp, session_id, event, match, timeout)
-        finally:
-            with contextlib.suppress(Exception):
-                await cdp.send(
-                    method="Target.detachFromTarget",
-                    params={"sessionId": session_id},
-                )
-
-
+@cli_cdp_errors
 def wait(
     *,
     instance: str | None,
@@ -291,24 +244,19 @@ def wait(
 
     ``instance`` omitted resolves via ``lifecycle.resolve_single_instance``.
     On the deadline, raises ``WaitTimeout`` (CLI exit 1, diagnostic on stderr,
-    empty stdout). Target-resolution, no-page, CDP, and connection failures
-    become ``LifecycleError`` (CLI exit 1).
+    empty stdout) -- untouched by ``@cli_cdp_errors``, which only maps the
+    seam's own failures. Target-resolution, no-page, CDP, and connection
+    failures become ``LifecycleError`` (CLI exit 1), via ``@cli_cdp_errors``.
     """
     if instance is None:
         instance = lifecycle.resolve_single_instance(registry_path=registry_path)
 
-    try:
-        info = core_registry.lookup(instance_name=instance, registry_path=registry_path)
-    except InstanceNotFoundError as exc:
-        raise LifecycleError(str(exc)) from exc
+    info = core_registry.lookup(instance_name=instance, registry_path=registry_path)
 
     spec, target_by = _target_slot(target, url)
 
-    try:
-        return asyncio.run(_wait_one_shot(info.port, event, match, timeout, spec, target_by))
-    except (AmbiguousTargetError, TargetNotFoundError, NoPageError) as exc:
-        raise LifecycleError(str(exc)) from exc
-    except CDPError as exc:
-        raise LifecycleError(f"CDP error {exc.code}: {exc.message}") from exc
-    except ConnectionError as exc:
-        raise LifecycleError(str(exc)) from exc
+    async def _wait() -> dict[str, Any]:
+        async with one_shot_page_session(info.port, spec, target_by) as (cdp, session_id):
+            return await wait_on_session(cdp, session_id, event, match, timeout)
+
+    return asyncio.run(_wait())
