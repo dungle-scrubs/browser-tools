@@ -147,6 +147,20 @@ class TestSupervisorBuildsOverlayWhenBorderOn:
         assert guard in source
         assert source.index(guard) < source.index("var NAME=")
 
+    def test_badge_yields_to_the_pointer(self, monkeypatch):
+        """The badge covers whatever the page puts in its top-left corner, so it
+        fades out while the pointer is near and returns when it leaves. The
+        border and title prefix never yield."""
+        captured = self._run_supervisor_once(monkeypatch, draw_border=True)
+        source = captured["source"]
+        assert f"var YIELD_PX = {supervisor.BADGE_YIELD_PX};" in source
+        assert "document.addEventListener('mousemove'" in source
+        assert "badge.style.opacity = near ? '0' : '1'" in source
+        assert "document.addEventListener('mouseleave'" in source
+        assert "transition:opacity" in source
+        # Only the badge carries the transition; the border stays constant.
+        assert source.count("transition:opacity") == 1
+
     def test_border_off_builds_no_overlay(self, monkeypatch):
         captured = self._run_supervisor_once(monkeypatch, draw_border=False)
         assert captured["draw_border"] is False

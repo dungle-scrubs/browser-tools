@@ -3,11 +3,15 @@
 # SPDX-License-Identifier: MIT
 # See /NOTICE for the full vendoring notice.
 #
-# This file is an ADAPTED vendored module (RFC-01, "Adapted modules"): the
-# overlay script gained a top-frame guard so the border, badge, and title
-# prefix are drawn once per tab, in the top document only, instead of once per
-# frame (Page.addScriptToEvaluateOnNewDocument runs in every iframe as well,
-# which put a nested border and badge inside every embedded widget).
+# This file is an ADAPTED vendored module (RFC-01, "Adapted modules"). Two
+# changes to the overlay script:
+#   - a top-frame guard, so the border, badge, and title prefix are drawn once
+#     per tab, in the top document only, instead of once per frame
+#     (Page.addScriptToEvaluateOnNewDocument runs in every iframe as well,
+#     which put a nested border and badge inside every embedded widget);
+#   - the corner badge yields to the pointer: it fades out while the cursor is
+#     near it and returns when the cursor leaves, so the page content under it
+#     stays reachable by eye and not only by click.
 # Intra-package imports are rewritten to browser_tools.core. Otherwise
 # unchanged from chrome-agent v0.5.7. See RFC-01, section "Vendoring rules".
 
@@ -48,6 +52,11 @@ import sys
 from .cdp_client import CDPClient, get_ws_url
 
 ISOLATED_WORLD = "__chrome_agent_marker__"
+
+# Distance (CSS px) from the badge's box within which the pointer makes the
+# badge fade out, so the page content under it can be seen. Large enough that
+# a cursor heading for the covered spot clears the badge before arriving.
+BADGE_YIELD_PX = 48
 
 # Curated palette of vivid, well-separated colors, each dark enough for white
 # badge text. A fixed palette (vs. a continuous hue) avoids deceptively-similar
@@ -96,6 +105,13 @@ def build_overlay_script(*, name: str, color: str, host_id: str) -> str:
     ``document.title`` prefixed. The ``window.top`` identity comparison is
     permitted across origins; the ``try`` covers sandboxed frames where the
     access throws, which are never the top document either.
+
+    The badge is click-through but not see-through: it covers whatever the page
+    puts in its top-left corner (a narrow layout's menu toggle, a logo). It
+    therefore fades out while the pointer is within ``BADGE_YIELD_PX`` of its
+    box and returns when the pointer leaves, so moving the mouse toward the
+    covered spot reveals it. The border and title prefix never yield; they are
+    the marker's constant signal.
     """
     NAME = json.dumps(name)
     COLOR = json.dumps(color)
@@ -105,6 +121,8 @@ def build_overlay_script(*, name: str, color: str, host_id: str) -> str:
         "  try { if (window.self !== window.top) return; } catch(e) { return; }"
         f"  var NAME={NAME}, COLOR={COLOR}, HOST_ID={HOST};"
         "  var PREFIX = '\\uD83E\\uDD16 ' + NAME + ' \\u2014 ';"  # 🤖 NAME —
+        f"  var YIELD_PX = {BADGE_YIELD_PX};"
+        "  var badge = null;"
         "  function fixTitle(){ try { var t = document.title || ''; if (t.indexOf(PREFIX) !== 0) document.title = PREFIX + t; } catch(e){} }"
         "  function draw(){"
         "    try {"
@@ -114,13 +132,26 @@ def build_overlay_script(*, name: str, color: str, host_id: str) -> str:
         "      host.id = HOST_ID;"
         "      host.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;z-index:2147483647;pointer-events:none;margin:0;padding:0;border:0;background:transparent';"
         "      var html = '<div style=\"position:fixed;top:0;left:0;right:0;bottom:0;border:6px solid ' + COLOR + ';box-sizing:border-box;pointer-events:none\"></div>'"
-        "               + '<div style=\"position:fixed;top:0;left:0;background:' + COLOR + ';color:#fff;font:600 12px/1.45 system-ui,-apple-system,Segoe UI,sans-serif;padding:3px 9px;border-bottom-right-radius:6px;pointer-events:none;white-space:nowrap\">\\uD83E\\uDD16 ' + NAME + '</div>';"
-        "      if (host.attachShadow) { host.attachShadow({mode:'closed'}).innerHTML = html; } else { host.innerHTML = html; }"
+        "               + '<div style=\"position:fixed;top:0;left:0;background:' + COLOR + ';color:#fff;font:600 12px/1.45 system-ui,-apple-system,Segoe UI,sans-serif;padding:3px 9px;border-bottom-right-radius:6px;pointer-events:none;white-space:nowrap;transition:opacity .15s ease\">\\uD83E\\uDD16 ' + NAME + '</div>';"
+        "      var root = host.attachShadow ? host.attachShadow({mode:'closed'}) : host;"
+        "      root.innerHTML = html;"
+        "      badge = root.children[1];"
         "      document.documentElement.appendChild(host);"
         "      return true;"
         "    } catch(e){ return false; }"
         "  }"
         "  function ensureDraw(){ if (draw()) return; var mo = new MutationObserver(function(){ if (draw()) mo.disconnect(); }); mo.observe(document, {childList:true, subtree:true}); }"
+        "  function yieldToPointer(){"
+        "    try {"
+        "      document.addEventListener('mousemove', function(e){"
+        "        if (!badge) return;"
+        "        var r = badge.getBoundingClientRect();"
+        "        var near = e.clientX < r.right + YIELD_PX && e.clientY < r.bottom + YIELD_PX;"
+        "        badge.style.opacity = near ? '0' : '1';"
+        "      }, {capture:true, passive:true});"
+        "      document.addEventListener('mouseleave', function(){ if (badge) badge.style.opacity = '1'; }, {capture:true, passive:true});"
+        "    } catch(e){}"
+        "  }"
         "  function watchTitle(){"
         "    fixTitle();"
         "    try {"
@@ -130,6 +161,7 @@ def build_overlay_script(*, name: str, color: str, host_id: str) -> str:
         "    } catch(e){}"
         "  }"
         "  ensureDraw();"
+        "  yieldToPointer();"
         "  if (document.head || document.readyState !== 'loading') { watchTitle(); }"
         "  else { document.addEventListener('DOMContentLoaded', watchTitle); }"
         "})();"
