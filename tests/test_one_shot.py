@@ -17,6 +17,7 @@ those pass through untouched.
 from __future__ import annotations
 
 import asyncio
+import urllib.error
 
 import pytest
 
@@ -296,3 +297,79 @@ class TestCliCdpErrors:
             return x * 2
 
         assert fn(21) == 42
+
+
+# ---------------------------------------------------------------------------
+# connection failures: refused vs bound-but-unanswered
+# ---------------------------------------------------------------------------
+
+
+def _drive_session_to_connect(port: int):
+    """Run ``one_shot_page_session`` far enough to hit ``get_ws_url``."""
+
+    async def run():
+        async with one_shot_page_session(port=port, target_spec=None, target_by=None):
+            pass
+
+    asyncio.run(run())
+
+
+def _core_connection_error(cause: BaseException) -> ConnectionError:
+    # The vendored core's exact spelling, chained to the real failure.
+    err = ConnectionError("No browser listening on port 9333. Start one with: chrome-agent launch")
+    err.__cause__ = cause
+    return err
+
+
+class TestConnectionFailureMessage:
+    def test_refused_says_no_browser_and_names_bt(self, monkeypatch):
+        def refused(**kw):
+            raise _core_connection_error(
+                urllib.error.URLError(ConnectionRefusedError(61, "Connection refused"))
+            )
+
+        monkeypatch.setattr("browser_tools.one_shot.get_ws_url", refused)
+        with pytest.raises(ConnectionError) as exc:
+            _drive_session_to_connect(9333)
+        assert str(exc.value) == "No browser listening on port 9333. Start one with: bt launch"
+        assert "chrome-agent" not in str(exc.value)
+
+    @pytest.mark.parametrize(
+        "cause",
+        [TimeoutError("timed out"), urllib.error.URLError(TimeoutError("timed out"))],
+        ids=["read-timeout", "connect-timeout"],
+    )
+    def test_timeout_says_bound_but_unanswered(self, monkeypatch, cause):
+        # A bound port whose HTTP handler stalls (busy UI thread) is a
+        # different failure from an unbound port. Reporting it as "no browser
+        # listening" sends the caller to launch another browser, which is the
+        # wrong remedy and (via the registry) the wrong diagnosis.
+        def stalled(**kw):
+            raise _core_connection_error(cause)
+
+        monkeypatch.setattr("browser_tools.one_shot.get_ws_url", stalled)
+        with pytest.raises(ConnectionError) as exc:
+            _drive_session_to_connect(9333)
+        msg = str(exc.value)
+        assert msg.startswith("Browser on port 9333 is bound but did not answer")
+        assert "bt status" in msg
+        assert "No browser listening" not in msg
+
+    def test_unchained_error_defaults_to_no_browser(self):
+        from browser_tools.one_shot import connection_failure_message
+
+        assert connection_failure_message(port=1, cause=None).startswith("No browser listening on port 1")
+
+    def test_mapped_to_lifecycle_error_by_cli_cdp_errors(self, monkeypatch):
+        def stalled(**kw):
+            raise _core_connection_error(TimeoutError("timed out"))
+
+        monkeypatch.setattr("browser_tools.one_shot.get_ws_url", stalled)
+
+        @cli_cdp_errors
+        def verb():
+            _drive_session_to_connect(9333)
+
+        with pytest.raises(LifecycleError) as exc:
+            verb()
+        assert "bound but did not answer" in str(exc.value)

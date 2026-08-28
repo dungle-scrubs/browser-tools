@@ -68,7 +68,10 @@ async def one_shot_page_session(
     Raises ``NoPageError`` when the browser has no page targets at all (see
     the module docstring for why this is the one no-page spelling now).
     """
-    browser_ws_url = get_ws_url(port=port, target_type="browser")
+    try:
+        browser_ws_url = get_ws_url(port=port, target_type="browser")
+    except ConnectionError as exc:
+        raise ConnectionError(connection_failure_message(port=port, cause=exc.__cause__)) from exc
     async with CDPClient(ws_url=browser_ws_url) as cdp:
         targets_result = await cdp.send(method="Target.getTargets")
         target_infos: list[dict[str, Any]] = targets_result.get("targetInfos", [])
@@ -102,6 +105,42 @@ async def one_shot_page_session(
                     method="Target.detachFromTarget",
                     params={"sessionId": session_id},
                 )
+
+
+def connection_failure_message(*, port: int, cause: BaseException | None) -> str:
+    """Spell out why the DevTools HTTP endpoint on ``port`` did not answer.
+
+    The vendored ``core.cdp_client.get_ws_url`` raises one ``ConnectionError``
+    ("No browser listening ... chrome-agent launch") for every HTTP failure,
+    chaining the real one as its cause. Two different failures hide behind it,
+    and they have different remedies:
+
+    - refused / unreachable: nothing is bound to the port. The browser never
+      started or has exited; launch one.
+    - timeout: the port is bound, but Chrome serves ``/json*`` from its UI
+      thread, so a browser whose UI thread is busy or hung accepts the TCP
+      connection and never answers. Launching another browser does not fix
+      that; ``bt status`` (a plain TCP probe) still reports it alive.
+
+    Call-site adaptation of the verbatim core (RFC-01, "Vendoring rules"): the
+    core text and program name stay untouched in ``core/``.
+    """
+    if _is_timeout(cause):
+        return (
+            f"Browser on port {port} is bound but did not answer the DevTools HTTP "
+            f"endpoint before the timeout (busy or hung browser UI thread). "
+            f"Check it with: bt status"
+        )
+    return f"No browser listening on port {port}. Start one with: bt launch"
+
+
+def _is_timeout(exc: BaseException | None) -> bool:
+    """True for a socket timeout, bare or wrapped as ``URLError.reason``."""
+    if exc is None:
+        return False
+    if isinstance(exc, TimeoutError):
+        return True
+    return isinstance(getattr(exc, "reason", None), TimeoutError)
 
 
 def cli_cdp_errors[**P, T](fn: Callable[P, T]) -> Callable[P, T]:
