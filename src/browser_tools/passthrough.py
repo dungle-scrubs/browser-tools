@@ -43,7 +43,7 @@ from .one_shot import cli_cdp_errors, one_shot_page_session
 
 
 class UsageError(Exception):
-    """A malformed passthrough/help invocation (maps to CLI exit code 2)."""
+    """A malformed CLI invocation (maps to CLI exit code 2)."""
 
 
 # ---------------------------------------------------------------------------

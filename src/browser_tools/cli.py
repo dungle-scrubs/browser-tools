@@ -262,13 +262,27 @@ def _print_json(payload: object) -> None:
     print(json.dumps(payload, indent=2))
 
 
-def _strip_arg_separator(browser_args: list[str] | None) -> list[str]:
-    """Drop the leading ``--`` argparse.REMAINDER keeps in front of BROWSER_ARGS."""
-    if not browser_args:
+def _browser_args_from_remainder(remainder: list[str] | None) -> list[str]:
+    """Return the verbatim BROWSER_ARGS that follow ``--``, or reject the remainder.
+
+    ``launch`` takes no positional arguments. argparse.REMAINDER starts
+    collecting at the first bare token and swallows every option after it, so
+    ``bt launch e2e-01 --headless`` would silently hand ``e2e-01 --headless``
+    to Chrome: Chrome opens ``http://e2e-01/`` and runs headless while
+    browser-tools believes the launch is headed (spawning the supervisor,
+    marking the window). A remainder that does not start with ``--`` is
+    therefore a usage error, not browser args.
+    """
+    if not remainder:
         return []
-    if browser_args[0] == "--":
-        return browser_args[1:]
-    return browser_args
+    if remainder[0] == "--":
+        return remainder[1:]
+    raise PassthroughUsageError(
+        f"launch takes no positional arguments (got {remainder[0]!r}); instance "
+        f"names are assigned by the registry; use --profile NAME to bind a named "
+        f"profile. Flags for the browser itself go after '--', e.g. "
+        f"bt launch --headless -- --proxy-server=host:port"
+    )
 
 
 def _run(args: argparse.Namespace) -> int:
@@ -284,7 +298,7 @@ def _run(args: argparse.Namespace) -> int:
             port=args.port,
             fingerprint=args.fingerprint,
             window_border=not args.no_window_border,
-            browser_args=_strip_arg_separator(args.browser_args),
+            browser_args=_browser_args_from_remainder(args.browser_args),
             registry_path=registry_path,
         )
         _print_json(

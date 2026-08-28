@@ -9,6 +9,7 @@ No real browser is launched.
 from __future__ import annotations
 
 import json
+import socket
 from pathlib import Path
 
 import pytest
@@ -31,10 +32,25 @@ def _seed(registry_path: str, entries: dict) -> None:
     core_registry._save_registry(entries, registry_path)
 
 
-def _dead_entry(port: int = 9222, **extra) -> dict:
-    # A PID that cannot be alive/ours -> the vendored liveness ladder reads dead.
+def _free_port() -> int:
+    """A port nothing listens on right now.
+
+    The liveness ladder's second rung is a real socket connect to the entry's
+    port, and on macOS (no ``/proc``) an unattributable listener reads as alive.
+    A fixed port such as 9222 is whatever real Chrome the developer has running,
+    so a dead entry on it flips alive depending on the host. Bind-and-release an
+    ephemeral port instead.
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+def _dead_entry(port: int | None = None, **extra) -> dict:
+    # A PID that cannot be alive/ours, on a port with no listener -> the
+    # vendored liveness ladder reads dead on every host.
     base = {
-        "port": port,
+        "port": _free_port() if port is None else port,
         "pid": 2_000_000_000,
         "browser_version": "Chrome/1",
         "user_data_dir": "",
@@ -343,3 +359,29 @@ class TestCliFront:
         assert cli.main(["launch", "--headless", "--", "--proxy-server=x"]) == cli.EXIT_OK
         assert captured["browser_args"] == ["--proxy-server=x"]
         assert captured["headless"] is True
+
+
+class TestLaunchRemainder:
+    """A bare token before ``--`` is a usage error, never browser args."""
+
+    @pytest.fixture(autouse=True)
+    def _no_real_launch(self, monkeypatch):
+        def fail(**kwargs):
+            raise AssertionError(f"launch must not run; got {kwargs}")
+
+        monkeypatch.setattr(lifecycle, "launch", fail)
+
+    def test_stray_name_before_flags_is_usage_error(self, capsys):
+        # The originating bug: `bt launch e2e-01 --headless` handed
+        # `e2e-01 --headless` to Chrome and launched a headed-path browser.
+        assert cli.main(["launch", "e2e-01", "--headless"]) == cli.EXIT_USAGE
+        err = capsys.readouterr().err
+        assert "takes no positional arguments (got 'e2e-01')" in err
+        assert "--profile NAME" in err
+        assert "after '--'" in err
+
+    def test_remainder_helper_strips_separator(self):
+        assert cli._browser_args_from_remainder(None) == []
+        assert cli._browser_args_from_remainder([]) == []
+        assert cli._browser_args_from_remainder(["--"]) == []
+        assert cli._browser_args_from_remainder(["--", "--a", "b"]) == ["--a", "b"]

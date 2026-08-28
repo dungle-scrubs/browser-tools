@@ -3,9 +3,13 @@
 # SPDX-License-Identifier: MIT
 # See /NOTICE for the full vendoring notice.
 #
-# This file is a verbatim vendored copy; the only permitted modification is
-# rewriting intra-package imports to browser_tools.core. See RFC-01, section
-# "Vendoring rules".
+# This file is an ADAPTED vendored module (RFC-01, "Adapted modules"): the
+# overlay script gained a top-frame guard so the border, badge, and title
+# prefix are drawn once per tab, in the top document only, instead of once per
+# frame (Page.addScriptToEvaluateOnNewDocument runs in every iframe as well,
+# which put a nested border and badge inside every embedded widget).
+# Intra-package imports are rewritten to browser_tools.core. Otherwise
+# unchanged from chrome-agent v0.5.7. See RFC-01, section "Vendoring rules".
 
 """Per-instance supervisor for chrome-agent.
 
@@ -85,12 +89,20 @@ def build_overlay_script(*, name: str, color: str, host_id: str) -> str:
     Draws a fixed, click-through colored border + corner badge inside a closed
     shadow DOM, and keeps ``document.title`` prefixed (re-applied idempotently
     on SPA/title changes). Re-draws if the page wipes it. Leaks no globals.
+
+    Runs in the top document only. ``Page.addScriptToEvaluateOnNewDocument``
+    evaluates the source in every frame, so without the guard each iframe (chat
+    widgets, embeds, ads) draws its own nested border and badge and gets its
+    ``document.title`` prefixed. The ``window.top`` identity comparison is
+    permitted across origins; the ``try`` covers sandboxed frames where the
+    access throws, which are never the top document either.
     """
     NAME = json.dumps(name)
     COLOR = json.dumps(color)
     HOST = json.dumps(host_id)
     return (
         "(() => {"
+        "  try { if (window.self !== window.top) return; } catch(e) { return; }"
         f"  var NAME={NAME}, COLOR={COLOR}, HOST_ID={HOST};"
         "  var PREFIX = '\\uD83E\\uDD16 ' + NAME + ' \\u2014 ';"  # 🤖 NAME —
         "  function fixTitle(){ try { var t = document.title || ''; if (t.indexOf(PREFIX) !== 0) document.title = PREFIX + t; } catch(e){} }"
