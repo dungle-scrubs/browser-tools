@@ -236,12 +236,13 @@ async def launch_browser(
     # detached process -- it must survive the caller exiting (fire-and-forget
     # launch model) -- that holds a CDP connection and, when the browser/window
     # closes, retires the instance from the registry (and removes its session
-    # dir). While the browser is alive it also draws the window border, unless:
+    # dir). While the browser is alive it also marks the window (tab title
+    # prefix), unless:
     #   - --no-window-border (window_border is False), or
-    #   - a fingerprint profile is active: the in-page border/badge/title are
-    #     page-observable (a findable host element + a modified document.title),
-    #     and bot-defended sites -- exactly where fingerprinting is used -- are
-    #     where DOM/title-diffing detectors live. See the detection audit.
+    #   - a fingerprint profile is active: the title prefix is page-observable
+    #     (a modified document.title), and bot-defended sites -- exactly where
+    #     fingerprinting is used -- are where title-diffing detectors live. See
+    #     the detection audit.
     # Headless launches get no supervisor (no window to close or mark); their
     # registry entries are reclaimed by the launch-time prune above / cleanup.
     if not headless:
