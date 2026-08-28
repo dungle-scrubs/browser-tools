@@ -134,6 +134,19 @@ class TestSupervisorBuildsOverlayWhenBorderOn:
         assert "demo-instance" in captured["source"]
         assert "border:6px solid" in captured["source"]
 
+    def test_overlay_runs_in_the_top_frame_only(self, monkeypatch):
+        """Page.addScriptToEvaluateOnNewDocument runs the overlay in every frame,
+        so the script itself must bail out inside iframes; otherwise every embedded
+        widget (chat bubbles, embeds) draws a nested border and badge and gets its
+        title prefixed. The guard is the first statement so nothing runs before it,
+        and it is wrapped so a sandboxed frame that throws on ``window.top`` access
+        is treated as a non-top frame."""
+        captured = self._run_supervisor_once(monkeypatch, draw_border=True)
+        source = captured["source"]
+        guard = "try { if (window.self !== window.top) return; } catch(e) { return; }"
+        assert guard in source
+        assert source.index(guard) < source.index("var NAME=")
+
     def test_border_off_builds_no_overlay(self, monkeypatch):
         captured = self._run_supervisor_once(monkeypatch, draw_border=False)
         assert captured["draw_border"] is False
