@@ -89,7 +89,7 @@ def build_parser() -> argparse.ArgumentParser:
     launch.add_argument(
         "--no-window-border",
         action="store_true",
-        help="Do not draw the agent-window marking border",
+        help="Do not mark the window (no instance-name prefix on the tab title)",
     )
     launch.add_argument(
         "browser_args",

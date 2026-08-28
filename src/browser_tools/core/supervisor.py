@@ -3,17 +3,17 @@
 # SPDX-License-Identifier: MIT
 # See /NOTICE for the full vendoring notice.
 #
-# This file is an ADAPTED vendored module (RFC-01, "Adapted modules"). Two
-# changes to the overlay script:
-#   - a top-frame guard, so the border, badge, and title prefix are drawn once
-#     per tab, in the top document only, instead of once per frame
-#     (Page.addScriptToEvaluateOnNewDocument runs in every iframe as well,
-#     which put a nested border and badge inside every embedded widget);
-#   - the corner badge yields to the pointer: it fades out while the cursor is
-#     near it and returns when the cursor leaves, so the page content under it
-#     stays reachable by eye and not only by click.
-# Intra-package imports are rewritten to browser_tools.core. Otherwise
-# unchanged from chrome-agent v0.5.7. See RFC-01, section "Vendoring rules".
+# This file is an ADAPTED vendored module (RFC-01, "Adapted modules"). The
+# window marker no longer draws anything inside the page. Upstream drew a
+# colored border and a corner badge as fixed-position elements over the
+# viewport; both sat on top of page content (the badge over whatever the page
+# put top-left, the border over its outer 6px) and got in the way of seeing
+# the page. The marker is now the tab title prefix alone, which lives in the
+# browser's tab strip, outside the page. The script also guards on the top
+# frame: Page.addScriptToEvaluateOnNewDocument runs in every iframe as well,
+# and only the top document's title is the tab title. Intra-package imports
+# are rewritten to browser_tools.core. Otherwise unchanged from chrome-agent
+# v0.5.7. See RFC-01, section "Vendoring rules".
 
 """Per-instance supervisor for chrome-agent.
 
@@ -27,25 +27,22 @@ connection open for the browser's lifetime. It does two jobs:
    Because chrome-agent has no daemon, this long-lived connection is the only
    thing that can observe a close as it happens.
 
-2. **Window border** (optional) -- while the browser is alive, mark every tab
-   (current and future) with a colored border + corner badge and a title prefix
-   so an agent-driven window is easy to tell apart from the user's own Chrome.
-   ``Page.addScriptToEvaluateOnNewDocument`` re-runs the overlay on every new
+2. **Window marker** (optional) -- while the browser is alive, mark every tab
+   (current and future) by prefixing its title with the instance name, so an
+   agent-driven window is easy to tell apart from the user's own Chrome in
+   the tab strip and window title. Nothing is drawn inside the page.
+   ``Page.addScriptToEvaluateOnNewDocument`` re-runs the marker on every new
    document, but only while the registering connection is alive -- hence the
    same long-lived process.
 
-The border is page-observable (a host element in the DOM + a modified
-``document.title``), so it is suppressed under a fingerprint profile; the
-lifecycle job still runs. To minimize the footprint when drawn, the border
-renders in a *closed* shadow DOM under a *randomized* host id, and the injected
-code is a side-effect-free IIFE that leaks no globals.
+The marker is page-observable (a modified ``document.title``), so it is
+suppressed under a fingerprint profile; the lifecycle job still runs. The
+injected code is a side-effect-free IIFE that leaks no globals.
 See ``planning/03-specs/BRW-03-learnings/01-detection-audit.md``.
 """
 
 import asyncio
-import hashlib
 import json
-import secrets
 import subprocess
 import sys
 
@@ -53,115 +50,34 @@ from .cdp_client import CDPClient, get_ws_url
 
 ISOLATED_WORLD = "__chrome_agent_marker__"
 
-# Distance (CSS px) from the badge's box within which the pointer makes the
-# badge fade out, so the page content under it can be seen. Large enough that
-# a cursor heading for the covered spot clears the badge before arriving.
-BADGE_YIELD_PX = 48
+def build_overlay_script(*, name: str) -> str:
+    """Build the IIFE injected into each page to mark the tab.
 
-# Curated palette of vivid, well-separated colors, each dark enough for white
-# badge text. A fixed palette (vs. a continuous hue) avoids deceptively-similar
-# colors for different instances -- two instances are either an obvious match
-# or obviously different, never a near-match that reads as the same.
-_PALETTE = (
-    "#d11149",  # crimson
-    "#c2185b",  # pink
-    "#7b1fa2",  # purple
-    "#512da8",  # deep purple
-    "#303f9f",  # indigo
-    "#1976d2",  # blue
-    "#0277bd",  # light blue
-    "#00838f",  # cyan
-    "#00695c",  # teal
-    "#2e7d32",  # green
-    "#e65100",  # orange
-    "#d84315",  # deep orange
-    "#5d4037",  # brown
-    "#455a64",  # blue grey
-)
-
-
-def derive_color(name: str) -> str:
-    """Derive a stable, distinct palette color from an instance name.
-
-    Deterministic (same name -> same color) so a given instance is always the
-    same color, and chosen from a fixed well-separated palette so different
-    instances are visually distinct from each other, not just from un-marked
-    Chrome.
-    """
-    digest = int(hashlib.md5(name.encode()).hexdigest(), 16)
-    return _PALETTE[digest % len(_PALETTE)]
-
-
-def build_overlay_script(*, name: str, color: str, host_id: str) -> str:
-    """Build the IIFE injected into each page to draw the marker.
-
-    Draws a fixed, click-through colored border + corner badge inside a closed
-    shadow DOM, and keeps ``document.title`` prefixed (re-applied idempotently
-    on SPA/title changes). Re-draws if the page wipes it. Leaks no globals.
+    Keeps ``document.title`` prefixed with the instance name (re-applied
+    idempotently on SPA/title changes). Draws nothing inside the page: upstream
+    also drew a fixed border and a corner badge over the viewport, and both
+    covered page content. Leaks no globals.
 
     Runs in the top document only. ``Page.addScriptToEvaluateOnNewDocument``
-    evaluates the source in every frame, so without the guard each iframe (chat
-    widgets, embeds, ads) draws its own nested border and badge and gets its
-    ``document.title`` prefixed. The ``window.top`` identity comparison is
-    permitted across origins; the ``try`` covers sandboxed frames where the
-    access throws, which are never the top document either.
-
-    The badge is click-through but not see-through: it covers whatever the page
-    puts in its top-left corner (a narrow layout's menu toggle, a logo). It
-    therefore fades out while the pointer is within ``BADGE_YIELD_PX`` of its
-    box and returns when the pointer leaves, so moving the mouse toward the
-    covered spot reveals it. The border and title prefix never yield; they are
-    the marker's constant signal.
+    evaluates the source in every frame, and only the top document's title is
+    the tab title. The ``window.top`` identity comparison is permitted across
+    origins; the ``try`` covers sandboxed frames where the access throws, which
+    are never the top document either.
     """
     NAME = json.dumps(name)
-    COLOR = json.dumps(color)
-    HOST = json.dumps(host_id)
     return (
         "(() => {"
         "  try { if (window.self !== window.top) return; } catch(e) { return; }"
-        f"  var NAME={NAME}, COLOR={COLOR}, HOST_ID={HOST};"
+        f"  var NAME={NAME};"
         "  var PREFIX = '\\uD83E\\uDD16 ' + NAME + ' \\u2014 ';"  # 🤖 NAME —
-        f"  var YIELD_PX = {BADGE_YIELD_PX};"
-        "  var badge = null;"
         "  function fixTitle(){ try { var t = document.title || ''; if (t.indexOf(PREFIX) !== 0) document.title = PREFIX + t; } catch(e){} }"
-        "  function draw(){"
-        "    try {"
-        "      if (!document.documentElement) return false;"
-        "      if (document.getElementById(HOST_ID)) return true;"
-        "      var host = document.createElement('div');"
-        "      host.id = HOST_ID;"
-        "      host.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;z-index:2147483647;pointer-events:none;margin:0;padding:0;border:0;background:transparent';"
-        "      var html = '<div style=\"position:fixed;top:0;left:0;right:0;bottom:0;border:6px solid ' + COLOR + ';box-sizing:border-box;pointer-events:none\"></div>'"
-        "               + '<div style=\"position:fixed;top:0;left:0;background:' + COLOR + ';color:#fff;font:600 12px/1.45 system-ui,-apple-system,Segoe UI,sans-serif;padding:3px 9px;border-bottom-right-radius:6px;pointer-events:none;white-space:nowrap;transition:opacity .15s ease\">\\uD83E\\uDD16 ' + NAME + '</div>';"
-        "      var root = host.attachShadow ? host.attachShadow({mode:'closed'}) : host;"
-        "      root.innerHTML = html;"
-        "      badge = root.children[1];"
-        "      document.documentElement.appendChild(host);"
-        "      return true;"
-        "    } catch(e){ return false; }"
-        "  }"
-        "  function ensureDraw(){ if (draw()) return; var mo = new MutationObserver(function(){ if (draw()) mo.disconnect(); }); mo.observe(document, {childList:true, subtree:true}); }"
-        "  function yieldToPointer(){"
-        "    try {"
-        "      document.addEventListener('mousemove', function(e){"
-        "        if (!badge) return;"
-        "        var r = badge.getBoundingClientRect();"
-        "        var near = e.clientX < r.right + YIELD_PX && e.clientY < r.bottom + YIELD_PX;"
-        "        badge.style.opacity = near ? '0' : '1';"
-        "      }, {capture:true, passive:true});"
-        "      document.addEventListener('mouseleave', function(){ if (badge) badge.style.opacity = '1'; }, {capture:true, passive:true});"
-        "    } catch(e){}"
-        "  }"
         "  function watchTitle(){"
         "    fixTitle();"
         "    try {"
         "      var t = document.querySelector('title'); if (t) new MutationObserver(fixTitle).observe(t, {childList:true, characterData:true, subtree:true});"
         "      if (document.head) new MutationObserver(fixTitle).observe(document.head, {childList:true, subtree:true});"
-        "      if (document.documentElement) new MutationObserver(function(){ if (!document.getElementById(HOST_ID)) draw(); }).observe(document.documentElement, {childList:true});"
         "    } catch(e){}"
         "  }"
-        "  ensureDraw();"
-        "  yieldToPointer();"
         "  if (document.head || document.readyState !== 'loading') { watchTitle(); }"
         "  else { document.addEventListener('DOMContentLoaded', watchTitle); }"
         "})();"
@@ -169,7 +85,7 @@ def build_overlay_script(*, name: str, color: str, host_id: str) -> str:
 
 
 async def _setup_session(cdp: CDPClient, session_id: str, source: str) -> None:
-    """Register the overlay on a page session: future docs + the current doc."""
+    """Register the marker on a page session: future docs + the current doc."""
     try:
         await cdp.send(method="Page.enable", session_id=session_id)
         # Future documents: re-run on every navigation, in an isolated world.
@@ -194,7 +110,7 @@ async def _supervise_connection(
     """Hold one browser-level CDP connection until it drops.
 
     Connects, and (when ``draw_border`` and ``source`` are set) installs the
-    window border on every current and future page target, then blocks until the
+    window marker on every current and future page target, then blocks until the
     connection drops. Returns when disconnected; raises if the connect itself
     fails. Caller decides whether a drop means the browser closed (retire) or was
     a transient blip (reconnect).
@@ -262,7 +178,7 @@ async def run_supervisor(
     """Supervise a launched browser until it actually closes.
 
     Holds a browser-level CDP connection. While alive and ``draw_border`` is set,
-    marks every page target with the window border. The instance is retired from
+    marks every page target with the window marker (title prefix). The instance is retired from
     the registry (and its session directory removed) ONLY when the browser is
     truly gone -- detected by its CDP port no longer listening.
 
@@ -276,12 +192,11 @@ async def run_supervisor(
     """
     from .registry import deregister
 
-    # Compute the border host id / script ONCE so reconnects reuse the same
-    # randomized host id and the overlay's idempotent guard suppresses redraws.
+    # Build the marker script once; the title prefix is idempotent, so a
+    # reconnect re-injecting it on live tabs changes nothing.
     source: str | None = None
     if draw_border:
-        host_id = "_ca" + secrets.token_hex(8)
-        source = build_overlay_script(name=name, color=derive_color(name), host_id=host_id)
+        source = build_overlay_script(name=name)
 
     while True:
         try:
@@ -297,7 +212,7 @@ async def run_supervisor(
             return
 
         # Transient drop -- the browser is still alive. Reconnect and resume
-        # supervising (re-installs the border on the live tabs) rather than
+        # supervising (re-installs the marker on the live tabs) rather than
         # orphaning a live instance.
         await asyncio.sleep(0.5)
 
