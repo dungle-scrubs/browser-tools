@@ -343,3 +343,29 @@ class TestCliFront:
         assert cli.main(["launch", "--headless", "--", "--proxy-server=x"]) == cli.EXIT_OK
         assert captured["browser_args"] == ["--proxy-server=x"]
         assert captured["headless"] is True
+
+
+class TestLaunchRemainder:
+    """A bare token before ``--`` is a usage error, never browser args."""
+
+    @pytest.fixture(autouse=True)
+    def _no_real_launch(self, monkeypatch):
+        def fail(**kwargs):
+            raise AssertionError(f"launch must not run; got {kwargs}")
+
+        monkeypatch.setattr(lifecycle, "launch", fail)
+
+    def test_stray_name_before_flags_is_usage_error(self, capsys):
+        # The originating bug: `bt launch e2e-01 --headless` handed
+        # `e2e-01 --headless` to Chrome and launched a headed-path browser.
+        assert cli.main(["launch", "e2e-01", "--headless"]) == cli.EXIT_USAGE
+        err = capsys.readouterr().err
+        assert "takes no positional arguments (got 'e2e-01')" in err
+        assert "--profile NAME" in err
+        assert "after '--'" in err
+
+    def test_remainder_helper_strips_separator(self):
+        assert cli._browser_args_from_remainder(None) == []
+        assert cli._browser_args_from_remainder([]) == []
+        assert cli._browser_args_from_remainder(["--"]) == []
+        assert cli._browser_args_from_remainder(["--", "--a", "b"]) == ["--a", "b"]

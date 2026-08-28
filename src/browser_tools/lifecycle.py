@@ -838,7 +838,11 @@ LIFECYCLE VERBS
       and everything after --) go straight to the launcher. Policy flags
       (--profile, --channel, --engine) are resolved to launcher parameters
       first. --engine camoufox starts an anti-detect Camoufox instance; a
-      profile is held by at most one live instance at a time.
+      profile is held by at most one live instance at a time. launch takes
+      no positional argument: the instance name is assigned by the registry,
+      and any bare token before -- is a usage error (exit 2), because it
+      would otherwise be handed to the browser along with every flag after
+      it.
 
   status [INSTANCE]
       Show every registered instance with liveness, engine, profile, and page
