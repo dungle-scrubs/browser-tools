@@ -100,7 +100,7 @@ class TestSupervisorBuildsOverlayWhenBorderOn:
     def _run_supervisor_once(self, monkeypatch, *, draw_border: bool) -> dict:
         captured: dict = {}
 
-        async def fake_supervise(*, port, draw_border, source):
+        async def fake_supervise(*, port, draw_border, source, heartbeat=None):
             captured["draw_border"] = draw_border
             captured["source"] = source
             # Return without looping; run_supervisor then checks _browser_gone.
@@ -122,6 +122,8 @@ class TestSupervisorBuildsOverlayWhenBorderOn:
                 name="demo-instance",
                 registry_path=None,
                 draw_border=draw_border,
+                # No watchdog thread for a single scripted pass of the loop.
+                watchdog=False,
             )
         )
         return captured
