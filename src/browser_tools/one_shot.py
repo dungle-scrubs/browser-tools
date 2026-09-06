@@ -49,6 +49,51 @@ from .core.registry import InstanceNotFoundError
 from .lifecycle import LifecycleError
 
 
+def target_slot(target: str | None, url: str | None) -> tuple[str | None, str | None]:
+    """Map the ``--target``/``--url`` pair to ``core.attach``'s ``(spec, by)``.
+
+    A numeric ``--target`` selects by 1-based index, a non-numeric one by
+    targetId prefix, and ``--url`` by URL substring -- the same mapping
+    ``passthrough.send`` applies. ``--target`` and ``--url`` are mutually
+    exclusive; the CLI front rejects the pair before calling here.
+    """
+    if target is not None:
+        return target, ("index" if target.isdigit() else "id")
+    if url is not None:
+        return url, "url"
+    return None, None
+
+
+async def _resolve_page_target(
+    cdp: CDPClient, target_spec: str | None, target_by: str | None
+) -> str:
+    targets_result = await cdp.send(method="Target.getTargets")
+    target_infos: list[dict[str, Any]] = targets_result.get("targetInfos", [])
+
+    def _target_id(t: dict[str, Any]) -> str:
+        return t.get("targetId", "")
+
+    page_targets = sorted(
+        (t for t in target_infos if t.get("type") == "page"),
+        key=_target_id,
+    )
+    if not page_targets:
+        raise NoPageError()
+
+    target_id = resolve_target(
+        page_targets=page_targets,
+        target_spec=target_spec,
+        target_by=target_by,
+    )
+    return target_id
+
+
+async def resolve_page_target(port: int, spec: str | None, by: str | None) -> str:
+    """Resolve a page using the same ordering and ambiguity rules as raw CDP."""
+    async with CDPClient(get_ws_url(port=port, target_type="browser")) as cdp:
+        return await _resolve_page_target(cdp, spec, by)
+
+
 @contextlib.asynccontextmanager
 async def one_shot_page_session(
     port: int,
@@ -73,24 +118,7 @@ async def one_shot_page_session(
     except ConnectionError as exc:
         raise ConnectionError(connection_failure_message(port=port, cause=exc.__cause__)) from exc
     async with CDPClient(ws_url=browser_ws_url) as cdp:
-        targets_result = await cdp.send(method="Target.getTargets")
-        target_infos: list[dict[str, Any]] = targets_result.get("targetInfos", [])
-
-        def _target_id(t: dict[str, Any]) -> str:
-            return t.get("targetId", "")
-
-        page_targets = sorted(
-            (t for t in target_infos if t.get("type") == "page"),
-            key=_target_id,
-        )
-        if not page_targets:
-            raise NoPageError()
-
-        target_id = resolve_target(
-            page_targets=page_targets,
-            target_spec=target_spec,
-            target_by=target_by,
-        )
+        target_id = await _resolve_page_target(cdp, target_spec, target_by)
 
         session_result = await cdp.send(
             method="Target.attachToTarget",
@@ -165,10 +193,10 @@ def cli_cdp_errors[**P, T](fn: Callable[P, T]) -> Callable[P, T]:
             NoPageError,
             InstanceNotFoundError,
         ) as exc:
-            raise LifecycleError(str(exc)) from exc
+            raise LifecycleError(str(exc).replace("chrome-agent launch", "bt launch")) from exc
         except CDPError as exc:
             raise LifecycleError(f"CDP error {exc.code}: {exc.message}") from exc
         except ConnectionError as exc:
-            raise LifecycleError(str(exc)) from exc
+            raise LifecycleError(str(exc).replace("chrome-agent launch", "bt launch")) from exc
 
     return wrapper

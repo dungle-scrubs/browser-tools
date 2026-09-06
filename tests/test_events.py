@@ -294,9 +294,11 @@ def _make_wait_transport(fired, targets=None):
     sent -- the same between-subscribe-and-examine timing as the unit fake, now
     over the connect/resolve/attach plumbing ``wait`` shares with passthrough.
     """
-    targets = targets if targets is not None else [
-        {"targetId": "T1", "type": "page", "url": "https://example.com"}
-    ]
+    targets = (
+        targets
+        if targets is not None
+        else [{"targetId": "T1", "type": "page", "url": "https://example.com"}]
+    )
 
     class FakeCDP:
         def __init__(self, ws_url):
@@ -347,9 +349,7 @@ def wait_transport(monkeypatch):
         monkeypatch.setattr(
             "browser_tools.one_shot.CDPClient", _make_wait_transport(fired, targets)
         )
-        monkeypatch.setattr(
-            "browser_tools.one_shot.get_ws_url", lambda **kw: "ws://fake/browser"
-        )
+        monkeypatch.setattr("browser_tools.one_shot.get_ws_url", lambda **kw: "ws://fake/browser")
 
     return _install
 
@@ -380,9 +380,7 @@ class TestWaitFullPath:
         _seed(registry_path, {})
         wait_transport([])
         with pytest.raises(LifecycleError):
-            events.wait(
-                instance="ghost", event="Page.loadEventFired", registry_path=registry_path
-            )
+            events.wait(instance="ghost", event="Page.loadEventFired", registry_path=registry_path)
 
     def test_instance_omitted_resolves_single(self, registry_path, wait_transport):
         _seed(registry_path, {"only-01": _entry()})
@@ -408,9 +406,7 @@ class TestCliFront:
         monkeypatch.setattr(
             "browser_tools.one_shot.CDPClient", _make_wait_transport(fired, targets)
         )
-        monkeypatch.setattr(
-            "browser_tools.one_shot.get_ws_url", lambda **kw: "ws://fake/browser"
-        )
+        monkeypatch.setattr("browser_tools.one_shot.get_ws_url", lambda **kw: "ws://fake/browser")
 
     def test_wait_match_prints_json_exit_ok(self, monkeypatch, capsys):
         _seed(self._registry_path, {"only-01": _entry()})
@@ -440,9 +436,7 @@ class TestCliFront:
     def test_wait_both_target_and_url_exits_usage(self, monkeypatch, capsys):
         _seed(self._registry_path, {"only-01": _entry()})
         self._install_wait(monkeypatch, [])
-        rc = cli.main(
-            ["wait", "--event", "Page.loadEventFired", "--target", "1", "--url", "x"]
-        )
+        rc = cli.main(["wait", "--event", "Page.loadEventFired", "--target", "1", "--url", "x"])
         assert rc == cli.EXIT_USAGE
         assert "error:" in capsys.readouterr().err
 

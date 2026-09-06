@@ -256,9 +256,7 @@ class TestWatchdog:
         fired = threading.Event()
         heartbeat = supervisor.Heartbeat()
         heartbeat._last -= 10.0
-        supervisor.start_watchdog(
-            heartbeat=heartbeat, timeout=1.0, poll=0.05, on_stall=fired.set
-        )
+        supervisor.start_watchdog(heartbeat=heartbeat, timeout=1.0, poll=0.05, on_stall=fired.set)
 
         assert fired.wait(timeout=5)
 
@@ -287,3 +285,24 @@ class TestWatchdog:
 
         assert result.returncode == supervisor.EXIT_EVENT_LOOP_STALLED
         assert "event loop stalled" in result.stderr
+
+
+def test_spawned_supervisor_has_its_own_process_group(monkeypatch, tmp_path):
+    import os
+
+    popen = subprocess.Popen
+
+    def controlled_child(args, **kwargs):
+        assert args[2] == "browser_tools.core.supervisor"
+        return popen([sys.executable, "-c", "import time; time.sleep(30)"], **kwargs)
+
+    monkeypatch.setattr(supervisor.subprocess, "Popen", controlled_child)
+    child = supervisor.spawn_supervisor(
+        port=9222, name="test", registry_path=str(tmp_path / "registry.json"), draw_border=False
+    )
+    try:
+        assert os.getpgid(child.pid) == child.pid
+        assert os.getpgid(child.pid) != os.getpgrp()
+    finally:
+        child.terminate()
+        child.wait(timeout=5)

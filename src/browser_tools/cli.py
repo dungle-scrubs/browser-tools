@@ -42,28 +42,6 @@ EXIT_USAGE = 2
 #: resolves as an instance name if the registry knows it, else as a
 #: Domain.method); a token that fits neither shape falls through to argparse,
 #: which rejects it as an unknown verb, unchanged from before this ticket.
-_KNOWN_VERBS = {
-    "launch",
-    "status",
-    "stop",
-    "cleanup",
-    "guide",
-    "help",
-    "attach",
-    "wait",
-    "console-list",
-    "network-list",
-    "snapshot",
-    "click",
-    "fill",
-    "wait-idle",
-    "wait-stable",
-    "detect",
-    "frames",
-    "storage",
-    "screenshot",
-    "screencast",
-}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -81,11 +59,19 @@ def build_parser() -> argparse.ArgumentParser:
         default=lifecycle.DEFAULT_ENGINE,
         help="Browser engine (default: chrome)",
     )
-    launch.add_argument("--profile", metavar="NAME", help="Named profile to record for this instance")
-    launch.add_argument("--channel", metavar="NAME", help="Chrome release channel (stable/beta/dev/canary)")
+    launch.add_argument(
+        "--profile", metavar="NAME", help="Named profile to record for this instance"
+    )
+    launch.add_argument(
+        "--channel", metavar="NAME", help="Chrome release channel (stable/beta/dev/canary)"
+    )
     launch.add_argument("--headless", action="store_true", help="Run without a visible window")
-    launch.add_argument("--port", type=int, metavar="PORT", help="CDP port (default: auto-allocate)")
-    launch.add_argument("--fingerprint", metavar="FILE", help="Fingerprint profile file (launch flags only)")
+    launch.add_argument(
+        "--port", type=int, metavar="PORT", help="CDP port (default: auto-allocate)"
+    )
+    launch.add_argument(
+        "--fingerprint", metavar="FILE", help="Fingerprint profile file (launch flags only)"
+    )
     launch.add_argument(
         "--no-window-border",
         action="store_true",
@@ -102,7 +88,9 @@ def build_parser() -> argparse.ArgumentParser:
     status.add_argument("instance", nargs="?", metavar="INSTANCE", help="Limit to one instance")
 
     stop = sub.add_parser("stop", help="Stop a browser or close one tab")
-    stop.add_argument("instance", nargs="?", metavar="INSTANCE", help="Instance to stop (omit if only one)")
+    stop.add_argument(
+        "instance", nargs="?", metavar="INSTANCE", help="Instance to stop (omit if only one)"
+    )
     stop.add_argument("--target", metavar="SPEC", help="Close a single tab instead of the browser")
 
     sub.add_parser("cleanup", help="Remove stale registry entries and session dirs")
@@ -125,12 +113,12 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="[INSTANCE] +Domain.event ...",
         help="Optional instance name followed by one or more +Domain.event subscriptions",
     )
-    attach.add_argument("--target", metavar="SPEC", help="Select the page target (index or id)")
-    attach.add_argument("--url", metavar="SUBSTRING", help="Select the page target by URL substring")
 
     wait = sub.add_parser("wait", help="Block until one matching CDP event fires")
     wait.add_argument("instance", nargs="?", metavar="INSTANCE", help="Instance (omit if only one)")
-    wait.add_argument("--event", required=True, metavar="Domain.event", help="CDP event to wait for")
+    wait.add_argument(
+        "--event", required=True, metavar="Domain.event", help="CDP event to wait for"
+    )
     wait.add_argument("--match", metavar="SUBSTRING", help="Substring the event JSON must contain")
     wait.add_argument(
         "--timeout",
@@ -139,15 +127,13 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="SECONDS",
         help="Deadline in seconds (default: 30; 0 means no deadline)",
     )
-    wait.add_argument("--target", metavar="SPEC", help="Select the page target (index or id)")
-    wait.add_argument("--url", metavar="SUBSTRING", help="Select the page target by URL substring")
 
     console_list = sub.add_parser(
         "console-list", help="Collect console messages over a short attach window"
     )
-    console_list.add_argument("instance", nargs="?", metavar="INSTANCE", help="Instance (omit if only one)")
-    console_list.add_argument("--target", metavar="SPEC", help="Select the page target (index or id)")
-    console_list.add_argument("--url", metavar="SUBSTRING", help="Select the page target by URL substring")
+    console_list.add_argument(
+        "instance", nargs="?", metavar="INSTANCE", help="Instance (omit if only one)"
+    )
     console_list.add_argument(
         "--duration",
         type=float,
@@ -159,9 +145,9 @@ def build_parser() -> argparse.ArgumentParser:
     network_list = sub.add_parser(
         "network-list", help="Collect network requests/responses over a short attach window"
     )
-    network_list.add_argument("instance", nargs="?", metavar="INSTANCE", help="Instance (omit if only one)")
-    network_list.add_argument("--target", metavar="SPEC", help="Select the page target (index or id)")
-    network_list.add_argument("--url", metavar="SUBSTRING", help="Select the page target by URL substring")
+    network_list.add_argument(
+        "instance", nargs="?", metavar="INSTANCE", help="Instance (omit if only one)"
+    )
     network_list.add_argument(
         "--duration",
         type=float,
@@ -170,9 +156,32 @@ def build_parser() -> argparse.ArgumentParser:
         help="Collection window in seconds (default: 2.0)",
     )
 
+    existing = set(sub.choices)
     _add_curated_verbs(sub)
+    for name in sub.choices.keys() - existing:
+        verb = sub.choices[name]
+        verb.set_defaults(curated=True)
+        _add_target_flags(verb)
 
+    for verb in (attach, wait, console_list, network_list):
+        _add_target_flags(verb)
     return parser
+
+
+def _add_target_flags(parser: argparse.ArgumentParser) -> None:
+    """Give leaf curated actions the shared target slot."""
+    children = [
+        action
+        for action in parser._actions
+        if isinstance(action, argparse._SubParsersAction)  # pyright: ignore[reportPrivateUsage]
+    ]
+    if children:
+        for action in children:
+            for child in action.choices.values():
+                _add_target_flags(child)
+    elif "--target" not in parser._option_string_actions:
+        parser.add_argument("--target", metavar="SPEC", help="Select a page by index or id")
+        parser.add_argument("--url", metavar="SUBSTRING", help="Select a page by URL substring")
 
 
 def _add_curated_verbs(
@@ -187,11 +196,18 @@ def _add_curated_verbs(
     optional at the argparse layer and validated in ``_run`` so the parser still
     accepts the bare verb (the skill drift test parses ``VERB`` alone).
     """
+    tool = sub.add_parser("tool", help="Call a CDP handler tool with JSON arguments")
+    tool.add_argument("args", nargs="*", metavar="[INSTANCE] NAME [JSON]")
+
     snapshot = sub.add_parser("snapshot", help="Native UID accessibility tree")
-    snapshot.add_argument("instance", nargs="?", metavar="INSTANCE", help="Instance (omit if only one)")
+    snapshot.add_argument(
+        "instance", nargs="?", metavar="INSTANCE", help="Instance (omit if only one)"
+    )
 
     click = sub.add_parser("click", help="Native UID click")
-    click.add_argument("instance", nargs="?", metavar="INSTANCE", help="Instance (omit if only one)")
+    click.add_argument(
+        "instance", nargs="?", metavar="INSTANCE", help="Instance (omit if only one)"
+    )
     click.add_argument("--uid", metavar="N", help="UID from a prior snapshot")
 
     fill = sub.add_parser("fill", help="Native UID fill")
@@ -200,29 +216,47 @@ def _add_curated_verbs(
     fill.add_argument("--text", metavar="T", help="Text to fill")
 
     wait_idle = sub.add_parser("wait-idle", help="Wait for network idle")
-    wait_idle.add_argument("instance", nargs="?", metavar="INSTANCE", help="Instance (omit if only one)")
     wait_idle.add_argument(
-        "--timeout-ms", type=int, default=curated.DEFAULT_WAIT_TIMEOUT_MS, metavar="MS",
+        "instance", nargs="?", metavar="INSTANCE", help="Instance (omit if only one)"
+    )
+    wait_idle.add_argument(
+        "--timeout-ms",
+        type=int,
+        default=curated.DEFAULT_WAIT_TIMEOUT_MS,
+        metavar="MS",
         help="Overall deadline in ms (default: 5000)",
     )
     wait_idle.add_argument(
-        "--idle-ms", type=int, default=curated.DEFAULT_IDLE_MS, metavar="MS",
+        "--idle-ms",
+        type=int,
+        default=curated.DEFAULT_IDLE_MS,
+        metavar="MS",
         help="Quiet window in ms (default: 500)",
     )
 
     wait_stable = sub.add_parser("wait-stable", help="Wait for DOM quiescence")
-    wait_stable.add_argument("instance", nargs="?", metavar="INSTANCE", help="Instance (omit if only one)")
     wait_stable.add_argument(
-        "--timeout-ms", type=int, default=curated.DEFAULT_WAIT_TIMEOUT_MS, metavar="MS",
+        "instance", nargs="?", metavar="INSTANCE", help="Instance (omit if only one)"
+    )
+    wait_stable.add_argument(
+        "--timeout-ms",
+        type=int,
+        default=curated.DEFAULT_WAIT_TIMEOUT_MS,
+        metavar="MS",
         help="Overall deadline in ms (default: 5000)",
     )
     wait_stable.add_argument(
-        "--stable-ms", type=int, default=curated.DEFAULT_STABLE_MS, metavar="MS",
+        "--stable-ms",
+        type=int,
+        default=curated.DEFAULT_STABLE_MS,
+        metavar="MS",
         help="Quiescence window in ms (default: 300)",
     )
 
     detect = sub.add_parser("detect", help="Run interstitial detection against the current page")
-    detect.add_argument("instance", nargs="?", metavar="INSTANCE", help="Instance (omit if only one)")
+    detect.add_argument(
+        "instance", nargs="?", metavar="INSTANCE", help="Instance (omit if only one)"
+    )
 
     frames = sub.add_parser("frames", help="Inspect or select page frames")
     frames_sub = frames.add_subparsers(dest="frames_action", metavar="ACTION")
@@ -240,21 +274,43 @@ def _add_curated_verbs(
     sg.add_argument("instance", nargs="?", metavar="INSTANCE", help="Instance (omit if only one)")
     sg.add_argument("--key", metavar="K", help="Frame URL pattern to select before reading")
 
+    sg.add_argument(
+        "--reveal-values", action="store_true", help="Print cookie values instead of lengths"
+    )
+
     screenshot = sub.add_parser("screenshot", help="Capture a page screenshot")
-    screenshot.add_argument("instance", nargs="?", metavar="INSTANCE", help="Instance (omit if only one)")
-    screenshot.add_argument("--path", metavar="FILE", help="Write the PNG to a file instead of stdout")
-    screenshot.add_argument("--target", metavar="SPEC", help="Select the page target (index or id)")
-    screenshot.add_argument("--url", metavar="SUBSTRING", help="Select the page target by URL substring")
+    screenshot.add_argument(
+        "instance", nargs="?", metavar="INSTANCE", help="Instance (omit if only one)"
+    )
+    screenshot.add_argument(
+        "--path", metavar="FILE", help="Write the PNG to a file instead of stdout"
+    )
 
     screencast = sub.add_parser("screencast", help="Start or stop screencast capture")
     screencast_sub = screencast.add_subparsers(dest="screencast_action", metavar="ACTION")
-    cast_start = screencast_sub.add_parser("start", help="Begin capture")
-    cast_start.add_argument("instance", nargs="?", metavar="INSTANCE", help="Instance (omit if only one)")
-    cast_start.add_argument("--format", dest="format", default="jpeg", metavar="FMT", help="jpeg or png (default: jpeg)")
-    cast_start.add_argument("--max-frames", type=int, default=600, metavar="N", help="Frame cap (default: 600)")
+    cast_start = screencast_sub.add_parser(
+        "record", aliases=["start"], help="Record until stopped, then write frames"
+    )
+    cast_start.add_argument(
+        "instance", nargs="?", metavar="INSTANCE", help="Instance (omit if only one)"
+    )
+    cast_start.add_argument(
+        "--format", dest="format", default="jpeg", metavar="FMT", help="jpeg or png (default: jpeg)"
+    )
+    cast_start.add_argument(
+        "--max-frames", type=int, default=600, metavar="N", help="Frame cap (default: 600)"
+    )
+    cast_start.add_argument("--dir", metavar="DIR", help="Empty output directory (required)")
+    cast_start.add_argument(
+        "--duration", type=float, metavar="SECONDS", help="Stop after this duration"
+    )
     cast_stop = screencast_sub.add_parser("stop", help="Stop capture and write frames")
-    cast_stop.add_argument("instance", nargs="?", metavar="INSTANCE", help="Instance (omit if only one)")
-    cast_stop.add_argument("--dir", dest="dir", metavar="DIR", help="Directory to write frames into")
+    cast_stop.add_argument(
+        "instance", nargs="?", metavar="INSTANCE", help="Instance (omit if only one)"
+    )
+    cast_stop.add_argument(
+        "--dir", dest="dir", metavar="DIR", help="Directory to write frames into"
+    )
 
 
 def _print_json(payload: object) -> None:
@@ -289,6 +345,8 @@ def _run(args: argparse.Namespace) -> int:
     """Dispatch one parsed verb. Raises LifecycleError for operational failures."""
     registry_path = lifecycle.registry_path_from_env()
 
+    if getattr(args, "target", None) is not None and getattr(args, "url", None) is not None:
+        raise PassthroughUsageError("cannot specify both --target and --url")
     if args.command == "launch":
         instance = lifecycle.launch(
             engine=args.engine,
@@ -342,8 +400,6 @@ def _run(args: argparse.Namespace) -> int:
         return EXIT_OK
 
     if args.command == "attach":
-        if args.target is not None and args.url is not None:
-            raise PassthroughUsageError("cannot specify both --target and --url")
         instance, subscriptions = events.resolve_attach_args(args.args)
         events.run_attach(
             instance=instance,
@@ -355,8 +411,6 @@ def _run(args: argparse.Namespace) -> int:
         return EXIT_OK
 
     if args.command == "wait":
-        if args.target is not None and args.url is not None:
-            raise PassthroughUsageError("cannot specify both --target and --url")
         event = events.wait(
             instance=args.instance,
             event=args.event,
@@ -370,8 +424,6 @@ def _run(args: argparse.Namespace) -> int:
         return EXIT_OK
 
     if args.command == "console-list":
-        if args.target is not None and args.url is not None:
-            raise PassthroughUsageError("cannot specify both --target and --url")
         messages = list_verbs.console_list(
             instance=args.instance,
             target=args.target,
@@ -383,8 +435,6 @@ def _run(args: argparse.Namespace) -> int:
         return EXIT_OK
 
     if args.command == "network-list":
-        if args.target is not None and args.url is not None:
-            raise PassthroughUsageError("cannot specify both --target and --url")
         requests = list_verbs.network_list(
             instance=args.instance,
             target=args.target,
@@ -403,20 +453,6 @@ def _run(args: argparse.Namespace) -> int:
 
 
 #: Curated verbs dispatched through ``browser_tools.curated`` (RFC-01 #50).
-_CURATED_COMMANDS = frozenset(
-    {
-        "snapshot",
-        "click",
-        "fill",
-        "wait-idle",
-        "wait-stable",
-        "detect",
-        "frames",
-        "storage",
-        "screenshot",
-        "screencast",
-    }
-)
 
 
 def _run_curated(args: argparse.Namespace, registry_path: str | None) -> int:
@@ -427,14 +463,33 @@ def _run_curated(args: argparse.Namespace, registry_path: str | None) -> int:
     operational failures the ``curated`` functions raise are ``LifecycleError``
     (exit 1), handled by the caller.
     """
+    target = getattr(args, "target", None)
+    url = getattr(args, "url", None)
+    if args.command == "tool":
+        _print_json(
+            curated.tool(args.args, target=args.target, url=args.url, registry_path=registry_path)
+        )
+        return EXIT_OK
     if args.command == "snapshot":
-        _print_json(curated.snapshot(instance=args.instance, registry_path=registry_path))
+        _print_json(
+            curated.snapshot(
+                instance=args.instance, registry_path=registry_path, target=target, url=url
+            )
+        )
         return EXIT_OK
 
     if args.command == "click":
         if not args.uid:
             raise PassthroughUsageError("click requires --uid N (a UID from a prior snapshot)")
-        _print_json(curated.click(instance=args.instance, uid=args.uid, registry_path=registry_path))
+        _print_json(
+            curated.click(
+                instance=args.instance,
+                uid=args.uid,
+                registry_path=registry_path,
+                target=target,
+                url=url,
+            )
+        )
         return EXIT_OK
 
     if args.command == "fill":
@@ -444,7 +499,12 @@ def _run_curated(args: argparse.Namespace, registry_path: str | None) -> int:
             raise PassthroughUsageError("fill requires --text T")
         _print_json(
             curated.fill(
-                instance=args.instance, uid=args.uid, text=args.text, registry_path=registry_path
+                instance=args.instance,
+                uid=args.uid,
+                text=args.text,
+                registry_path=registry_path,
+                target=target,
+                url=url,
             )
         )
         return EXIT_OK
@@ -456,6 +516,8 @@ def _run_curated(args: argparse.Namespace, registry_path: str | None) -> int:
                 timeout_ms=args.timeout_ms,
                 idle_ms=args.idle_ms,
                 registry_path=registry_path,
+                target=target,
+                url=url,
             )
         )
         return EXIT_OK
@@ -467,12 +529,18 @@ def _run_curated(args: argparse.Namespace, registry_path: str | None) -> int:
                 timeout_ms=args.timeout_ms,
                 stable_ms=args.stable_ms,
                 registry_path=registry_path,
+                target=target,
+                url=url,
             )
         )
         return EXIT_OK
 
     if args.command == "detect":
-        _print_json(curated.detect(instance=args.instance, registry_path=registry_path))
+        _print_json(
+            curated.detect(
+                instance=args.instance, registry_path=registry_path, target=target, url=url
+            )
+        )
         return EXIT_OK
 
     if args.command == "frames":
@@ -483,7 +551,14 @@ def _run_curated(args: argparse.Namespace, registry_path: str | None) -> int:
         if action != "get":
             raise PassthroughUsageError("storage takes one sub-action: get")
         _print_json(
-            curated.storage_get(instance=args.instance, key=args.key, registry_path=registry_path)
+            curated.storage_get(
+                instance=args.instance,
+                key=args.key,
+                reveal_values=args.reveal_values,
+                registry_path=registry_path,
+                target=target,
+                url=url,
+            )
         )
         return EXIT_OK
 
@@ -509,17 +584,35 @@ def _run_frames(args: argparse.Namespace, registry_path: str | None) -> int:
     """Dispatch ``frames list|select|reset``."""
     action = getattr(args, "frames_action", None)
     if action == "list":
-        _print_json(curated.frames_list(instance=args.instance, registry_path=registry_path))
+        _print_json(
+            curated.frames_list(
+                instance=args.instance,
+                registry_path=registry_path,
+                target=getattr(args, "target", None),
+                url=getattr(args, "url", None),
+            )
+        )
         return EXIT_OK
     if action == "select":
         _print_json(
             curated.frames_select(
-                instance=args.instance, pattern=args.pattern, registry_path=registry_path
+                instance=args.instance,
+                pattern=args.pattern,
+                registry_path=registry_path,
+                target=getattr(args, "target", None),
+                url=getattr(args, "url", None),
             )
         )
         return EXIT_OK
     if action == "reset":
-        _print_json(curated.frames_reset(instance=args.instance, registry_path=registry_path))
+        _print_json(
+            curated.frames_reset(
+                instance=args.instance,
+                registry_path=registry_path,
+                target=getattr(args, "target", None),
+                url=getattr(args, "url", None),
+            )
+        )
         return EXIT_OK
     raise PassthroughUsageError("frames takes one sub-action: list, select, or reset")
 
@@ -527,26 +620,34 @@ def _run_frames(args: argparse.Namespace, registry_path: str | None) -> int:
 def _run_screencast(args: argparse.Namespace, registry_path: str | None) -> int:
     """Dispatch ``screencast start|stop``."""
     action = getattr(args, "screencast_action", None)
-    if action == "start":
+    if action in ("record", "start"):
+        if not args.dir:
+            raise PassthroughUsageError("screencast record requires --dir DIR")
         _print_json(
-            curated.screencast_start(
+            curated.screencast_record(
                 instance=args.instance,
                 fmt=args.format,
+                out_dir=args.dir,
+                duration=args.duration,
                 max_frames=args.max_frames,
                 registry_path=registry_path,
+                target=getattr(args, "target", None),
+                url=getattr(args, "url", None),
             )
         )
         return EXIT_OK
     if action == "stop":
-        if not args.dir:
-            raise PassthroughUsageError("screencast stop requires --dir DIR")
         _print_json(
             curated.screencast_stop(
-                instance=args.instance, out_dir=args.dir, registry_path=registry_path
+                instance=args.instance,
+                out_dir=args.dir,
+                registry_path=registry_path,
+                target=getattr(args, "target", None),
+                url=getattr(args, "url", None),
             )
         )
         return EXIT_OK
-    raise PassthroughUsageError("screencast takes one sub-action: start or stop")
+    raise PassthroughUsageError("screencast takes one sub-action: record, start, or stop")
 
 
 def _run_passthrough(argv: list[str], registry_path: str | None) -> int:
@@ -577,11 +678,7 @@ def main(argv: list[str] | None = None) -> int:
     """Entry point for both the ``browser-tools`` and ``bt`` console scripts."""
     raw_argv = sys.argv[1:] if argv is None else argv
 
-    if (
-        raw_argv
-        and raw_argv[0] not in _KNOWN_VERBS
-        and raw_argv[0] not in ("-h", "--help")
-    ):
+    if raw_argv and raw_argv[0] not in _KNOWN_VERBS and raw_argv[0] not in ("-h", "--help"):
         registry_path = lifecycle.registry_path_from_env()
         if passthrough.is_passthrough_head(raw_argv[0], registry_path=registry_path):
             try:
@@ -610,6 +707,18 @@ def main(argv: list[str] | None = None) -> int:
     except PassthroughUsageError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_USAGE
+
+
+def _registered_commands() -> tuple[frozenset[str], frozenset[str]]:
+    parser = _PARSER
+    action = next(a for a in parser._actions if isinstance(a, argparse._SubParsersAction))  # pyright: ignore[reportPrivateUsage]
+    return frozenset(action.choices), frozenset(
+        name for name, command in action.choices.items() if command.get_default("curated")
+    )
+
+
+_PARSER = build_parser()
+_KNOWN_VERBS, _CURATED_COMMANDS = _registered_commands()
 
 
 if __name__ == "__main__":

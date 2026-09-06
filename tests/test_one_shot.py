@@ -27,6 +27,22 @@ from browser_tools.core.registry import InstanceNotFoundError
 from browser_tools.lifecycle import LifecycleError
 from browser_tools.one_shot import cli_cdp_errors, one_shot_page_session
 
+
+@pytest.mark.parametrize(
+    ("target", "url", "expected"),
+    [
+        (None, None, (None, None)),
+        ("2", None, ("2", "index")),
+        ("abc", None, ("abc", "id")),
+        (None, "example", ("example", "url")),
+    ],
+)
+def test_target_slot_preserves_raw_protocol_selection(target, url, expected):
+    from browser_tools.one_shot import target_slot
+
+    assert target_slot(target, url) == expected
+
+
 # ---------------------------------------------------------------------------
 # Fake CDP client -- shared connect/getTargets/attach/detach double
 # ---------------------------------------------------------------------------
@@ -78,9 +94,7 @@ def fake_transport(monkeypatch):
     def _install(targets=None):
         fake_cls, calls = make_fake_cdp_client_cls(targets=targets)
         monkeypatch.setattr("browser_tools.one_shot.CDPClient", fake_cls)
-        monkeypatch.setattr(
-            "browser_tools.one_shot.get_ws_url", lambda **kw: "ws://fake/browser"
-        )
+        monkeypatch.setattr("browser_tools.one_shot.get_ws_url", lambda **kw: "ws://fake/browser")
         return calls, fake_cls
 
     return _install
@@ -198,9 +212,7 @@ class TestOneShotPageSession:
                 return {}
 
         monkeypatch.setattr("browser_tools.one_shot.CDPClient", FakeCDPClient)
-        monkeypatch.setattr(
-            "browser_tools.one_shot.get_ws_url", lambda **kw: "ws://fake/browser"
-        )
+        monkeypatch.setattr("browser_tools.one_shot.get_ws_url", lambda **kw: "ws://fake/browser")
 
         async def _run():
             async with one_shot_page_session(9222, None, None) as (_cdp, _session_id):
@@ -358,7 +370,9 @@ class TestConnectionFailureMessage:
     def test_unchained_error_defaults_to_no_browser(self):
         from browser_tools.one_shot import connection_failure_message
 
-        assert connection_failure_message(port=1, cause=None).startswith("No browser listening on port 1")
+        assert connection_failure_message(port=1, cause=None).startswith(
+            "No browser listening on port 1"
+        )
 
     def test_mapped_to_lifecycle_error_by_cli_cdp_errors(self, monkeypatch):
         def stalled(**kw):

@@ -39,7 +39,7 @@ from .core import protocol as core_protocol
 from .core import registry as core_registry
 from .core.registry import InstanceNotFoundError
 from .lifecycle import LifecycleError
-from .one_shot import cli_cdp_errors, one_shot_page_session
+from .one_shot import cli_cdp_errors, one_shot_page_session, target_slot
 
 
 class UsageError(Exception):
@@ -190,14 +190,7 @@ def send(
             raise UsageError("parameters must be a JSON object")
         params = parsed
 
-    target_by: str | None = None
-    spec: str | None = None
-    if target is not None:
-        spec = target
-        target_by = "index" if target.isdigit() else "id"
-    elif url is not None:
-        spec = url
-        target_by = "url"
+    spec, target_by = target_slot(target, url)
 
     async def _send() -> dict[str, Any]:
         async with one_shot_page_session(info.port, spec, target_by) as (cdp, session_id):
@@ -238,7 +231,7 @@ def _resolve_help_port(instance: str | None, registry_path: str | None) -> int |
         try:
             info = core_registry.lookup(instance_name=instance, registry_path=registry_path)
         except InstanceNotFoundError as exc:
-            raise LifecycleError(str(exc)) from exc
+            raise LifecycleError(str(exc).replace("chrome-agent launch", "bt launch")) from exc
         return info.port
 
     # No instance named: only auto-resolve when exactly one instance is

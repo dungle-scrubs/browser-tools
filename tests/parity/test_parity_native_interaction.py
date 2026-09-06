@@ -116,7 +116,9 @@ def test_native_fill_and_click_on_form_page(chromium_session):
     fill_email = interactor.fill(send, email_uid, "agent@example.com")
     interactor.fill(send, name_uid, "Ada Lovelace")
     assert fill_email.value_after == "agent@example.com"
-    assert chromium_session.evaluate("document.getElementById('email').value") == "agent@example.com"
+    assert (
+        chromium_session.evaluate("document.getElementById('email').value") == "agent@example.com"
+    )
     assert chromium_session.evaluate("document.getElementById('name').value") == "Ada Lovelace"
 
     # click: a trusted mouse click toggles the checkbox.

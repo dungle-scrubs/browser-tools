@@ -50,7 +50,7 @@ def _capture_native_twice() -> tuple[dict, dict]:
             engine = NativeInteractionEngine(session)
             return capture_corpus(engine), capture_corpus(engine)
     except Exception as exc:  # missing browser binary, sandbox denial, etc.
-        pytest.skip(f"could not launch a live Chromium: {exc}")
+        pytest.fail(f"native parity failed: {exc}")
 
 
 def _capture_node_twice() -> tuple[dict, dict]:
@@ -59,7 +59,7 @@ def _capture_node_twice() -> tuple[dict, dict]:
             engine = NodeEngine(node)
             return capture_corpus(engine), capture_corpus(engine)
     except Exception as exc:  # npx/network/Chrome unavailable
-        pytest.skip(f"could not launch the chrome-devtools-mcp Node engine: {exc}")
+        pytest.fail(f"Node baseline failed: {exc}")
 
 
 @pytest.fixture(scope="module")
@@ -79,7 +79,9 @@ def test_gate_covers_full_corpus_two_consecutive_runs(captures) -> None:
     for run_index in (0, 1):
         results = corpus_covers(node_runs[run_index], native_runs[run_index])
         broken = {pid: [d.detail for d in r.diffs] for pid, r in results.items() if not r.matched}
-        assert corpus_matches(results), f"run {run_index + 1}: native did not cover Node baseline: {broken}"
+        assert corpus_matches(results), (
+            f"run {run_index + 1}: native did not cover Node baseline: {broken}"
+        )
 
 
 def test_gate_covers_every_frozen_page(captures) -> None:

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Camoufox anti-detect browser session for tool-proxy.
+"""Camoufox driver reserved for RFC-02 Open Question 1.
 
-Launches a Camoufox (custom Firefox) browser with C++ fingerprint injection
-and exposes automation tools for navigating bot-protected sites.
+No CLI module imports this retained driver; Camoufox automation awaits
+its own command-channel RFC.
 """
 
 from __future__ import annotations

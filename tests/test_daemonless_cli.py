@@ -1,21 +1,6 @@
-"""Prove the MCP front is optional: every CLI verb runs with no daemon (RFC-01 #44).
+"""The CLI imports no optional browser driver and needs no resident broker.
 
-Part A of the daemon-demotion ticket commits that nothing in the core or any CLI
-verb path requires a running daemon. These tests pin that at two levels:
-
-1. Import closure -- importing the CLI (and every module on the verb-dispatch
-   path) drags in none of the MCP front / legacy session stack: the daemon
-   broker, its supervisor and client, the persistent controller, the session
-   store/reaper, or the Camoufox session. Because the supervisor that spawns a
-   daemon is never even imported on this path, a CLI verb categorically cannot
-   start one. A regression that couples the CLI to the daemon fails this test.
-
-2. Live dispatch -- running the daemonless verbs through ``cli.main`` against an
-   isolated registry returns the expected exit codes with no daemon alive.
-
-The import-closure half runs in a *fresh* interpreter (subprocess) so the
-assertion is about what the CLI import pulls in, not what the pytest process
-happens to have loaded from other tests.
+Import checks run in a fresh interpreter; dispatch checks use an isolated registry.
 """
 
 from __future__ import annotations
@@ -28,22 +13,8 @@ import pytest
 
 from browser_tools import cli, lifecycle
 
-# Modules that make up the optional MCP front and the legacy session stack it
-# drives. None of them may be imported as a side effect of loading the CLI.
-FORBIDDEN_MODULES = [
-    "browser_tools.mcp_daemon",
-    "browser_tools.mcp_broker",
-    "browser_tools.daemon_supervisor",
-    "browser_tools.daemon_client",
-    "browser_tools.persistent_browser",
-    "browser_tools.session_store",
-    "browser_tools.session_reaper",
-    "browser_tools.browser_session",
-    "browser_tools.automation_backend",
-    "browser_tools.mcp_session",
-    "browser_tools.camoufox_session",
-    "browser_tools.camoufox_runner",
-]
+# Reserved optional drivers stay outside the CLI import closure.
+FORBIDDEN_MODULES = ["browser_tools.camoufox_session", "browser_tools.camoufox_runner"]
 
 # The modules the CLI front dispatches through (see cli.py). Importing all of
 # them must still not load the daemon stack.

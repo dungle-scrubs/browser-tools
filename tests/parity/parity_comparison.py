@@ -143,11 +143,16 @@ def _uid_target_diffs(
             continue
         if base_target is None:
             diffs.append(
-                ParityDiff("uid_target", f"uid {uid!r} resolves in candidate only -> {cand_target!r}")
+                ParityDiff(
+                    "uid_target", f"uid {uid!r} resolves in candidate only -> {cand_target!r}"
+                )
             )
         elif cand_target is None:
             diffs.append(
-                ParityDiff("uid_target", f"uid {uid!r} does not resolve in candidate (baseline -> {base_target!r})")
+                ParityDiff(
+                    "uid_target",
+                    f"uid {uid!r} does not resolve in candidate (baseline -> {base_target!r})",
+                )
             )
         else:
             diffs.append(

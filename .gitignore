@@ -30,3 +30,7 @@ Thumbs.db
 
 # Agent worktrees (transient)
 .claude/worktrees/
+
+# Local design and audit artifacts
+.lucid/
+assets/

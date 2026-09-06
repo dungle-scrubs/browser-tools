@@ -1,9 +1,7 @@
 # tool-proxy retirement note (RFC-01 Phase 4)
 
 RFC-01 "Out of tool-proxy" retires the tool-proxy `browser-tools` app together
-with the global "route browser automation through tool-proxy" instruction. The
-optional MCP front stays available for harnesses that cannot run a CLI; agents
-that can run a CLI use `browser-tools` / `bt` (and the `browser-tools` agent
+with the global "route browser automation through tool-proxy" instruction. RFC-02 removes the optional MCP front. Agents use `browser-tools` / `bt` (and the `browser-tools` agent
 skill) directly.
 
 **This note is a hand-off for a human. It changes nothing outside this
@@ -35,9 +33,8 @@ inspection on 2026-08-21 and may shift.
     └── test_adapter.py
 ```
 
-The adapter is only a schema/discovery shim; the runtime, CLI, daemon, CDP
-helpers, and Camoufox session already live in the standalone package at
-`~/dev/browser-tools`, so deleting the app removes no browser capability.
+The adapter is a schema/discovery shim for the retired MCP architecture.
+The standalone CLI at `~/dev/browser-tools` now owns browser control.
 
 ### 1b. Remove the app's dependency wiring in `~/dev/tool-proxy/pyproject.toml`
 
@@ -111,8 +108,7 @@ instruction is wanted in its place, use something like:
 ## Browser Automation
 
 Handle browser automation with the `browser-tools` CLI (`browser-tools` / `bt`)
-and its agent skill (`~/.agents/skills/browser-tools`). The optional MCP front
-remains only for harnesses that cannot run a CLI.
+and its agent skill (`~/.agents/skills/browser-tools`).
 ```
 
 If no standing instruction is wanted, delete the section outright -- the skill's

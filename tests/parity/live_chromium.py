@@ -22,7 +22,10 @@ requires it; :func:`chromium_available` reports whether a live run is possible.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
+import socket
+import threading
 from typing import Any
 
 
@@ -53,21 +56,46 @@ class PlaywrightChromiumSession:
         self._context: Any = None
         self._page: Any = None
         self._cdp: Any = None
+        self._runtime: Any = None
+        self._thread: Any = None
 
     def __enter__(self) -> PlaywrightChromiumSession:
         from playwright.sync_api import sync_playwright
 
+        from browser_tools.cdp_handler import CDPRuntime
+
+        with socket.socket() as reservation:
+            reservation.bind(("127.0.0.1", 0))
+            port = reservation.getsockname()[1]
+        browser_args = [f"--remote-debugging-port={port}", "--remote-debugging-address=127.0.0.1"]
         self._pw = sync_playwright().start()
         # Prefer the Playwright-managed Chromium; fall back to an installed
         # Google Chrome via the "chrome" channel when the bundled binary was
         # not downloaded (``playwright install`` never run in this environment).
         try:
-            self._browser = self._pw.chromium.launch(headless=self._headless)
+            self._browser = self._pw.chromium.launch(headless=self._headless, args=browser_args)
         except Exception:
-            self._browser = self._pw.chromium.launch(headless=self._headless, channel="chrome")
+            self._browser = self._pw.chromium.launch(
+                headless=self._headless, channel="chrome", args=browser_args
+            )
         self._context = self._browser.new_context()
         self._page = self._context.new_page()
-        self._cdp = self._context.new_cdp_session(self._page)
+        selector = self._context.new_cdp_session(self._page)
+        target_id = selector.send("Target.getTargetInfo")["targetInfo"]["targetId"]
+        selector.detach()
+        self._runtime = CDPRuntime(port, target_id)
+        self._thread = threading.Thread(target=self._runtime.run, daemon=True)
+        self._thread.start()
+        self._runtime.wait_ready(10)
+        runtime = self._runtime
+
+        class BoundCoreSession:
+            def send(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+                return asyncio.run_coroutine_threadsafe(
+                    runtime.send(method, params), runtime.loop
+                ).result(10)
+
+        self._cdp = BoundCoreSession()
         self._cdp.send("Accessibility.enable")
         # The native interaction path (ticket #40) addresses nodes by
         # backendNodeId over the DOM/Runtime domains; enable them and prime the
@@ -77,6 +105,10 @@ class PlaywrightChromiumSession:
         return self
 
     def __exit__(self, *exc: object) -> None:
+        if self._runtime is not None:
+            self._runtime.stop()
+        if self._thread is not None:
+            self._thread.join(6)
         for close in (
             lambda: self._context.close() if self._context else None,
             lambda: self._browser.close() if self._browser else None,
@@ -102,7 +134,7 @@ class PlaywrightChromiumSession:
         The synchronous counterpart of
         :func:`~browser_tools.native_snapshot.read_stitched_ax_tree`: it drives the
         same discovery (``Page.getFrameTree`` -> ``DOM.getFrameOwner`` ->
-        per-frame ``Accessibility.getFullAXTree``) over Playwright's sync CDP
+        per-frame ``Accessibility.getFullAXTree``) over the core CDP
         session and reuses the production :func:`stitch_ax_frames` transform, so
         the native parity engines read the cross-frame node set the flipped native
         backend serves.

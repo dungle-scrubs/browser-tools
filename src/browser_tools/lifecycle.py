@@ -42,16 +42,24 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import ctypes
+import fcntl
+import functools
 import json
 import os
+import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Generator
 
 from .core import instance_status as core_status
 from .core import launcher as core_launcher
@@ -61,8 +69,13 @@ from .core.registry import InstanceNotFoundError
 from .core.utils import process_is_ours, process_start_time
 from .process_utils import (
     clean_stale_singleton_lock,
+    is_process_alive,
+    make_private_dirs,
     pid_holds_user_data_dir,
+    read_process_args,
+    read_singleton_lock_pid,
     terminate_process_and_wait,
+    user_data_dir_from_args,
 )
 
 DEFAULT_ENGINE = "chrome"
@@ -76,12 +89,13 @@ REGISTRY_ENV_VAR = "BROWSER_TOOLS_REGISTRY"
 #: session dirs. It is deliberately OUTSIDE the vendored session root
 #: (/tmp/chrome-agent) so the launch-time orphan sweep never reaps a profile.
 PROFILES_ENV_VAR = "BROWSER_TOOLS_PROFILES_DIR"
-DEFAULT_PROFILES_ROOT = "/tmp/browser-tools-profiles"
+LEGACY_PROFILES_ROOT = Path("/tmp/browser-tools-profiles")
+RESERVED_PROFILE_NAMES = frozenset({".ephemeral"})
 
 
 def profiles_root() -> Path:
     """Resolve the root directory that holds persistent profile dirs."""
-    return Path(os.environ.get(PROFILES_ENV_VAR) or DEFAULT_PROFILES_ROOT)
+    return Path(os.environ.get(PROFILES_ENV_VAR) or (Path.home() / ".cache/browser-tools/profiles"))
 
 
 def profile_user_data_dir(profile: str) -> Path:
@@ -91,11 +105,205 @@ def profile_user_data_dir(profile: str) -> Path:
     throwaway session. One profile maps to exactly one directory, which is what
     makes profile exclusivity a check the registry can answer.
     """
-    return profiles_root() / profile
+    return profiles_root() / validate_profile_name(profile)
 
 
 class LifecycleError(Exception):
     """An operational lifecycle failure (maps to CLI exit code 1)."""
+
+
+def validate_profile_name(name: str) -> str:
+    """Return a valid non-reserved Profile Name, without changing its spelling."""
+    if (
+        not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", name)
+        or name in {".", ".."}
+        or name.lower() in RESERVED_PROFILE_NAMES
+    ):
+        raise LifecycleError(
+            "Invalid Profile Name: use 1-64 characters [A-Za-z0-9._-], excluding '.', '..', and reserved '.ephemeral'"
+        )
+    return name
+
+
+def _rename_profile(source: Path, destination: Path) -> None:
+    """Atomically move a profile without replacing any destination entry."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    if sys.platform == "darwin":
+        result = libc.renamex_np(os.fsencode(source), os.fsencode(destination), 4)
+    elif sys.platform == "linux" and hasattr(libc, "renameat2"):
+        result = libc.renameat2(-100, os.fsencode(source), -100, os.fsencode(destination), 1)
+    else:
+        raise OSError("atomic non-overwriting rename is unavailable")
+    if result:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error))
+
+
+def _profile_holder_reason(source: Path, registry_path: str | None) -> str | None:
+    """Return a live or uncertain holder; absence requires exact process inspection."""
+    resolved_source = source.resolve()
+    if not registry_is_parseable(registry_path):
+        return "uncertain holder: registry is unreadable"
+    for entry in read_instances(registry_path):
+        if (
+            entry.user_data_dir
+            and Path(entry.user_data_dir).resolve() == resolved_source
+            and process_is_ours(pid=entry.pid, expected_start=entry.pid_start)
+        ):
+            return f"live holder {entry.name}"
+    lock = source / "SingletonLock"
+    if lock.exists() or lock.is_symlink():
+        pid = read_singleton_lock_pid(source)
+        if pid is None:
+            return "uncertain holder: unreadable SingletonLock"
+        if is_process_alive(pid):
+            return f"live holder PID {pid}"
+    try:
+        processes = subprocess.run(
+            ["ps", "-U", str(os.getuid()), "-o", "pid=,stat="],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=True,
+        )
+        for line in processes.stdout.splitlines():
+            pid_text, status = line.split(maxsplit=1)
+            if status.startswith("Z"):
+                continue
+            pid = int(pid_text)
+            args = read_process_args(pid)
+            if args is None:
+                if is_process_alive(pid):
+                    return f"uncertain holder: cannot inspect PID {pid}"
+                continue
+            directory = user_data_dir_from_args(args)
+            if directory == resolved_source:
+                return f"live holder PID {pid}"
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return "uncertain holder: process inspection unavailable"
+    return None
+
+
+def _check_profile_directory(path: Path) -> None:
+    info = path.lstat()
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o022:
+        raise LifecycleError(f"unsafe profile directory: {path}")
+
+
+def _private_directory(path: Path) -> None:
+    try:
+        make_private_dirs(path)
+        _check_profile_directory(path)
+    except OSError as exc:
+        raise LifecycleError(f"Cannot create profile directory {path}: {exc}") from exc
+
+
+PROFILE_LOCK_TIMEOUT = 10.0
+
+
+@contextlib.contextmanager
+def _profile_lock() -> Generator[None]:
+    directory = Path.home() / ".cache/browser-tools"
+    _private_directory(directory)
+    directory.chmod(0o700)
+    try:
+        fd = os.open(
+            directory / "profile-lifecycle.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600
+        )
+    except OSError as exc:
+        raise LifecycleError(f"Cannot open profile lifecycle lock: {exc}") from exc
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
+            raise LifecycleError("unsafe profile lifecycle lock")
+        os.fchmod(fd, 0o600)
+        deadline = time.monotonic() + PROFILE_LOCK_TIMEOUT
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise LifecycleError("Timed out waiting for profile lifecycle lock") from None
+                time.sleep(0.05)
+        yield
+    finally:
+        os.close(fd)
+
+
+def _locked_profile_operation[**P, T](
+    *,
+    named_launch: bool = False,
+) -> Callable[[Callable[P, T]], Callable[P, T]]:
+    def decorate(fn: Callable[P, T]) -> Callable[P, T]:
+        @functools.wraps(fn)
+        def wrapped(*args: P.args, **kwargs: P.kwargs) -> T:
+            if named_launch:
+                profile = kwargs.get("profile")
+                if profile is None:
+                    return fn(*args, **kwargs)
+                validate_profile_name(str(profile))
+            with _profile_lock():
+                return fn(*args, **kwargs)
+
+        return wrapped
+
+    return decorate
+
+
+def _migrate_profiles(requested: str, registry_path: str | None) -> None:
+    if os.environ.get(PROFILES_ENV_VAR) is not None or not LEGACY_PROFILES_ROOT.exists():
+        return
+    destination_root = profiles_root()
+    try:
+        _check_profile_directory(LEGACY_PROFILES_ROOT)
+    except (LifecycleError, OSError) as exc:
+        print(f"Profile migration deferred: {exc}", file=sys.stderr)
+        try:
+            (LEGACY_PROFILES_ROOT / requested).lstat()
+        except FileNotFoundError:
+            return
+        except OSError as inspection:
+            raise LifecycleError(
+                f"Profile migration deferred for {requested}: {inspection}"
+            ) from inspection
+        raise LifecycleError(f"Profile migration deferred for {requested}: {exc}") from exc
+    _private_directory(destination_root)
+    for source in LEGACY_PROFILES_ROOT.iterdir():
+        try:
+            validate_profile_name(source.name)
+        except LifecycleError:
+            print(
+                f"Profile migration deferred: {source.name}: invalid or reserved name",
+                file=sys.stderr,
+            )
+            continue
+        destination = profile_user_data_dir(source.name)
+        try:
+            try:
+                _check_profile_directory(source)
+            except LifecycleError as exc:
+                raise OSError(str(exc)) from exc
+            reason = _profile_holder_reason(source, registry_path)
+            if reason is not None:
+                raise OSError(reason)
+            if destination.exists() or destination.is_symlink():
+                print(
+                    f"Profile migration collision: {source.name}; destination retained",
+                    file=sys.stderr,
+                )
+                continue
+            # Recheck immediately before rename; external launches do not share our lock.
+            reason = _profile_holder_reason(source, registry_path)
+            if reason is not None:
+                raise OSError(reason)
+            source.chmod(0o700)
+            _rename_profile(source, destination)
+            print(f"Moved profile {source.name} to {destination}", file=sys.stderr)
+        except OSError as exc:
+            print(f"Profile migration deferred: {source.name}: {exc}", file=sys.stderr)
+            if source.name == requested:
+                raise LifecycleError(f"Profile migration deferred for {requested}: {exc}") from exc
 
 
 @dataclass
@@ -325,9 +533,7 @@ def resolve_channel_binary(channel: str | None) -> str | None:
         if os.path.isfile(path) and os.access(path, os.X_OK):
             return path
     searched = "\n  ".join(candidates) if candidates else "(no known paths for this platform)"
-    raise LifecycleError(
-        f"Chrome '{channel}' channel not found. Searched:\n  {searched}"
-    )
+    raise LifecycleError(f"Chrome '{channel}' channel not found. Searched:\n  {searched}")
 
 
 # ---------------------------------------------------------------------------
@@ -370,6 +576,7 @@ def looks_like_domain_method(token: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
+@_locked_profile_operation(named_launch=True)
 def launch(
     *,
     engine: str = DEFAULT_ENGINE,
@@ -393,14 +600,18 @@ def launch(
     """
     engine = (engine or DEFAULT_ENGINE).lower()
     if engine not in VALID_ENGINES:
-        raise LifecycleError(f"Unknown engine '{engine}'. Choose one of: {', '.join(VALID_ENGINES)}")
+        raise LifecycleError(
+            f"Unknown engine '{engine}'. Choose one of: {', '.join(VALID_ENGINES)}"
+        )
 
     # Resolve the user-data-dir. Profile-bound instances get the persistent
     # per-profile dir; an unbound Camoufox instance still needs a dir for its
     # liveness hold, so it gets a throwaway one that stop/cleanup reaps.
     if profile is not None:
+        validate_profile_name(profile)
+        _migrate_profiles(profile, registry_path)
         user_data_dir = profile_user_data_dir(profile)
-        user_data_dir.mkdir(parents=True, exist_ok=True)
+        _private_directory(user_data_dir)
         # Clean stale singleton locks (dead holder) BEFORE the exclusivity check
         # so a crashed previous run does not wedge the profile forever.
         clean_stale_singleton_lock(user_data_dir)
@@ -412,7 +623,7 @@ def launch(
             )
     elif engine == "camoufox":
         base = profiles_root() / ".ephemeral"
-        base.mkdir(parents=True, exist_ok=True)
+        _private_directory(base)
         user_data_dir = Path(tempfile.mkdtemp(prefix="camoufox-", dir=str(base)))
     else:
         user_data_dir = None
@@ -595,17 +806,13 @@ def status(
         instances = [inst for inst in instances if inst.name == instance]
         if not instances:
             available = [i.name for i in read_instances(registry_path=registry_path)]
-            raise LifecycleError(
-                str(InstanceNotFoundError(name=instance, available=available))
-            )
+            raise LifecycleError(str(InstanceNotFoundError(name=instance, available=available)))
 
     out: list[dict[str, Any]] = []
     for ext in instances:
         alive = instance_is_live(ext)
         targets = (
-            core_status.query_targets(port=ext.port)
-            if alive and ext.engine == "chrome"
-            else []
+            core_status.query_targets(port=ext.port) if alive and ext.engine == "chrome" else []
         )
         out.append(
             {
@@ -689,9 +896,7 @@ def _close_tab(ext: ExtendedInstance, target: str) -> str:
 
         browser_ws = get_ws_url(port=ext.port, target_type="browser")
         async with CDPClient(ws_url=browser_ws) as cdp:
-            result = await cdp.send(
-                method="Target.closeTarget", params={"targetId": target}
-            )
+            result = await cdp.send(method="Target.closeTarget", params={"targetId": target})
             return bool(result.get("success", False))
 
     if asyncio.run(_close()):
@@ -711,9 +916,7 @@ def _stop_managed(
     """
     if target is not None:
         if ext.engine != "chrome":
-            raise LifecycleError(
-                "Closing a single tab is only supported for the chrome engine."
-            )
+            raise LifecycleError("Closing a single tab is only supported for the chrome engine.")
         if not instance_is_live(ext):
             raise LifecycleError(f"{ext.name} is not live; cannot close a tab.")
         return _close_tab(ext, target)
@@ -736,6 +939,7 @@ def _stop_managed(
     return f"{verb} {ext.name}"
 
 
+@_locked_profile_operation()
 def stop(
     instance: str | None = None,
     target: str | None = None,
@@ -762,9 +966,7 @@ def stop(
     by_name = {inst.name: inst for inst in read_instances(registry_path=registry_path)}
     ext = by_name.get(instance)
     if ext is None:
-        raise LifecycleError(
-            str(InstanceNotFoundError(name=instance, available=list(by_name)))
-        )
+        raise LifecycleError(str(InstanceNotFoundError(name=instance, available=list(by_name))))
 
     if ext.engine == "camoufox" or ext.profile is not None:
         return _stop_managed(ext, target, registry_path)
@@ -779,6 +981,7 @@ def stop(
         raise LifecycleError(str(exc)) from exc
 
 
+@_locked_profile_operation()
 def cleanup(registry_path: str | None = None) -> list[str]:
     """Remove stale registry entries and their session directories.
 
@@ -872,6 +1075,48 @@ RAW PROTOCOL
       that browser. Without one, print static usage. A bare leading token is
       resolved as an instance name if the registry knows it, else as a
       Domain.method.
+
+CURATED AND EVENT VERBS
+
+  snapshot [INSTANCE]
+      Return a native UID accessibility tree.
+  click [INSTANCE] --uid UID
+      Click a snapshot node.
+  fill [INSTANCE] --uid UID --text TEXT
+      Fill a snapshot node.
+  wait-idle [INSTANCE] [--timeout-ms MS] [--idle-ms MS]
+      Wait for network quiet.
+  wait-stable [INSTANCE] [--timeout-ms MS] [--stable-ms MS]
+      Wait for DOM quiet.
+  detect [INSTANCE]
+      Return structured interstitial detections.
+  frames list|select|reset
+      Inspect frames; selection lasts for this invocation only.
+  storage get [INSTANCE] [--key URL_PATTERN] [--reveal-values]
+      Read frame storage; cookie values are masked unless explicitly revealed.
+  screenshot [INSTANCE] [--path FILE]
+      Capture a page PNG.
+  screencast record [INSTANCE] --dir DIR [--duration SECONDS] [--max-frames COUNT] [--format jpeg|png]
+      Record in this foreground process; SIGINT/SIGTERM finalizes frames.
+      start is an alias for record; stop explains how to signal the owner.
+  tool [INSTANCE] NAME ['{...json arguments...}']
+      Call a handler tool, e.g. get_text, get_attr, ax_find, or export_pdf.
+      Use screencast record for capture instead of tool start/stop calls.
+  attach [INSTANCE] +Domain.event [+Domain.event ...]
+      Stream CDP events as JSON lines.
+  wait [INSTANCE] --event Domain.event [--timeout SECONDS]
+      Wait for one matching event.
+  console-list [INSTANCE] [--duration SECONDS]
+      Collect console messages.
+  network-list [INSTANCE] [--duration SECONDS]
+      Collect network requests.
+
+All curated and event actions accept --target SPEC or --url SUBSTRING.
+Without a target flag, exactly one page must exist; ambiguous targets fail.
+Named profiles live under ~/.cache/browser-tools/profiles, overridden by
+BROWSER_TOOLS_PROFILES_DIR. Names use 1-64 characters [A-Za-z0-9._-]; '.',
+'..', and '.ephemeral' (any case) are excluded. Live profiles never migrate.
+Camoufox launch is supported; CLI Camoufox automation awaits a follow-up RFC.
 
 OUTPUT AND EXIT CODES
 

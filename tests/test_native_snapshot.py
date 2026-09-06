@@ -173,8 +173,12 @@ def test_ordinals_are_deterministic_across_two_reads_of_same_tree():
     second = reader.build(_form_tree())
     # Same ordinal -> same node identity (role/name/backend); only the
     # generation prefix differs between the two snapshots.
-    first_by_ordinal = {n.uid.split("-")[1]: (n.role, n.name, n.backend_node_id) for n in first.nodes}
-    second_by_ordinal = {n.uid.split("-")[1]: (n.role, n.name, n.backend_node_id) for n in second.nodes}
+    first_by_ordinal = {
+        n.uid.split("-")[1]: (n.role, n.name, n.backend_node_id) for n in first.nodes
+    }
+    second_by_ordinal = {
+        n.uid.split("-")[1]: (n.role, n.name, n.backend_node_id) for n in second.nodes
+    }
     assert first_by_ordinal == second_by_ordinal
     assert first.generation == 1
     assert second.generation == 2
@@ -438,7 +442,9 @@ async def test_read_stitched_ax_tree_discovers_and_splices_child_frame():
 @pytest.mark.asyncio
 async def test_read_stitched_ax_tree_degrades_to_top_frame_when_no_children():
     class _NoFrames:
-        async def __call__(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        async def __call__(
+            self, method: str, params: dict[str, Any] | None = None
+        ) -> dict[str, Any]:
             if method == AX_GET_FULL_TREE:
                 return _form_tree()
             if method == PAGE_GET_FRAME_TREE:

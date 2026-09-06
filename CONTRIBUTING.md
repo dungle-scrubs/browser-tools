@@ -25,7 +25,7 @@ uv run pyright src/
 uv run pytest tests/ -q
 
 # Run specific test file
-uv run pytest tests/test_cdp_client.py -v
+uv run pytest tests/test_cdp_runtime.py -v
 ```
 
 ## Pre-commit
@@ -42,32 +42,44 @@ uv run pre-commit install
 - Docstrings follow Google-style (Args/Returns/Raises)
 - Imports sorted with ruff (isort compatible)
 
-## Module Size
-
-Modules should stay under ~800 lines. When a module exceeds this, extract
-a cohesive set of symbols into a new module and re-export from the original
-for backward compatibility.
-
 ## Architecture
 
-See `README.md` for the module dependency graph. Key principles:
+Keep cohesive behavior behind one owner. Prefer direct imports to forwarding
+aliases and do not split modules solely to meet a line limit.
 
-1. `persistent_browser.py` is the hub — it imports from `process_utils`,
-   `browser_state`, `mcp_session`, `daemon_client`, and `chrome_config`.
-2. `cdp_handler.py` + `cdp_constants.py` implement all CDP-backed tools
-   and constants; only `mcp_daemon.py` imports from them.
-3. `browser_tools_session.py` is the CLI entry point — it imports from
-   `persistent_browser`, `chrome_utils`, and `chrome_config`.
-4. No circular imports — all imports form a DAG from CLI → controller →
-   daemon → CDP handler.
+- `cli.py` owns parsing and dispatch; `tool_registry.py` owns handler metadata.
+- `lifecycle.py` owns instance and profile lifecycle, including migration locking.
+- `one_shot.py` owns target selection and isolated page attachment.
+- `cdp_handler.py` binds handlers to a `CDPRuntime` over `core.cdp_client`.
+- `curated.py` owns CLI actions and foreground Capture lifetime.
+- `screencast.py` owns frame buffering and private artifact writes.
+- `interstitial.py` owns detection and retry policy.
+
+No circular imports: dependencies flow from CLI orchestration to runtime and
+protocol primitives.
+
+The vendored core remains unchanged except for the explicitly adapted launcher
+and supervisor. `NOTICE` and RFC-01 record its provenance and update rules.
+Camoufox launch support is optional. Its reserved driver is not a second
+curated automation path.
 
 ## Testing
 
-- Unit tests: mocked CDP/Playwright/Chrome. Preferred for all new code.
-- Integration tests: `test_mcp_daemon.py` uses real subprocesses and
-  local sockets. `test_attach_browser.py` uses a local HTTP server.
-- E2E tests: `test_e2e_camoufox.py` requires `camoufox fetch`. Skip
-  these in CI with `pytest tests/ --ignore=tests/test_e2e_camoufox.py`.
+Test behavior at public seams with fake CDP transports for deterministic failures.
+Use real CLI subprocesses for lifecycle and Capture artifact contracts. Chrome
+must be installed for Capture integration tests. Tests use disposable profiles
+and isolated registries.
+
+```bash
+uv run ruff format --check src/ tests/
+uv run ruff check src/ tests/
+uv run pyright src/
+uv run pytest tests/ -q --ignore=tests/test_e2e_camoufox.py
+```
+
+The optional Camoufox E2E suite additionally requires its extra and downloaded
+browser (`camoufox fetch`). Native backend parity tests must pass before merging
+transport changes. Do not replace artifact checks with mocked success responses.
 
 ## Commit Conventions
 

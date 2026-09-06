@@ -542,6 +542,7 @@ def spawn_supervisor(
             sys.executable, "-m", "browser_tools.core.supervisor",
             str(port), name, registry_path, "1" if draw_border else "0",
         ],
+        start_new_session=True,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )

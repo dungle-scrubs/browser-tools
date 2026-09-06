@@ -23,11 +23,16 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
+from .core.errors import CDPError
+
 logger = logging.getLogger(__name__)
 
 # Built-in detection script
 _BUILTIN_SCRIPT = Path(__file__).parent / "detect_interstitial.js"
-_OVERRIDE_PATH = Path.home() / ".config" / "tool-proxy" / "browser-tools" / "detect-interstitial.js"
+_LEGACY_OVERRIDE_PATH = (
+    Path.home() / ".config" / "tool-proxy" / "browser-tools" / "detect-interstitial.js"
+)
+_OVERRIDE_PATH = Path.home() / ".config" / "browser-tools" / "detect-interstitial.js"
 
 # Auto-retry tuning for JS-solvable challenges (Cloudflare JS challenge,
 # access-denied pages). Human-interaction challenges (CAPTCHA, auth walls,
@@ -39,7 +44,7 @@ INTERSTITIAL_AUTO_RETRY_TYPES = frozenset({"cloudflare_challenge", "access_denie
 
 # Outer timeout for the whole detect-and-retry sequence, used by the thread-safe
 # marshaler in CDPHandler.run_post_navigation_detection. Generous buffer over
-# (initial detect + retries * delay) so a slow page cannot hang the daemon.
+# (initial detect + retries * delay) so a slow page cannot hang the invocation.
 DETECT_TOTAL_TIMEOUT_SECONDS = 10 + (
     INTERSTITIAL_MAX_RETRIES * (INTERSTITIAL_RETRY_DELAY_SECONDS + 2)
 )
@@ -58,6 +63,14 @@ def get_detection_script() -> str:
             return _OVERRIDE_PATH.read_text()
         except OSError:
             logger.debug("Failed to read override script, falling back to built-in", exc_info=True)
+    if _LEGACY_OVERRIDE_PATH.exists():
+        logger.warning(
+            "Move the detection override to ~/.config/browser-tools/detect-interstitial.js; the old path is supported for one release"
+        )
+        try:
+            return _LEGACY_OVERRIDE_PATH.read_text()
+        except OSError:
+            logger.debug("Cannot read legacy detection override", exc_info=True)
     return _BUILTIN_SCRIPT.read_text()
 
 
@@ -108,7 +121,7 @@ def format_interstitials(
     if auto_retried:
         lines.append(
             f"\n⏳ Auto-retry was attempted ({retries_used} retries, "
-            f"~{retries_used * 3}s wait) but the challenge persists."
+            f"~{retries_used * INTERSTITIAL_RETRY_DELAY_SECONDS:g}s wait) but the challenge persists."
         )
 
     lines.append("\nE003: Manual resolution may be required.")
@@ -141,7 +154,6 @@ async def detect_with_retry(
         return {"detections": [], "auto_retried": False, "retries_used": 0}
 
     retryable = [d for d in detections if d.get("type") in INTERSTITIAL_AUTO_RETRY_TYPES]
-    non_retryable = [d for d in detections if d.get("type") not in INTERSTITIAL_AUTO_RETRY_TYPES]
 
     if not retryable:
         return {"detections": detections, "auto_retried": False, "retries_used": 0}
@@ -159,7 +171,7 @@ async def detect_with_retry(
 
     # Exhausted retries -- report whatever remains plus any non-retryable.
     return {
-        "detections": detections + non_retryable,
+        "detections": detections,
         "auto_retried": True,
         "retries_used": INTERSTITIAL_MAX_RETRIES,
     }
@@ -219,7 +231,7 @@ async def _run_detection(
         result = await cdp_client.send("Runtime.evaluate", params)
         value = result.get("result", {}).get("value", "[]")
         return parse_detection_result(value)
-    except (OSError, AttributeError, TypeError):
+    except (CDPError, OSError, AttributeError, TypeError):
         # CDP client may be unreachable or return unexpected shapes.
         # Detection is best-effort — never crash the caller.
         logger.debug("Interstitial detection failed", exc_info=True)

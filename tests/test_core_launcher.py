@@ -60,10 +60,29 @@ def _patch_launch_plumbing(monkeypatch, captured):
 
     monkeypatch.setattr(launcher.subprocess, "Popen", fake_popen)
     monkeypatch.setattr(
-        launcher, "check_cdp_port",
+        launcher,
+        "check_cdp_port",
         lambda port: PortStatus(listening=True, browser_version="Chrome/999.0.0.0"),
     )
     monkeypatch.setattr(launcher, "cleanup_sessions", lambda registry_path=None: [])
+
+
+def test_launch_preserves_existing_profile_preferences(monkeypatch, tmp_path):
+    _patch_launch_plumbing(monkeypatch, {})
+    profile = tmp_path / "profile"
+    preferences = profile / "Default/Preferences"
+    preferences.parent.mkdir(parents=True)
+    preferences.write_text('{"user_preference": true}')
+    asyncio.run(
+        launcher.launch_browser(
+            port_override=9336,
+            headless=True,
+            working_dir=str(tmp_path),
+            registry_path=str(tmp_path / "registry.json"),
+            user_data_dir=str(profile),
+        )
+    )
+    assert preferences.read_text() == '{"user_preference": true}'
 
 
 class TestFingerprintBecomesLaunchFlags:

@@ -81,9 +81,10 @@ class FakeHandler:
     detection: ClassVar[dict | None] = None
     instances: ClassVar[list[FakeHandler]] = []
 
-    def __init__(self, browser_url, mode="full", stealth=False):
-        self.browser_url = browser_url
-        self.mode = mode
+    def __init__(self, runtime):
+        self.runtime = runtime
+        runtime.handler = self
+        self.browser_url = f"http://127.0.0.1:{runtime.port}"
         self.tool_calls: list[tuple[str, dict]] = []
         self.native_calls: list[tuple[str, dict]] = []
         self.detection_runs = 0
@@ -113,6 +114,30 @@ class FakeHandler:
         return FakeHandler.detection
 
 
+class FakeRuntime:
+    def __init__(self, port, target_id):
+        self.port = port
+        self.target_id = target_id
+        self.handler = None
+
+    def run(self):
+        pass
+
+    def wait_ready(self, timeout):
+        pass
+
+    def stop(self):
+        if self.handler is not None:
+            self.handler.stopped = True
+
+    def run_post_navigation_detection(self):
+        return self.handler.run_post_navigation_detection()
+
+
+async def fake_resolve_target(port, spec, by):
+    return "TARGET"
+
+
 @pytest.fixture
 def fake_handler(monkeypatch):
     """Install the fake handler over ``curated.CDPHandler`` and reset its state."""
@@ -121,6 +146,8 @@ def fake_handler(monkeypatch):
     FakeHandler.native_responses = {}
     FakeHandler.detection = None
     monkeypatch.setattr(curated, "CDPHandler", FakeHandler)
+    monkeypatch.setattr(curated, "CDPRuntime", FakeRuntime)
+    monkeypatch.setattr(curated, "resolve_page_target", fake_resolve_target)
     return FakeHandler
 
 
@@ -154,12 +181,12 @@ class TestInstanceResolution:
     def test_connect_timeout_is_lifecycle_error(self, registry_path, monkeypatch):
         _seed(registry_path, {"only-01": _entry()})
 
-        class NeverReady(FakeHandler):
-            @property
-            def available(self) -> bool:
-                return False
+        class NeverReady(FakeRuntime):
+            def wait_ready(self, timeout):
+                raise TimeoutError("connection timed out")
 
-        monkeypatch.setattr(curated, "CDPHandler", NeverReady)
+        monkeypatch.setattr(curated, "CDPRuntime", NeverReady)
+        monkeypatch.setattr(curated, "resolve_page_target", fake_resolve_target)
         monkeypatch.setattr(curated, "HANDLER_CONNECT_TIMEOUT_SECONDS", 0.05)
         with pytest.raises(LifecycleError):
             curated.snapshot(instance="only-01", registry_path=registry_path)
@@ -217,7 +244,9 @@ class TestHandlerToolDispatch:
 
     def test_wait_stable_passes_parsed_args(self, registry_path, fake_handler):
         _seed(registry_path, {"only-01": _entry()})
-        curated.wait_stable(instance=None, timeout_ms=7000, stable_ms=200, registry_path=registry_path)
+        curated.wait_stable(
+            instance=None, timeout_ms=7000, stable_ms=200, registry_path=registry_path
+        )
         assert fake_handler.instances[0].tool_calls == [
             ("wait_stable", {"timeout_ms": 7000, "stable_ms": 200})
         ]
@@ -225,7 +254,14 @@ class TestHandlerToolDispatch:
     def test_detect_runs_post_navigation_detection_and_formats(self, registry_path, fake_handler):
         _seed(registry_path, {"only-01": _entry()})
         FakeHandler.detection = {
-            "detections": [{"type": "cloudflare_challenge", "confidence": "high", "signal": "s", "details": "d"}],
+            "detections": [
+                {
+                    "type": "cloudflare_challenge",
+                    "confidence": "high",
+                    "signal": "s",
+                    "details": "d",
+                }
+            ],
             "auto_retried": True,
             "retries_used": 2,
         }
@@ -268,33 +304,25 @@ class TestHandlerToolDispatch:
     def test_storage_get_without_key_reads_directly(self, registry_path, fake_handler):
         _seed(registry_path, {"only-01": _entry()})
         curated.storage_get(instance=None, key=None, registry_path=registry_path)
-        assert fake_handler.instances[0].tool_calls == [("get_frame_storage", {})]
+        assert fake_handler.instances[0].tool_calls == [
+            ("get_frame_storage", {"reveal_values": False})
+        ]
 
     def test_storage_get_with_key_selects_frame_first(self, registry_path, fake_handler):
         _seed(registry_path, {"only-01": _entry()})
         curated.storage_get(instance=None, key="pay.example", registry_path=registry_path)
         assert fake_handler.instances[0].tool_calls == [
             ("select_frame", {"url_pattern": "pay.example"}),
-            ("get_frame_storage", {}),
+            ("get_frame_storage", {"reveal_values": False}),
         ]
 
     def test_storage_get_no_frame_selected_is_lifecycle_error(self, registry_path, fake_handler):
         _seed(registry_path, {"only-01": _entry()})
-        FakeHandler.tool_responses = {"get_frame_storage": make_error("No frame selected. Use select_frame first.")}
+        FakeHandler.tool_responses = {
+            "get_frame_storage": make_error("No frame selected. Use select_frame first.")
+        }
         with pytest.raises(LifecycleError):
             curated.storage_get(instance=None, key=None, registry_path=registry_path)
-
-    def test_screencast_start_passes_opts(self, registry_path, fake_handler):
-        _seed(registry_path, {"only-01": _entry()})
-        curated.screencast_start(instance=None, fmt="png", max_frames=100, registry_path=registry_path)
-        assert fake_handler.instances[0].tool_calls == [
-            ("screencast_start", {"format": "png", "max_frames": 100})
-        ]
-
-    def test_screencast_stop_passes_dir(self, registry_path, fake_handler):
-        _seed(registry_path, {"only-01": _entry()})
-        curated.screencast_stop(instance=None, out_dir="/tmp/cast", registry_path=registry_path)
-        assert fake_handler.instances[0].tool_calls == [("screencast_stop", {"dir": "/tmp/cast"})]
 
 
 # ---------------------------------------------------------------------------
@@ -310,9 +338,11 @@ _ONE_PX_PNG = base64.b64encode(
 
 
 def _make_fake_cdp_client_cls(shot_data="Zm9v", targets=None):
-    targets = targets if targets is not None else [
-        {"targetId": "T1", "type": "page", "url": "https://example.com"}
-    ]
+    targets = (
+        targets
+        if targets is not None
+        else [{"targetId": "T1", "type": "page", "url": "https://example.com"}]
+    )
     calls: list[tuple[str, dict | None, str | None]] = []
 
     class FakeCDPClient:
@@ -353,16 +383,16 @@ def fake_screenshot_transport(monkeypatch):
     def _install(shot_data="Zm9v", targets=None):
         fake_cls, calls = _make_fake_cdp_client_cls(shot_data=shot_data, targets=targets)
         monkeypatch.setattr("browser_tools.one_shot.CDPClient", fake_cls)
-        monkeypatch.setattr(
-            "browser_tools.one_shot.get_ws_url", lambda **kw: "ws://fake/browser"
-        )
+        monkeypatch.setattr("browser_tools.one_shot.get_ws_url", lambda **kw: "ws://fake/browser")
         return calls
 
     return _install
 
 
 class TestScreenshot:
-    def test_capture_reaches_page_capture_screenshot(self, registry_path, fake_screenshot_transport):
+    def test_capture_reaches_page_capture_screenshot(
+        self, registry_path, fake_screenshot_transport
+    ):
         _seed(registry_path, {"only-01": _entry()})
         calls = fake_screenshot_transport(shot_data="Zm9v")
         out = curated.screenshot(instance=None, registry_path=registry_path)
@@ -474,7 +504,9 @@ class TestCliFront:
         _seed(self._registry_path, {"only-01": _entry()})
         rc = cli.main(["frames", "select", "checkout"])
         assert rc == cli.EXIT_OK
-        assert fake_handler.instances[0].tool_calls == [("select_frame", {"url_pattern": "checkout"})]
+        assert fake_handler.instances[0].tool_calls == [
+            ("select_frame", {"url_pattern": "checkout"})
+        ]
 
     def test_frames_without_action_exits_usage(self, capsys, fake_handler):
         _seed(self._registry_path, {"only-01": _entry()})
@@ -487,7 +519,7 @@ class TestCliFront:
         assert rc == cli.EXIT_OK
         assert fake_handler.instances[0].tool_calls == [
             ("select_frame", {"url_pattern": "pay"}),
-            ("get_frame_storage", {}),
+            ("get_frame_storage", {"reveal_values": False}),
         ]
 
     def test_storage_without_action_exits_usage(self, capsys, fake_handler):
@@ -495,24 +527,18 @@ class TestCliFront:
         rc = cli.main(["storage"])
         assert rc == cli.EXIT_USAGE
 
-    def test_screencast_stop_requires_dir(self, capsys, fake_handler):
-        _seed(self._registry_path, {"only-01": _entry()})
-        rc = cli.main(["screencast", "stop"])
-        assert rc == cli.EXIT_USAGE
-
-    def test_screencast_start_via_cli(self, capsys, fake_handler):
-        _seed(self._registry_path, {"only-01": _entry()})
-        rc = cli.main(["screencast", "start", "--format", "png"])
-        assert rc == cli.EXIT_OK
-        assert fake_handler.instances[0].tool_calls[0][0] == "screencast_start"
-        assert fake_handler.instances[0].tool_calls[0][1]["format"] == "png"
-
     def test_wait_stable_defaults_via_cli(self, capsys, fake_handler):
         _seed(self._registry_path, {"only-01": _entry()})
         rc = cli.main(["wait-stable"])
         assert rc == cli.EXIT_OK
         assert fake_handler.instances[0].tool_calls == [
-            ("wait_stable", {"timeout_ms": curated.DEFAULT_WAIT_TIMEOUT_MS, "stable_ms": curated.DEFAULT_STABLE_MS})
+            (
+                "wait_stable",
+                {
+                    "timeout_ms": curated.DEFAULT_WAIT_TIMEOUT_MS,
+                    "stable_ms": curated.DEFAULT_STABLE_MS,
+                },
+            )
         ]
 
     def test_detect_via_cli(self, capsys, fake_handler):

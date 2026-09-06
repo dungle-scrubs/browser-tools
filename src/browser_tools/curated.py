@@ -1,55 +1,8 @@
-"""Curated tool verbs for the merged CLI front (RFC-01 #50).
+"""Curated CLI actions over isolated core CDP page sessions.
 
-New layer-4 code, alongside ``cli.py``, ``lifecycle.py``, ``passthrough.py``,
-and ``events.py``. It fronts the curated tools -- the high-level actions the
-frozen MCP surface exposes -- as first-class ``browser-tools``/``bt`` verbs, so
-the CLI-first surface matches RFC-01's normative "CLI surface" section.
-
-Every verb here dispatches to the *same* implementation the matching MCP tool
-uses. This module builds no second engine (RFC-01 invariant: "curated tools are
-CDP consumers over the same client the passthrough uses"). It reaches those
-implementations through two one-shot transports, chosen by what the tool needs:
-
-- **Handler transport** (:func:`_cdp_handler_session`). Spins up one
-  :class:`~browser_tools.cdp_handler.CDPHandler` against the running instance,
-  drives it through its public ``call_tool`` / ``call_native`` /
-  ``run_post_navigation_detection`` surface -- the exact methods the MCP daemon
-  dispatches to -- then tears it down. Used by the tools whose implementation
-  lives on ``CDPHandler`` / ``CDPRuntime`` and needs the frame manager, native
-  snapshot reader, screencast recorder, or interstitial policy the runtime owns:
-  ``snapshot``, ``click``, ``fill``, ``wait-idle``, ``wait-stable``, ``detect``,
-  ``frames``, ``storage``, ``screencast``.
-
-- **Session transport** (:func:`_capture_screenshot`). Opens one browser-level
-  ``core.cdp_client.CDPClient``, resolves a page target, and sends over the
-  session -- the same one-shot ``send`` path ``passthrough``/``events`` use.
-  Used only by ``screenshot``, whose full-page capture has no Python-native
-  ``CDPHandler`` tool (the frozen ``take_screenshot`` forwards to the Node
-  broker); the CDP-native form is ``Page.captureScreenshot`` plus the existing
-  blank-frame guard (``screenshot_utils.screenshot_looks_blank``).
-
-Instance resolution matches the other verbs: an omitted ``INSTANCE`` resolves
-via :func:`lifecycle.resolve_single_instance` (fails naming the candidates
-unless exactly one instance is registered), and the port is read from the
-registry exactly as ``passthrough``/``help`` do. Operational failures raise
-:class:`~browser_tools.lifecycle.LifecycleError` (CLI exit 1); malformed
-invocations raise :class:`~browser_tools.passthrough.UsageError` (CLI exit 2).
-
-Single-invocation snapshots
----------------------------
-The native UID scheme is deterministic: the same accessibility tree yields the
-same UID ordinals on every read, differing only by a per-reader generation
-prefix (see ``native_snapshot``). A one-shot ``click``/``fill`` therefore takes
-a fresh ``take_snapshot`` first, over the same handler, so the UID a prior
-``snapshot`` verb printed resolves against an identically-ordered tree of the
-unchanged page before the interaction dispatches.
-
-Cross-process state (frame selection carried from ``frames select`` into a
-later ``storage get``, and ``screencast start`` buffering read by a later
-``screencast stop``) does not survive between independent CLI processes, which
-each own a fresh handler. ``storage get --key`` selects its frame within the
-one invocation; ``screencast`` capture across two processes is a known limit of
-the one-shot CLI and is exercised only against the persistent MCP front.
+Each invocation resolves its page and owns a CDPRuntime or a one-shot session.
+Capture owns its connection until recording and artifact finalization complete.
+Native interactions refresh the snapshot before resolving a previously printed UID.
 """
 
 from __future__ import annotations
@@ -57,6 +10,10 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import json
+import math
+import signal
+import sys
 import threading
 import time
 from pathlib import Path
@@ -66,28 +23,31 @@ if TYPE_CHECKING:
     from collections.abc import Generator
 
 from . import lifecycle
-from .cdp_handler import CDPHandler
+from .cdp_handler import (
+    DEFAULT_IDLE_MS,
+    DEFAULT_STABLE_MS,
+    DEFAULT_WAIT_TIMEOUT_MS,
+    CDPHandler,
+    CDPRuntime,
+)
 from .core import registry as core_registry
-from .core.registry import InstanceNotFoundError
 from .interstitial import format_interstitials
 from .lifecycle import LifecycleError
 from .mcp_response import extract_text_items
-from .one_shot import cli_cdp_errors, one_shot_page_session
+from .one_shot import cli_cdp_errors, one_shot_page_session, resolve_page_target, target_slot
 from .passthrough import UsageError
 from .screenshot_utils import (
     SCREENSHOT_BLANK_MAX_RETRIES,
     SCREENSHOT_BLANK_RETRY_DELAY_SECONDS,
     screenshot_looks_blank,
 )
+from .tool_registry import TOOLS
 
 #: How long a one-shot handler waits for its CDP connection before giving up.
 HANDLER_CONNECT_TIMEOUT_SECONDS = 10.0
 
-#: ``wait-idle`` / ``wait-stable`` defaults (mirror the MCP tool defaults in
+#: ``wait-idle`` / ``wait-stable`` defaults (import the handler defaults from
 #: ``cdp_handler._handle_wait_idle`` / ``_handle_wait_stable``).
-DEFAULT_WAIT_TIMEOUT_MS = 5000
-DEFAULT_IDLE_MS = 500
-DEFAULT_STABLE_MS = 300
 
 
 # ---------------------------------------------------------------------------
@@ -104,10 +64,7 @@ def _resolve_port(instance: str | None, registry_path: str | None) -> int:
     """
     if instance is None:
         instance = lifecycle.resolve_single_instance(registry_path=registry_path)
-    try:
-        info = core_registry.lookup(instance_name=instance, registry_path=registry_path)
-    except InstanceNotFoundError as exc:
-        raise LifecycleError(str(exc)) from exc
+    info = core_registry.lookup(instance_name=instance, registry_path=registry_path)
     return info.port
 
 
@@ -117,36 +74,60 @@ def _resolve_port(instance: str | None, registry_path: str | None) -> int:
 
 
 @contextlib.contextmanager
-def _cdp_handler_session(port: int) -> Generator[CDPHandler]:
-    """Yield a connected one-shot :class:`CDPHandler`, then tear it down.
+def _cdp_handler_session(
+    port: int,
+    target: str | None = None,
+    url: str | None = None,
+    *,
+    stopped: threading.Event | None = None,
+) -> Generator[CDPHandler]:
+    """Connect one runtime to a resolved target, and close it after the call."""
+    spec, by = target_slot(target, url)
 
-    Builds the handler against ``http://127.0.0.1:{port}``, runs its event loop
-    on a background thread (the same runtime the MCP daemon threads), waits for
-    the CDP connection to come up, and always stops it afterward. A connection
-    that never comes up within :data:`HANDLER_CONNECT_TIMEOUT_SECONDS` is a
-    ``LifecycleError`` (CLI exit 1).
-    """
-    handler = CDPHandler(f"http://127.0.0.1:{port}", mode="full")
-    thread = threading.Thread(target=handler.run, name="curated-cdp", daemon=True)
+    async def resolve() -> str:
+        task = asyncio.create_task(resolve_page_target(port, spec, by))
+        try:
+            deadline = time.monotonic() + HANDLER_CONNECT_TIMEOUT_SECONDS
+            while not task.done():
+                if stopped is not None and stopped.is_set():
+                    raise LifecycleError("Capture cancelled before recording")
+                if time.monotonic() >= deadline:
+                    raise LifecycleError("CDP target resolution timed out")
+                await asyncio.wait({task}, timeout=0.05)
+            return task.result()
+        finally:
+            if not task.done():
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+
+    target_id = asyncio.run(resolve())
+    runtime = CDPRuntime(port, target_id)
+    thread = threading.Thread(target=runtime.run, name="curated-cdp", daemon=True)
     thread.start()
-    deadline = time.monotonic() + HANDLER_CONNECT_TIMEOUT_SECONDS
-    connected = False
-    while time.monotonic() < deadline:
-        if handler.available:
-            connected = True
-            break
-        time.sleep(0.02)
-    if not connected:
-        handler.stop()
-        thread.join(timeout=2.0)
-        raise LifecycleError(
-            f"could not open a CDP session on the instance at port {port}"
-        )
     try:
-        yield handler
+        try:
+            if stopped is None:
+                runtime.wait_ready(HANDLER_CONNECT_TIMEOUT_SECONDS)
+            else:
+                deadline = time.monotonic() + HANDLER_CONNECT_TIMEOUT_SECONDS
+                while True:
+                    if stopped.is_set():
+                        raise LifecycleError("Capture cancelled before recording")
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise TimeoutError("CDP connection timed out")
+                    try:
+                        runtime.wait_ready(min(0.05, remaining))
+                        break
+                    except TimeoutError:
+                        continue
+        except TimeoutError as exc:
+            raise LifecycleError(str(exc)) from exc
+        yield CDPHandler(runtime)
     finally:
-        handler.stop()
-        thread.join(timeout=2.0)
+        runtime.stop()
+        thread.join(timeout=6)
 
 
 def _envelope_text(resp: dict[str, Any]) -> tuple[str, bool]:
@@ -160,7 +141,7 @@ def _envelope_text(resp: dict[str, Any]) -> tuple[str, bool]:
     text = "\n".join(texts)
     result = resp.get("result")
     is_error = isinstance(result, dict) and result.get("isError") is True
-    return text, is_error
+    return text.removeprefix("Error: ") if is_error else text, is_error
 
 
 def _tool_or_raise(handler: CDPHandler, name: str, arguments: dict[str, Any]) -> str:
@@ -184,33 +165,55 @@ def _native_or_raise(handler: CDPHandler, name: str, arguments: dict[str, Any]) 
 # ---------------------------------------------------------------------------
 
 
-def snapshot(*, instance: str | None, registry_path: str | None = None) -> dict[str, Any]:
+@cli_cdp_errors
+def snapshot(
+    *,
+    instance: str | None,
+    target: str | None = None,
+    url: str | None = None,
+    registry_path: str | None = None,
+) -> dict[str, Any]:
     """Return the native UID accessibility tree (frozen ``take_snapshot``)."""
     port = _resolve_port(instance, registry_path)
-    with _cdp_handler_session(port) as handler:
+    with _cdp_handler_session(port, target, url) as handler:
         tree = _native_or_raise(handler, "take_snapshot", {})
     return {"snapshot": tree}
 
 
-def click(*, instance: str | None, uid: str, registry_path: str | None = None) -> dict[str, Any]:
+@cli_cdp_errors
+def click(
+    *,
+    instance: str | None,
+    uid: str,
+    target: str | None = None,
+    url: str | None = None,
+    registry_path: str | None = None,
+) -> dict[str, Any]:
     """Native UID click (frozen ``click``), over the #40 interaction path.
 
     Takes a fresh snapshot first so the UID resolves against the current,
     identically-ordered tree of the (unchanged) page in this one-shot process.
     """
     port = _resolve_port(instance, registry_path)
-    with _cdp_handler_session(port) as handler:
+    with _cdp_handler_session(port, target, url) as handler:
         _native_or_raise(handler, "take_snapshot", {})
         text = _native_or_raise(handler, "click", {"uid": uid})
     return {"uid": uid, "result": text}
 
 
+@cli_cdp_errors
 def fill(
-    *, instance: str | None, uid: str, text: str, registry_path: str | None = None
+    *,
+    instance: str | None,
+    uid: str,
+    text: str,
+    target: str | None = None,
+    url: str | None = None,
+    registry_path: str | None = None,
 ) -> dict[str, Any]:
     """Native UID fill (frozen ``fill``), over the #40 interaction path."""
     port = _resolve_port(instance, registry_path)
-    with _cdp_handler_session(port) as handler:
+    with _cdp_handler_session(port, target, url) as handler:
         _native_or_raise(handler, "take_snapshot", {})
         result = _native_or_raise(handler, "fill", {"uid": uid, "value": text})
     return {"uid": uid, "text": text, "result": result}
@@ -221,32 +224,36 @@ def fill(
 # ---------------------------------------------------------------------------
 
 
+@cli_cdp_errors
 def wait_idle(
     *,
     instance: str | None,
     timeout_ms: int = DEFAULT_WAIT_TIMEOUT_MS,
     idle_ms: int = DEFAULT_IDLE_MS,
+    target: str | None = None,
+    url: str | None = None,
     registry_path: str | None = None,
 ) -> dict[str, Any]:
     """Wait for network idle (frozen ``wait_idle``)."""
     port = _resolve_port(instance, registry_path)
-    with _cdp_handler_session(port) as handler:
-        text = _tool_or_raise(
-            handler, "wait_idle", {"timeout_ms": timeout_ms, "idle_ms": idle_ms}
-        )
+    with _cdp_handler_session(port, target, url) as handler:
+        text = _tool_or_raise(handler, "wait_idle", {"timeout_ms": timeout_ms, "idle_ms": idle_ms})
     return {"result": text}
 
 
+@cli_cdp_errors
 def wait_stable(
     *,
     instance: str | None,
     timeout_ms: int = DEFAULT_WAIT_TIMEOUT_MS,
     stable_ms: int = DEFAULT_STABLE_MS,
+    target: str | None = None,
+    url: str | None = None,
     registry_path: str | None = None,
 ) -> dict[str, Any]:
     """Wait for DOM quiescence (frozen ``wait_stable``)."""
     port = _resolve_port(instance, registry_path)
-    with _cdp_handler_session(port) as handler:
+    with _cdp_handler_session(port, target, url) as handler:
         text = _tool_or_raise(
             handler, "wait_stable", {"timeout_ms": timeout_ms, "stable_ms": stable_ms}
         )
@@ -258,16 +265,23 @@ def wait_stable(
 # ---------------------------------------------------------------------------
 
 
-def detect(*, instance: str | None, registry_path: str | None = None) -> dict[str, Any]:
+@cli_cdp_errors
+def detect(
+    *,
+    instance: str | None,
+    target: str | None = None,
+    url: str | None = None,
+    registry_path: str | None = None,
+) -> dict[str, Any]:
     """Run interstitial detection against the current page (``inspect_blocked``/``inspect_warn``).
 
     Drives the exact challenge-response policy in ``interstitial.py`` through
     ``CDPHandler.run_post_navigation_detection`` -- the same detect-and-retry
-    the daemon runs automatically post-navigation, surfaced here as a verb.
+    used after navigation, surfaced here as a verb.
     """
     port = _resolve_port(instance, registry_path)
-    with _cdp_handler_session(port) as handler:
-        result = handler.run_post_navigation_detection()
+    with _cdp_handler_session(port, target, url) as handler:
+        result = handler.runtime.run_post_navigation_detection()
     if result is None:
         raise LifecycleError("interstitial detection unavailable (no CDP session)")
     detections = result.get("detections", [])
@@ -289,28 +303,48 @@ def detect(*, instance: str | None, registry_path: str | None = None) -> dict[st
 # ---------------------------------------------------------------------------
 
 
-def frames_list(*, instance: str | None, registry_path: str | None = None) -> dict[str, Any]:
+@cli_cdp_errors
+def frames_list(
+    *,
+    instance: str | None,
+    target: str | None = None,
+    url: str | None = None,
+    registry_path: str | None = None,
+) -> dict[str, Any]:
     """List the page's frames (frozen ``list_frames``)."""
     port = _resolve_port(instance, registry_path)
-    with _cdp_handler_session(port) as handler:
+    with _cdp_handler_session(port, target, url) as handler:
         text = _tool_or_raise(handler, "list_frames", {})
     return {"frames": text}
 
 
+@cli_cdp_errors
 def frames_select(
-    *, instance: str | None, pattern: str, registry_path: str | None = None
+    *,
+    instance: str | None,
+    pattern: str,
+    target: str | None = None,
+    url: str | None = None,
+    registry_path: str | None = None,
 ) -> dict[str, Any]:
     """Select a frame by URL pattern (frozen ``select_frame``)."""
     port = _resolve_port(instance, registry_path)
-    with _cdp_handler_session(port) as handler:
+    with _cdp_handler_session(port, target, url) as handler:
         text = _tool_or_raise(handler, "select_frame", {"url_pattern": pattern})
     return {"selected": text}
 
 
-def frames_reset(*, instance: str | None, registry_path: str | None = None) -> dict[str, Any]:
+@cli_cdp_errors
+def frames_reset(
+    *,
+    instance: str | None,
+    target: str | None = None,
+    url: str | None = None,
+    registry_path: str | None = None,
+) -> dict[str, Any]:
     """Clear frame selection back to the top-level page (frozen ``reset_frame``)."""
     port = _resolve_port(instance, registry_path)
-    with _cdp_handler_session(port) as handler:
+    with _cdp_handler_session(port, target, url) as handler:
         text = _tool_or_raise(handler, "reset_frame", {})
     return {"result": text}
 
@@ -320,8 +354,15 @@ def frames_reset(*, instance: str | None, registry_path: str | None = None) -> d
 # ---------------------------------------------------------------------------
 
 
+@cli_cdp_errors
 def storage_get(
-    *, instance: str | None, key: str | None = None, registry_path: str | None = None
+    *,
+    instance: str | None,
+    key: str | None = None,
+    reveal_values: bool = False,
+    target: str | None = None,
+    url: str | None = None,
+    registry_path: str | None = None,
 ) -> dict[str, Any]:
     """Read a frame's storage (frozen ``get_frame_storage``).
 
@@ -331,10 +372,10 @@ def storage_get(
     omitting it surfaces the tool's own "No frame selected" error (exit 1).
     """
     port = _resolve_port(instance, registry_path)
-    with _cdp_handler_session(port) as handler:
+    with _cdp_handler_session(port, target, url) as handler:
         if key:
             _tool_or_raise(handler, "select_frame", {"url_pattern": key})
-        text = _tool_or_raise(handler, "get_frame_storage", {})
+        text = _tool_or_raise(handler, "get_frame_storage", {"reveal_values": reveal_values})
     return {"storage": text}
 
 
@@ -343,36 +384,104 @@ def storage_get(
 # ---------------------------------------------------------------------------
 
 
-def screencast_start(
+@cli_cdp_errors
+def screencast_record(
     *,
     instance: str | None,
+    out_dir: str,
     fmt: str = "jpeg",
     max_frames: int = 600,
+    duration: float | None = None,
+    target: str | None = None,
+    url: str | None = None,
     registry_path: str | None = None,
 ) -> dict[str, Any]:
-    """Begin screencast capture (frozen ``screencast_start``).
+    """Record until signalled or bounded, then write frames before disconnecting."""
+    if fmt not in ("jpeg", "png") or max_frames <= 0:
+        raise UsageError("Capture requires format jpeg or png and a positive --max-frames")
+    if duration is not None and (not math.isfinite(duration) or duration <= 0):
+        raise UsageError("Capture --duration must be finite and positive")
+    output = Path(out_dir).absolute()
+    if output.is_symlink() or (output.exists() and (not output.is_dir() or any(output.iterdir()))):
+        raise UsageError("Capture --dir must be absent or an empty directory, not a symlink")
+    stopped = threading.Event()
 
-    Capture is stateful in the recorder the handler owns, so a one-shot
-    ``screencast start`` followed by an independent ``screencast stop`` process
-    cannot share buffered frames. The verb dispatches correctly; end-to-end
-    capture is meaningful only against the persistent MCP front.
-    """
-    port = _resolve_port(instance, registry_path)
-    with _cdp_handler_session(port) as handler:
-        text = _tool_or_raise(
-            handler, "screencast_start", {"format": fmt, "max_frames": max_frames}
-        )
-    return {"result": text}
+    def request_stop(signum: int, frame: Any) -> None:
+        stopped.set()
+
+    prior = {sig: signal.signal(sig, request_stop) for sig in (signal.SIGINT, signal.SIGTERM)}
+    try:
+        port = _resolve_port(instance, registry_path)
+        with _cdp_handler_session(port, target, url, stopped=stopped) as handler:
+            runtime = handler.runtime
+            loop = runtime.loop
+            assert loop is not None
+            start = asyncio.run_coroutine_threadsafe(
+                runtime.screencast.start(runtime, {"format": fmt, "max_frames": max_frames}), loop
+            )
+            deadline = time.monotonic() + HANDLER_CONNECT_TIMEOUT_SECONDS
+            while True:
+                if stopped.is_set():
+                    start.cancel()
+                    raise LifecycleError("Capture cancelled before recording")
+                if time.monotonic() >= deadline:
+                    start.cancel()
+                    raise LifecycleError("Capture recorder start timed out")
+                try:
+                    text, error = _envelope_text(start.result(timeout=0.05))
+                    if error:
+                        raise LifecycleError(text)
+                    break
+                except TimeoutError:
+                    continue
+            print(
+                "Recording; send SIGINT or SIGTERM to this process to finish.",
+                file=sys.stderr,
+                flush=True,
+            )
+            started = time.monotonic()
+            failure: str | None = None
+            next_health_check = started
+            while not stopped.wait(0.05):
+                if runtime.screencast.limit_reached or (
+                    duration is not None and time.monotonic() - started >= duration
+                ):
+                    break
+                if time.monotonic() < next_health_check:
+                    continue
+                next_health_check = time.monotonic() + 1.0
+                future = asyncio.run_coroutine_threadsafe(runtime.send("Page.getFrameTree"), loop)
+                try:
+                    future.result(timeout=5)
+                except Exception as exc:
+                    future.cancel()
+                    failure = f"Capture transport failed: {exc}"
+                    break
+            # The recorder retains ownership of received frames after transport loss.
+            future = asyncio.run_coroutine_threadsafe(
+                runtime.screencast.stop(runtime, {"dir": str(output)}), loop
+            )
+            try:
+                text, error = _envelope_text(future.result(timeout=30))
+            except TimeoutError as exc:
+                future.cancel()
+                raise LifecycleError("Capture artifact finalization timed out") from exc
+            if error or failure:
+                raise LifecycleError(failure or text)
+            return {"result": text}
+    except (LifecycleError, ConnectionError, TimeoutError) as exc:
+        raise LifecycleError(f"{exc}; output: {output}") from exc
+    finally:
+        for sig, previous in prior.items():
+            signal.signal(sig, previous)
 
 
-def screencast_stop(
-    *, instance: str | None, out_dir: str, registry_path: str | None = None
-) -> dict[str, Any]:
-    """Stop screencast capture and write frames (frozen ``screencast_stop``)."""
-    port = _resolve_port(instance, registry_path)
-    with _cdp_handler_session(port) as handler:
-        text = _tool_or_raise(handler, "screencast_stop", {"dir": out_dir})
-    return {"result": text}
+screencast_start = screencast_record
+
+
+def screencast_stop(**kwargs: Any) -> dict[str, Any]:
+    """Explain how to stop a foreground Capture without opening a connection."""
+    raise UsageError("Send SIGINT or SIGTERM to the owning screencast record process")
 
 
 # ---------------------------------------------------------------------------
@@ -380,16 +489,14 @@ def screencast_stop(
 # ---------------------------------------------------------------------------
 
 
-async def _capture_screenshot(
-    port: int, target_spec: str | None, target_by: str | None
-) -> str:
+async def _capture_screenshot(port: int, target_spec: str | None, target_by: str | None) -> str:
     """Capture a full-page PNG over a one-shot session, guarding blank frames.
 
     Opens the one-shot page session (the same seam ``passthrough``/``events``
     use) and sends ``Page.captureScreenshot`` over it. Reuses the existing
     blank-frame guard (``screenshot_utils.screenshot_looks_blank`` plus the
     shared retry budget): a near-uniform capture is retried after a short
-    delay, matching the daemon's ``take_screenshot`` post-capture check.
+    delay to allow the compositor to produce a visible frame.
     """
     async with one_shot_page_session(port, target_spec, target_by) as (cdp, session_id):
         data = ""
@@ -427,14 +534,7 @@ def screenshot(
         raise UsageError("cannot specify both --target and --url")
     port = _resolve_port(instance, registry_path)
 
-    spec: str | None = None
-    target_by: str | None = None
-    if target is not None:
-        spec = target
-        target_by = "index" if target.isdigit() else "id"
-    elif url is not None:
-        spec = url
-        target_by = "url"
+    spec, target_by = target_slot(target, url)
 
     data = asyncio.run(_capture_screenshot(port, spec, target_by))
 
@@ -450,3 +550,51 @@ def screenshot(
     else:
         payload["data"] = f"data:image/png;base64,{data}"
     return payload
+
+
+@cli_cdp_errors
+def tool(
+    args: list[str],
+    *,
+    target: str | None = None,
+    url: str | None = None,
+    registry_path: str | None = None,
+) -> dict[str, Any]:
+    """Dispatch one handler tool, validating names before opening CDP."""
+    if not args:
+        raise UsageError("tool requires NAME")
+    instance = None
+    remaining = list(args)
+    if (
+        len(remaining) > 1
+        and remaining[0] not in TOOLS
+        and (
+            remaining[1] in TOOLS
+            or any(item.name == remaining[0] for item in lifecycle.read_instances(registry_path))
+        )
+    ):
+        instance = remaining.pop(0)
+    name = remaining.pop(0)
+    if name not in TOOLS:
+        raise UsageError(
+            "Unknown handler tool "
+            + repr(name)
+            + "; available: "
+            + ", ".join(name for name, entry in TOOLS.items() if not entry.requires_capture)
+        )
+    if TOOLS[name].requires_capture:
+        raise UsageError("Use screencast record; recording state belongs to one Capture process")
+    if len(remaining) > 1:
+        raise UsageError("tool accepts one JSON argument object")
+    try:
+        arguments = json.loads(remaining[0]) if remaining else {}
+    except json.JSONDecodeError as exc:
+        raise UsageError(f"invalid JSON arguments: {exc}") from exc
+    if not isinstance(arguments, dict):
+        raise UsageError("tool arguments must be a JSON object")
+    port = _resolve_port(instance, registry_path)
+    with _cdp_handler_session(port, target, url) as handler:
+        result = {"result": _tool_or_raise(handler, name, arguments)}
+        if TOOLS[name].navigation:
+            handler.runtime.run_post_navigation_detection()
+        return result

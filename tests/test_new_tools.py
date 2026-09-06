@@ -16,8 +16,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-# Import the daemon class under test
-from browser_tools.mcp_daemon import CDPHandler as BrowserCDPHandler
+# Import the handler under test
+from browser_tools.cdp_handler import CDPHandler as BrowserCDPHandler
 from browser_tools.screencast import ScreencastRecorder
 
 # ---------------------------------------------------------------------------
@@ -39,17 +39,30 @@ def make_cdp_handler(mock_cdp: Any) -> BrowserCDPHandler:
     handler = BrowserCDPHandler.__new__(BrowserCDPHandler)
     # The handlers reach the browser through the runtime seam, so the mock
     # client lives on a CDPRuntime the handler composes.
-    rt = CDPRuntime.__new__(CDPRuntime)
-    rt._cdp_client = mock_cdp
-    rt._frame_manager = MagicMock()
+    rt = MagicMock(spec=CDPRuntime)
+    rt.client = mock_cdp
+    rt.cdp_or_error.side_effect = lambda: (
+        (mock_cdp, None)
+        if mock_cdp.connected
+        else (
+            None,
+            {
+                "result": {
+                    "content": [{"type": "text", "text": "CDP client not connected"}],
+                    "isError": True,
+                }
+            },
+        )
+    )
+    rt.frame_manager = MagicMock()
     rt._loop = None
     rt._stop_event = None
     rt._mode = "full"
     rt._stealth = False
     rt._browser_url = None
     rt._ready = threading.Event()
-    rt._screencast = ScreencastRecorder()
-    handler._rt = rt
+    rt.screencast = ScreencastRecorder()
+    handler.runtime = rt
     return handler
 
 
@@ -77,6 +90,20 @@ def disconnected_cdp() -> MagicMock:
     cdp = MagicMock()
     cdp.connected = False
     return cdp
+
+
+@pytest.mark.asyncio
+async def test_storage_masks_cookie_values_unless_revealed():
+    cdp = connected_cdp({"cookies": [{"name": "session", "value": "test-value"}]})
+    handler = make_cdp_handler(cdp)
+    masked = await handler._handle_get_frame_storage({"storage_types": ["cookies"]})
+    text = masked["result"]["content"][0]["text"]
+    assert "test-value" not in text
+    assert "<len 10>" in text
+    revealed = await handler._handle_get_frame_storage(
+        {"storage_types": ["cookies"], "reveal_values": True}
+    )
+    assert "test-value" in revealed["result"]["content"][0]["text"]
 
 
 # ---------------------------------------------------------------------------
@@ -716,13 +743,13 @@ async def test_element_visible_checks_css_properties():
 
 
 # ---------------------------------------------------------------------------
-# Routing — all 11 new tools in CDP_TOOLS frozenset
+# Routing — all 11 new tools in handler table
 # ---------------------------------------------------------------------------
 
 
 def test_all_new_tools_in_cdp_tools():
-    """All 11 new tools are registered in CDP_TOOLS frozenset."""
-    from browser_tools.tool_registry import CDP_TOOLS
+    """All 11 new tools are registered in handler table."""
+    from browser_tools.tool_registry import TOOLS as CDP_TOOLS
 
     expected = {
         "ax_find",
@@ -737,7 +764,7 @@ def test_all_new_tools_in_cdp_tools():
         "element_exists",
         "element_visible",
     }
-    missing = expected - CDP_TOOLS
+    missing = expected - set(CDP_TOOLS)
     assert not missing, f"Missing from CDP_TOOLS: {missing}"
 
 
@@ -771,7 +798,7 @@ async def test_screencast_start_requires_connection():
     result = await handler._handle_screencast_start({})
 
     assert "not connected" in result["result"]["content"][0]["text"].lower()
-    assert handler._screencast.active is False
+    assert handler.runtime.screencast.active is False
 
 
 @pytest.mark.asyncio
@@ -853,18 +880,18 @@ async def test_screencast_stop_requires_active_capture():
 @pytest.mark.asyncio
 async def test_cdp_call_wraps_protocol_failure_with_label():
     """A CDP protocol error becomes CdpToolError('<label> failed: <cause>')."""
-    from browser_tools.cdp_client import CDPError
     from browser_tools.cdp_handler import CdpToolError, _cdp_call
+    from browser_tools.core.errors import CDPError
 
     cdp = connected_cdp()
-    cdp.send = AsyncMock(side_effect=CDPError("websocket closed"))
+    cdp.send = AsyncMock(side_effect=CDPError(-1, "websocket closed"))
 
     with pytest.raises(CdpToolError) as exc_info:
         await _cdp_call(cdp, "Runtime.evaluate", {"expression": "1"}, label="get_text")
 
     # str() is what call_tool feeds to make_error, so it must match the prior
     # hand-written "get_text failed: <cause>" wording exactly.
-    assert str(exc_info.value) == "get_text failed: websocket closed"
+    assert str(exc_info.value) == "get_text failed: CDP error -1: websocket closed"
 
 
 @pytest.mark.asyncio
@@ -883,8 +910,8 @@ async def test_cdp_call_wraps_unexpected_failure_with_label():
 
 def test_call_tool_maps_cdp_tool_error_to_make_error(monkeypatch):
     """call_tool's top-level handler turns a raised CdpToolError into make_error."""
-    from browser_tools.cdp_client import CDPError
     from browser_tools.cdp_handler import CDPHandler, CdpToolError
+    from browser_tools.core.errors import CDPError
 
     handler = CDPHandler.__new__(CDPHandler)
     from browser_tools.cdp_handler import CDPRuntime
@@ -892,9 +919,9 @@ def test_call_tool_maps_cdp_tool_error_to_make_error(monkeypatch):
     rt = CDPRuntime.__new__(CDPRuntime)
     rt._loop = MagicMock()  # is_running() truthy by default
     rt._loop.is_running = lambda: True
-    handler._rt = rt
+    handler.runtime = rt
 
-    raised = CdpToolError("get_text", CDPError("websocket closed"))
+    raised = CdpToolError("get_text", CDPError(-1, "websocket closed"))
 
     class _FakeFuture:
         def result(self, timeout=None):
@@ -915,4 +942,13 @@ def test_call_tool_maps_cdp_tool_error_to_make_error(monkeypatch):
     text = response["result"]["content"][0]["text"]
     assert response["result"]["isError"] is True
     # make_error prefixes "Error: "; the label+cause wording is preserved.
-    assert text == "Error: get_text failed: websocket closed"
+    assert text == "Error: get_text failed: CDP error -1: websocket closed"
+
+
+@pytest.mark.parametrize(
+    "value", ["plain", "quotes'\" and \\", "line\nnext\tvalue", "\x00\b\u2028\u2029", "é😀"]
+)
+def test_javascript_string_literals_preserve_selector_values(value):
+    from browser_tools.cdp_handler import _js_string
+
+    assert json.loads(_js_string(value)) == value

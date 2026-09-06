@@ -159,7 +159,9 @@ class ParityEngine(Protocol):
 class ToolSession(Protocol):
     """The subset of a session the engine uses (``CamoufoxSession`` fits)."""
 
-    def call_tool(self, tool: str, args: dict[str, Any] | None = None) -> dict[str, Any]:  # pragma: no cover - protocol
+    def call_tool(
+        self, tool: str, args: dict[str, Any] | None = None
+    ) -> dict[str, Any]:  # pragma: no cover - protocol
         ...
 
 
@@ -228,7 +230,9 @@ class NativeCdpSession(Protocol):
     def evaluate(self, script: str) -> Any:  # pragma: no cover - protocol
         ...
 
-    def cdp_send(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:  # pragma: no cover - protocol
+    def cdp_send(
+        self, method: str, params: dict[str, Any] | None = None
+    ) -> dict[str, Any]:  # pragma: no cover - protocol
         ...
 
 
@@ -273,7 +277,9 @@ class NativeSnapshotEngine:
                 name=node.name,
                 value=node.value,
                 uid=node.uid,
-                backend_node=str(node.backend_node_id) if node.backend_node_id is not None else None,
+                backend_node=str(node.backend_node_id)
+                if node.backend_node_id is not None
+                else None,
             )
             for node in snapshot.visible_nodes()
         )
@@ -324,7 +330,11 @@ class NativeInteractionEngine:
             return None
         call = self._session.cdp_send(
             RUNTIME_CALL_FUNCTION_ON,
-            {"objectId": object_id, "functionDeclaration": _BACKEND_TARGET_FN, "returnByValue": True},
+            {
+                "objectId": object_id,
+                "functionDeclaration": _BACKEND_TARGET_FN,
+                "returnByValue": True,
+            },
         )
         value = call.get("result", {}).get("value")
         return value if isinstance(value, dict) else None
@@ -343,7 +353,9 @@ class NativeInteractionEngine:
                 name=node.name,
                 value=node.value,
                 uid=node.uid,
-                backend_node=str(node.backend_node_id) if node.backend_node_id is not None else None,
+                backend_node=str(node.backend_node_id)
+                if node.backend_node_id is not None
+                else None,
             )
             for node in snapshot.visible_nodes()
         )
@@ -451,9 +463,8 @@ class NodeMcpSession:
         with NodeMcpSession() as node:
             engine = NodeEngine(node)
 
-    It drives the real Node engine over the repo's :class:`McpBroker` -- the same
-    JSON-RPC-over-stdio broker the production daemon uses -- so the parity gate
-    compares native against chrome-devtools-mcp itself, not a stand-in.
+    It drives the baseline through a test-only stdio broker. The installed
+    package has no Node broker or MCP subprocess dependency.
     """
 
     _INIT_TIMEOUT = 120.0
@@ -465,9 +476,18 @@ class NodeMcpSession:
         self._broker: Any = None
 
     def __enter__(self) -> NodeMcpSession:
-        from browser_tools.mcp_broker import McpBroker
+        from node_broker import McpBroker
 
-        cmd = ["npx", "-y", "chrome-devtools-mcp@latest", "--isolated", "--channel", self._channel]
+        cmd = [
+            "npx",
+            "-y",
+            "chrome-devtools-mcp@1.8.0",
+            "--isolated",
+            "--no-page-id-routing",
+            "--no-usage-statistics",
+            "--channel",
+            self._channel,
+        ]
         if self._headless:
             cmd.append("--headless")
         self._broker = McpBroker(cmd)
@@ -493,8 +513,10 @@ class NodeMcpSession:
         response = self._broker.request(
             "tools/call", {"name": tool, "arguments": arguments}, timeout=self._CALL_TIMEOUT
         )
-        if "error" in response:
-            raise RuntimeError(f"chrome-devtools-mcp {tool} failed: {response['error']}")
+        if "error" in response or response.get("result", {}).get("isError"):
+            raise RuntimeError(
+                f"chrome-devtools-mcp {tool} failed: {response.get('error') or _node_response_text(response)}"
+            )
         return response
 
     def navigate(self, url: str) -> None:
@@ -547,6 +569,8 @@ class NodeEngine:
         )
 
 
-def capture_corpus(engine: ParityEngine, pages: tuple[CorpusPage, ...] = CORPUS) -> dict[str, PageCapture]:
+def capture_corpus(
+    engine: ParityEngine, pages: tuple[CorpusPage, ...] = CORPUS
+) -> dict[str, PageCapture]:
     """Run every corpus page through ``engine`` and collect the captures."""
     return {page.page_id: engine.capture(page) for page in pages}

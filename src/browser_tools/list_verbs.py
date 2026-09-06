@@ -27,7 +27,7 @@ point during the window, is buffered rather than lost (the same race
 and returns everything collected.
 
 Reuses the #35/#36 instance-resolution helper (``lifecycle.resolve_single_instance``),
-the #37/#42 ``--target``/``--url`` extraction (``events._target_slot``), and
+the #37/#42 ``--target``/``--url`` extraction (``one_shot.target_slot``), and
 the vendored target-selection machinery (``core.attach.resolve_target``).
 """
 
@@ -46,8 +46,7 @@ if TYPE_CHECKING:
 from . import lifecycle
 from .core import registry as core_registry
 from .core.errors import CDPError
-from .events import _target_slot  # pyright: ignore[reportPrivateUsage]
-from .one_shot import cli_cdp_errors, one_shot_page_session
+from .one_shot import cli_cdp_errors, one_shot_page_session, target_slot
 
 #: The collection window's default duration in seconds. Short by design: this
 #: is a snapshot-over-a-beat, not an open-ended stream (that is ``attach``'s
@@ -137,7 +136,7 @@ def _run_collection(
 
     info = core_registry.lookup(instance_name=instance, registry_path=registry_path)
 
-    spec, target_by = _target_slot(target, url)
+    spec, target_by = target_slot(target, url)
 
     async def _collect() -> list[dict[str, Any]]:
         async with one_shot_page_session(info.port, spec, target_by) as (cdp, session_id):

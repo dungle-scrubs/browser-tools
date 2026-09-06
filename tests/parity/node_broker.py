@@ -1,16 +1,4 @@
-"""MCP request broker: JSON-RPC-over-stdio multiplexer for the MCP subprocess.
-
-Owns the chrome-devtools-mcp subprocess and multiplexes JSON-RPC requests from
-many callers onto its single stdin/stdout pair. Each request gets a fresh
-internal id; the matching response is routed back to the waiting caller through
-a per-id queue. A timeout never leaves a dangling pending entry, and a response
-that arrives after its caller has timed out is dropped instead of corrupting a
-later request.
-
-The subprocess handle is injectable so tests can drive the broker with a fake
-process whose stdout is a text-iterable source the test feeds JSON lines into
-and whose stdin captures writes, without spawning chrome-devtools-mcp.
-"""
+"""Test-only stdio broker for the frozen Node parity baseline."""
 
 from __future__ import annotations
 

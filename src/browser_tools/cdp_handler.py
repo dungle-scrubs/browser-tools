@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""CDP handler and toolset definitions for browser-tools daemon.
+"""CDP handler and toolset definitions for browser-tools CLI.
 
 Tool handler methods for CDP domain operations: frame management,
 accessibility, content extraction, export, and screencast.
@@ -9,50 +9,40 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
+import json
 import logging
 import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .cdp_constants import REQUEST_TIMEOUT_SECONDS
+from .core.cdp_client import CDPClient, get_ws_url
+from .core.errors import CDPError
+from .interstitial import (
+    DETECT_TOTAL_TIMEOUT_SECONDS,
+    detect_interstitials_async,
+    detect_with_retry,
+)
+from .mcp_response import make_error, make_text
+from .native_interaction import NativeInteractor, UidResolutionError
+from .native_snapshot import NativeSnapshotReader
+from .screencast import ScreencastRecorder
+from .screenshot_utils import SCREENSHOT_PAINT_READY_TIMEOUT_MS
+from .tool_registry import TOOLS
+
 logger = logging.getLogger(__name__)
 
-try:
-    from .cdp_constants import (
-        REQUEST_TIMEOUT_SECONDS,
-        SCREENSHOT_PAINT_READY_TIMEOUT_MS,
-    )
-    from .interstitial import (
-        DETECT_TOTAL_TIMEOUT_SECONDS,
-        detect_interstitials_async,
-        detect_with_retry,
-    )
-    from .mcp_response import make_error, make_text
-    from .native_interaction import NativeInteractor, UidResolutionError
-    from .native_snapshot import NativeSnapshotReader
-    from .screencast import ScreencastRecorder
-    from .tool_registry import CDP_TOOLS
-except ImportError:
-    from cdp_constants import (  # type: ignore[import-untyped,no-redef]
-        REQUEST_TIMEOUT_SECONDS,
-        SCREENSHOT_PAINT_READY_TIMEOUT_MS,
-    )
-    from interstitial import (  # type: ignore[import-untyped,no-redef]
-        DETECT_TOTAL_TIMEOUT_SECONDS,
-        detect_interstitials_async,
-        detect_with_retry,
-    )
-    from mcp_response import (  # type: ignore[import-untyped,no-redef]
-        make_error,
-        make_text,
-    )
-    from native_interaction import (  # type: ignore[import-untyped,no-redef]
-        NativeInteractor,
-        UidResolutionError,
-    )
-    from native_snapshot import NativeSnapshotReader  # type: ignore[import-untyped,no-redef]
-    from screencast import ScreencastRecorder  # type: ignore[import-untyped,no-redef]
-    from tool_registry import CDP_TOOLS  # type: ignore[import-untyped,no-redef]
+RUNTIME_CLEANUP_TIMEOUT_SECONDS = 5.0
+DEFAULT_WAIT_TIMEOUT_MS = 5000
+DEFAULT_IDLE_MS = 500
+DEFAULT_STABLE_MS = 300
+
+
+def _js_string(value: str) -> str:
+    """Encode one JavaScript string literal without relying on Python repr."""
+    return json.dumps(value)
 
 
 class ToolInvocationError(Exception):
@@ -86,24 +76,6 @@ class CdpToolError(Exception):
             super().__init__(f"{label} failed")
 
 
-def _get_cdp_error_class() -> type[Exception]:
-    """Import CDPError lazily to avoid breaking script-mode execution.
-
-    cdp_client.py uses relative imports that fail when modules are
-    loaded outside of the browser_tools package (e.g. --help flag
-    parsing in the daemon script).  Deferring the import until a CDP
-    call is actually attempted keeps the module importable in all
-    execution modes.
-    """
-    try:
-        from .cdp_client import CDPError  # type: ignore[import-untyped,reportMissingImports]
-    except ImportError:
-        from cdp_client import (  # type: ignore[import-untyped,reportMissingImports]
-            CDPError,  # type: ignore[no-redef]
-        )
-    return CDPError
-
-
 async def _safe_cdp_send(
     cdp_client: Any, method: str, params: dict[str, Any] | None = None
 ) -> dict[str, Any]:
@@ -122,12 +94,11 @@ async def _safe_cdp_send(
             failures) so callers can distinguish them from unexpected
             exceptions.
     """
-    CDPError = _get_cdp_error_class()
     try:
         if params is not None:
             return await cdp_client.send(method, params)
         return await cdp_client.send(method)
-    except CDPError as exc:
+    except (CDPError, ConnectionError) as exc:
         raise ToolInvocationError(method, exc) from exc
 
 
@@ -199,7 +170,7 @@ def _element_eval_js(selector: str, expression: str) -> str:
     """
     return f"""
     (() => {{
-        const el = document.querySelector({selector!r});
+        const el = document.querySelector({_js_string(selector)});
         if (!el) {{ {_ELEM_NOT_FOUND_JS} }}
         return {{__found__: true, value: ({expression})}};
     }})()
@@ -243,195 +214,178 @@ async def eval_on_element(
     return ElementEvalResult(found=False, value=None)
 
 
-# Tool name -> handler method name. This is the single binding of CDP tool name
-# to handler; it is parity-checked against tool_registry.CDP_TOOLS so the
-# registry remains the single source of which tools are CDP-routed. Adding a
-# CDP tool takes exactly one edit here plus the handler method - no elif chain
-# to keep in sync.
-_CDP_HANDLERS: dict[str, str] = {
-    "list_frames": "_handle_list_frames",
-    "select_frame": "_handle_select_frame",
-    "reset_frame": "_handle_reset_frame",
-    "get_frame_events": "_handle_get_frame_events",
-    "get_frame_storage": "_handle_get_frame_storage",
-    "ax_find": "_handle_ax_find",
-    "ax_node": "_handle_ax_node",
-    "export_pdf": "_handle_export_pdf",
-    "screenshot_element": "_handle_screenshot_element",
-    "screencast_start": "_handle_screencast_start",
-    "screencast_stop": "_handle_screencast_stop",
-    "wait_idle": "_handle_wait_idle",
-    "wait_stable": "_handle_wait_stable",
-    "get_text": "_handle_get_text",
-    "get_html": "_handle_get_html",
-    "get_attr": "_handle_get_attr",
-    "element_exists": "_handle_element_exists",
-    "element_visible": "_handle_element_visible",
-}
-
-assert set(_CDP_HANDLERS) == CDP_TOOLS, (
-    "CDP handler table drifted from tool_registry.CDP_TOOLS; "
-    f"symmetric difference: {set(_CDP_HANDLERS) ^ set(CDP_TOOLS)}"
-)
-
-
 class CDPRuntime:
-    """Owns the CDP background thread, event loop, WebSocket connection, frame
-    manager, screencast recorder, and the thread-safe marshal methods the Daemon
-    calls (``await_paint_ready``, ``run_post_navigation_detection``).
+    """Own one browser connection and one flattened page session."""
 
-    The deep half of the CDP layer: a lot of machinery (thread + loop +
-    WebSocket connection + frame-tree subscriptions + two marshal hooks) behind
-    a small surface. :class:`CDPHandler` sits above it and reaches the browser
-    through ``client`` / ``frame_manager`` / ``screencast`` rather than owning
-    them, so the two depths - runtime versus tool handlers - have a seam
-    instead of sharing one class.
-    """
-
-    def __init__(
-        self,
-        browser_url: str | None,
-        mode: str = "full",
-        stealth: bool = False,
-    ) -> None:
-        """Initialize the CDP runtime.
-
-        Args:
-            browser_url: Chrome remote debugging URL.
-            mode: Access mode ('full' or 'inspect').
-            stealth: Accepted for MCP surface compatibility only. No JavaScript
-                is injected for fingerprint purposes (RFC-01, "Anti-detection":
-                each JS override is independently detectable). Chrome
-                fingerprinting is launch-flag profiles (``core/fingerprint.py``)
-                via ``launch --fingerprint``; Camoufox is the engine-level path
-                via ``launch --engine camoufox``.
-        """
-        self._browser_url = browser_url
-        self._mode = mode
-        self._stealth = stealth
+    def __init__(self, port: int, target_id: str) -> None:
+        self.port = port
+        self.target_id = target_id
         self._loop: asyncio.AbstractEventLoop | None = None
         self._ready = threading.Event()
         self._stop_event: asyncio.Event | None = None
+        self._task: asyncio.Task[None] | None = None
+        self._stop_requested = threading.Event()
         self._cdp_client: Any = None
-        self._frame_manager: Any = None
-        # Screencast capture state machine (Page.startScreencast buffer, ack,
-        # write-to-dir). Owned here so the screencast tool handlers stay
-        # two-line delegators.
+        self._session_id: str | None = None
+        self._connected = False
+        self._commands: set[asyncio.Task[Any]] = set()
+        self._error: BaseException | None = None
+        from .frame_manager import FrameManager
+
+        self._frame_manager = FrameManager()
         self._screencast = ScreencastRecorder()
 
     @property
     def available(self) -> bool:
-        """Whether the CDP client is connected and ready."""
-        return self._cdp_client is not None and self._cdp_client.connected
+        return self.connected
 
     @property
-    def mode(self) -> str:
-        """Current access mode ('full' or 'inspect')."""
-        return self._mode
+    def connected(self) -> bool:
+        return self._connected
 
     @property
     def client(self) -> Any:
-        """The connected CDP client (or None), exposed for the tool handlers."""
-        return self._cdp_client
+        return self if self._cdp_client is not None else None
 
     @property
     def frame_manager(self) -> Any:
-        """The frame manager, exposed for the frame tool handlers."""
         return self._frame_manager
 
     @property
     def screencast(self) -> ScreencastRecorder:
-        """The screencast recorder, exposed for the screencast tool handlers."""
         return self._screencast
 
     @property
     def loop(self) -> asyncio.AbstractEventLoop | None:
-        """The background event loop, exposed for thread-safe dispatch."""
         return self._loop
 
     def cdp_or_error(self) -> tuple[Any, dict[str, Any] | None]:
-        """Return the connected CDP client, or an error response if down.
-
-        Replaces the hand-copied ``if cdp is None or not cdp.connected`` guards.
-        Returns ``(cdp_client, None)`` when connected, otherwise
-        ``(None, make_error(...))``.
-        """
-        cdp = self._cdp_client
-        if cdp is None or not cdp.connected:
+        if not self.connected:
             return None, make_error("CDP client not connected")
-        return cdp, None
+        return self, None
+
+    def wait_ready(self, timeout: float) -> None:
+        """Wait for startup, propagating its cause instead of hiding failure."""
+        if not self._ready.wait(timeout):
+            raise TimeoutError("CDP connection timed out")
+        if self._error is not None:
+            raise self._error
+
+    async def send(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        if not self.connected:
+            raise ConnectionError("CDP session is disconnected")
+        command = asyncio.create_task(
+            self._cdp_client.send(method, params, session_id=self._session_id)
+        )
+        self._commands.add(command)
+
+        def completed(task: asyncio.Task[Any]) -> None:
+            self._commands.discard(task)
+            if not task.cancelled():
+                task.exception()
+
+        command.add_done_callback(completed)
+        try:
+            # Cancelling a caller must not cancel the core client's response
+            # future: a late reply still needs to be consumed by its read loop.
+            return await asyncio.shield(command)
+        except ConnectionError:
+            self._connected = False
+            raise
+
+    def on(self, event: str, callback: Any) -> None:
+        self._cdp_client.on(event, callback, session_id=self._session_id)
+
+    def off(self, event: str, callback: Any) -> None:
+        self._cdp_client.off(event, callback)
 
     def run(self) -> None:
-        """Run the asyncio event loop (called in a background thread)."""
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
         self._stop_event = asyncio.Event()
         try:
-            self._loop.run_until_complete(self._main())
+            self._task = self._loop.create_task(self._main())
+            if self._stop_requested.is_set():
+                self._loop.call_soon(self._task.cancel)
+            self._loop.run_until_complete(self._task)
+        except asyncio.CancelledError:
+            self._error = ConnectionError("CDP startup cancelled")
+        except Exception as exc:
+            self._error = exc
         finally:
+            self._connected = False
+            self._ready.set()
+            pending = asyncio.all_tasks(self._loop)
+            for task in pending:
+                task.cancel()
+            if pending:
+                self._loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
             self._loop.close()
             self._loop = None
 
     async def _main(self) -> None:
-        """Main async entry point."""
-        from .frame_manager import FrameManager
-
-        self._frame_manager = FrameManager()
-
-        if self._browser_url:
-            await self._connect_cdp()
-
-        self._ready.set()
-
-        # Wait until stopped
-        if self._stop_event:
-            await self._stop_event.wait()
-
-        if self._cdp_client:
-            await self._cdp_client.disconnect()
-
-    async def _connect_cdp(self) -> None:
-        """Connect the CDP client to Chrome."""
         try:
-            from .cdp_client import CDPClient, get_page_ws_url
-
-            browser_url: str = self._browser_url  # type: ignore[assignment]  # guarded by if-self._browser_url
-            ws_url = get_page_ws_url(browser_url)
-            if not ws_url:
-                return
-
-            self._cdp_client = CDPClient(ws_url)
+            self._cdp_client = CDPClient(get_ws_url(port=self.port, target_type="browser"))
             await self._cdp_client.connect()
-
-            # Enable Page domain for frame events
-            await self._cdp_client.send("Page.enable")
-            await self._cdp_client.send("Runtime.enable")
-
-            # Get initial frame tree
-            result = await self._cdp_client.send("Page.getFrameTree")
+            result = await self._cdp_client.send(
+                "Target.attachToTarget", {"targetId": self.target_id, "flatten": True}
+            )
+            self._session_id = result["sessionId"]
+            self._connected = True
+            for event, callback in (
+                ("Page.frameAttached", self._frame_manager.handle_frame_attached),
+                ("Page.frameDetached", self._frame_manager.handle_frame_detached),
+                ("Page.frameNavigated", self._frame_manager.handle_frame_navigated),
+                (
+                    "Runtime.executionContextCreated",
+                    self._frame_manager.handle_execution_context_created,
+                ),
+                (
+                    "Runtime.executionContextDestroyed",
+                    self._frame_manager.handle_execution_context_destroyed,
+                ),
+            ):
+                self.on(event, callback)
+            await self.send("Page.enable")
+            await self.send("Runtime.enable")
+            result = await self.send("Page.getFrameTree")
             if "frameTree" in result:
                 self._frame_manager.update_from_frame_tree(result["frameTree"])
-
-            # Subscribe to frame lifecycle events only (D-001)
-            self._cdp_client.on("Page.frameAttached", self._frame_manager.handle_frame_attached)
-            self._cdp_client.on("Page.frameDetached", self._frame_manager.handle_frame_detached)
-            self._cdp_client.on("Page.frameNavigated", self._frame_manager.handle_frame_navigated)
-            self._cdp_client.on(
-                "Runtime.executionContextCreated",
-                self._frame_manager.handle_execution_context_created,
-            )
-            self._cdp_client.on(
-                "Runtime.executionContextDestroyed",
-                self._frame_manager.handle_execution_context_destroyed,
-            )
-        except Exception:
-            logger.exception("CDP connection failed for %s", self._browser_url)
-            self._cdp_client = None
+            self._ready.set()
+            if self._stop_event is not None:
+                await self._stop_event.wait()
+        finally:
+            self._connected = False
+            if self._cdp_client is not None:
+                # Reserve half of the cleanup grace for closing the socket,
+                # even if the browser never acknowledges detach.
+                grace = RUNTIME_CLEANUP_TIMEOUT_SECONDS / 2
+                if self._session_id is not None:
+                    with contextlib.suppress(Exception):
+                        await asyncio.wait_for(
+                            self._cdp_client.send(
+                                "Target.detachFromTarget", {"sessionId": self._session_id}
+                            ),
+                            timeout=grace,
+                        )
+                try:
+                    await asyncio.wait_for(self._cdp_client.close(), timeout=grace)
+                except Exception:
+                    logger.debug("CDP cleanup failed", exc_info=True)
 
     def stop(self) -> None:
-        """Signal the background loop to stop."""
-        if self._loop and self._stop_event:
-            self._loop.call_soon_threadsafe(self._stop_event.set)
+        self._stop_requested.set()
+
+        def request_stop() -> None:
+            if not self._ready.is_set() and self._task is not None:
+                self._task.cancel()
+            elif self._stop_event is not None:
+                self._stop_event.set()
+
+        loop = self._loop
+        if loop is not None and not loop.is_closed():
+            with contextlib.suppress(RuntimeError):
+                loop.call_soon_threadsafe(request_stop)
 
     def await_paint_ready(self, timeout_ms: int = SCREENSHOT_PAINT_READY_TIMEOUT_MS) -> bool:
         """Block until Chrome has painted at least one stable frame.
@@ -451,7 +405,7 @@ class CDPRuntime:
             evaluate timed out. Never raises -- screenshot must still proceed
             on a best-effort basis if this gate fails.
         """
-        if not self._loop or not self._cdp_client or not self._cdp_client.connected:
+        if not self._loop or not self._cdp_client or not self.connected:
             return False
 
         future = asyncio.run_coroutine_threadsafe(
@@ -468,7 +422,7 @@ class CDPRuntime:
 
         The JS resolves once the next frame after the current one has been
         scheduled by the compositor, with a hard timeout safety net so a
-        broken page (background tab, no rAF firing) can't hang the daemon.
+        broken page (background tab, no rAF firing) cannot hang the invocation.
         """
         js = f"""
         (async () => {{
@@ -480,7 +434,7 @@ class CDPRuntime:
         }})()
         """
         try:
-            await self._cdp_client.send(
+            await self.send(
                 "Runtime.evaluate",
                 {"expression": js, "awaitPromise": True, "returnByValue": True},
             )
@@ -503,11 +457,11 @@ class CDPRuntime:
             Dict with 'detections', 'auto_retried', 'retries_used', or None if
             CDP is unavailable.
         """
-        if not self._loop or not self._cdp_client or not self._cdp_client.connected:
+        if not self._loop or not self._cdp_client or not self.connected:
             return None
 
         async def _detect_once() -> list[dict[str, Any]]:
-            return await detect_interstitials_async(self._cdp_client)
+            return await detect_interstitials_async(self)
 
         async def _run() -> dict[str, Any]:
             return await detect_with_retry(_detect_once)
@@ -526,89 +480,16 @@ class CDPHandler:
 
     Owns no connection state itself - the runtime does - and reaches the browser
     through the runtime's ``client`` / ``frame_manager`` / ``screencast`` seam.
-    The Daemon constructs this, threads ``run``, and calls the two cross-cutting
-    hooks (``await_paint_ready``, ``run_post_navigation_detection``), all of which
-    delegate to the runtime, their natural owner.
+    CLI invocations construct the runtime and manage its lifetime.
     """
 
-    def __init__(
-        self,
-        browser_url: str | None,
-        mode: str = "full",
-        stealth: bool = False,
-    ) -> None:
-        """Initialize the handler registry over a fresh CDP runtime.
-
-        Args:
-            browser_url: Chrome remote debugging URL.
-            mode: Access mode ('full' or 'inspect').
-            stealth: Accepted for MCP surface compatibility only; see
-                :class:`CDPRuntime`. No JavaScript is injected.
-        """
-        self._rt = CDPRuntime(browser_url, mode, stealth=stealth)
-        # Tool name -> bound handler. Built from the class-level _CDP_HANDLERS
-        # table, which is parity-checked against tool_registry.CDP_TOOLS above.
+    def __init__(self, runtime: CDPRuntime) -> None:
+        self.runtime = runtime
         self._handlers: dict[str, Any] = {
-            name: getattr(self, method) for name, method in _CDP_HANDLERS.items()
+            name: getattr(self, tool.method) for name, tool in TOOLS.items()
         }
-        # Native snapshot/UID backend (RFC-01 Phase 2, ticket #41). One reader
-        # per handler owns the snapshot lifecycle for this session; the
-        # interactor resolves a UID against the reader's current snapshot, so a
-        # ``take_snapshot`` populates the UIDs a subsequent ``click``/``fill``
-        # resolves. This is the default snapshot backend; ``--engine mcp`` keeps
-        # the Node path (these methods are then never reached).
         self._native_reader = NativeSnapshotReader()
         self._native_interactor = NativeInteractor(self._native_reader)
-
-    # --- Daemon-facing surface: delegate to the runtime ---
-    @property
-    def available(self) -> bool:
-        """Whether the runtime's CDP client is connected and ready."""
-        return self._rt.available
-
-    @property
-    def mode(self) -> str:
-        """Current access mode ('full' or 'inspect')."""
-        return self._rt.mode
-
-    def run(self) -> None:
-        """Run the CDP runtime's event loop (called in a background thread)."""
-        self._rt.run()
-
-    def stop(self) -> None:
-        """Signal the CDP runtime's background loop to stop."""
-        self._rt.stop()
-
-    def await_paint_ready(self, timeout_ms: int = SCREENSHOT_PAINT_READY_TIMEOUT_MS) -> bool:
-        """Block until Chrome has painted a stable frame (delegates to runtime)."""
-        return self._rt.await_paint_ready(timeout_ms)
-
-    def run_post_navigation_detection(self) -> dict[str, Any] | None:
-        """Run post-navigation interstitial detection (delegates to runtime)."""
-        return self._rt.run_post_navigation_detection()
-
-    # --- Runtime state, exposed to the handlers as a documented seam. These
-    #     read through to the runtime so the handlers access the browser via a
-    #     stable surface instead of owning connection state. ---
-    @property
-    def _cdp_client(self) -> Any:
-        return self._rt.client
-
-    @property
-    def _frame_manager(self) -> Any:
-        return self._rt.frame_manager
-
-    @property
-    def _screencast(self) -> ScreencastRecorder:
-        return self._rt.screencast
-
-    @property
-    def _loop(self) -> asyncio.AbstractEventLoop | None:
-        return self._rt.loop
-
-    def _cdp_or_error(self) -> tuple[Any, dict[str, Any] | None]:
-        """Return the connected CDP client, or an error response if down."""
-        return self._rt.cdp_or_error()
 
     def call_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         """Execute a CDP/frame tool (thread-safe, blocks until complete).
@@ -620,10 +501,12 @@ class CDPHandler:
         Returns:
             JSON-RPC style response dict.
         """
-        if not self._loop or not self._loop.is_running():
+        if not self.runtime.loop or not self.runtime.loop.is_running():
             return make_error("CDP handler not initialized")
 
-        future = asyncio.run_coroutine_threadsafe(self._dispatch_tool(name, arguments), self._loop)
+        future = asyncio.run_coroutine_threadsafe(
+            self._dispatch_tool(name, arguments), self.runtime.loop
+        )
         try:
             return future.result(timeout=REQUEST_TIMEOUT_SECONDS)
         except Exception as exc:
@@ -647,10 +530,12 @@ class CDPHandler:
         Returns:
             JSON-RPC style response dict.
         """
-        if not self._loop or not self._loop.is_running():
+        if not self.runtime.loop or not self.runtime.loop.is_running():
             return make_error("CDP handler not initialized")
 
-        future = asyncio.run_coroutine_threadsafe(self._dispatch_native(name, arguments), self._loop)
+        future = asyncio.run_coroutine_threadsafe(
+            self._dispatch_native(name, arguments), self.runtime.loop
+        )
         try:
             return future.result(timeout=REQUEST_TIMEOUT_SECONDS)
         except Exception as exc:
@@ -662,7 +547,7 @@ class CDPHandler:
         """Invalidate the native snapshot's UIDs after a navigation.
 
         A navigation replaces the document, so every outstanding native UID is
-        stale. Called by the daemon dispatcher after a navigation tool so a UID
+        stale. Called after a navigation action so a UID
         from a pre-navigation snapshot no longer resolves (native's stability
         contract). No-op cost when the Node engine is selected.
         """
@@ -670,7 +555,7 @@ class CDPHandler:
 
     async def _dispatch_native(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         """Route a native tool call to the snapshot or interaction path."""
-        cdp, err = self._cdp_or_error()
+        cdp, err = self.runtime.cdp_or_error()
         if err is not None:
             return err
         send = cdp.send
@@ -682,12 +567,16 @@ class CDPHandler:
         if name in ("click", "fill"):
             uid = str(arguments.get("uid", "")).strip()
             if not uid:
-                return make_error(f"E008: native '{name}' requires a 'uid' from a prior take_snapshot")
+                return make_error(
+                    f"E008: native '{name}' requires a 'uid' from a prior take_snapshot"
+                )
             try:
                 if name == "click":
                     result = await self._native_interactor.click_async(send, uid)
                     assert result.point is not None  # click_steps always sets point
-                    return make_text(f"Clicked uid={result.uid} at ({result.point[0]:.0f}, {result.point[1]:.0f}).")
+                    return make_text(
+                        f"Clicked uid={result.uid} at ({result.point[0]:.0f}, {result.point[1]:.0f})."
+                    )
                 value = str(arguments.get("value", ""))
                 result = await self._native_interactor.fill_async(send, uid, value)
                 return make_text(f"Filled uid={result.uid} (value now {result.value_after!r}).")
@@ -699,10 +588,7 @@ class CDPHandler:
     async def _dispatch_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         """Route a tool call to its registered handler.
 
-        The handler table (``_CDP_HANDLERS``) is the single binding of tool name
-        to method; it is parity-checked against ``tool_registry.CDP_TOOLS`` at
-        import, so a tool flagged CDP in the registry with no handler here (or
-        vice versa) fails loudly rather than silently returning "Unknown".
+        ``tool_registry.TOOLS`` is the binding of tool names to methods.
 
         Args:
             name: Tool name.
@@ -718,18 +604,16 @@ class CDPHandler:
 
     async def _handle_list_frames(self, arguments: dict[str, Any]) -> dict[str, Any]:
         """Handle list_frames tool."""
-        fm = self._frame_manager
+        fm = self.runtime.frame_manager
         if fm is None:
             return make_error("Frame manager not initialized")
 
         frames = fm.get_flat_frames()
+        if not frames and self.runtime.connected:
+            await self._refresh_frame_tree()
+            frames = fm.get_flat_frames()
         if not frames:
-            # Try refreshing frame tree if CDP is available
-            if self._cdp_client and self._cdp_client.connected:
-                _ = asyncio.ensure_future(self._refresh_frame_tree())  # noqa: RUF006
-                return make_text("No frames available. Refreshing frame tree...")
-
-            return make_text("No frames available. CDP client not connected.")
+            return make_text("No frames available.")
 
         lines = ["Frames in current page:\n"]
         for frame in frames:
@@ -741,7 +625,7 @@ class CDPHandler:
 
     async def _handle_select_frame(self, arguments: dict[str, Any]) -> dict[str, Any]:
         """Handle select_frame tool."""
-        fm = self._frame_manager
+        fm = self.runtime.frame_manager
         if fm is None:
             return make_error("Frame manager not initialized")
 
@@ -766,7 +650,7 @@ class CDPHandler:
 
     async def _handle_reset_frame(self, arguments: dict[str, Any]) -> dict[str, Any]:
         """Handle reset_frame tool."""
-        fm = self._frame_manager
+        fm = self.runtime.frame_manager
         if fm is None:
             return make_error("Frame manager not initialized")
 
@@ -775,7 +659,7 @@ class CDPHandler:
 
     async def _handle_get_frame_events(self, arguments: dict[str, Any]) -> dict[str, Any]:
         """Handle get_frame_events tool."""
-        fm = self._frame_manager
+        fm = self.runtime.frame_manager
         if fm is None:
             return make_error("Frame manager not initialized")
 
@@ -791,8 +675,8 @@ class CDPHandler:
 
     async def _handle_get_frame_storage(self, arguments: dict[str, Any]) -> dict[str, Any]:
         """Handle get_frame_storage tool."""
-        fm = self._frame_manager
-        cdp = self._cdp_client
+        fm = self.runtime.frame_manager
+        cdp = self.runtime.client
         if fm is None or cdp is None or not cdp.connected:
             return make_error("CDP client not connected")
 
@@ -814,7 +698,13 @@ class CDPHandler:
                 cookies = cookies_result.get("cookies", [])
                 result_parts.append(f"Cookies ({len(cookies)}):")
                 for c in cookies[:20]:
-                    result_parts.append(f"  {c.get('name')}: {c.get('value', '')[:50]}")
+                    value = str(c.get("value", ""))
+                    shown = (
+                        value
+                        if arguments.get("reveal_values", False) is True
+                        else f"<len {len(value)}>"
+                    )
+                    result_parts.append(f"  {c.get('name')}: {shown}")
             except ToolInvocationError as exc:
                 result_parts.append(f"Cookies: error - {exc.cause}")
             except Exception:
@@ -878,7 +768,7 @@ class CDPHandler:
         Returns:
             JSON-RPC style response dict with list of matching AX nodes.
         """
-        cdp, err = self._cdp_or_error()
+        cdp, err = self.runtime.cdp_or_error()
         if err is not None:
             return err
 
@@ -945,7 +835,7 @@ class CDPHandler:
         Returns:
             JSON-RPC style response dict with AX node properties.
         """
-        cdp, err = self._cdp_or_error()
+        cdp, err = self.runtime.cdp_or_error()
         if err is not None:
             return err
 
@@ -957,7 +847,10 @@ class CDPHandler:
         eval_result = await _cdp_call(
             cdp,
             "Runtime.evaluate",
-            {"expression": f"document.querySelector({selector!r})", "returnByValue": False},
+            {
+                "expression": f"document.querySelector({_js_string(selector)})",
+                "returnByValue": False,
+            },
             label="Runtime.evaluate",
         )
 
@@ -1035,7 +928,7 @@ class CDPHandler:
         """
         import time
 
-        cdp, err = self._cdp_or_error()
+        cdp, err = self.runtime.cdp_or_error()
         if err is not None:
             return err
 
@@ -1081,7 +974,7 @@ class CDPHandler:
             JSON-RPC style response dict with base64 image and optional file path.
         """
 
-        cdp, err = self._cdp_or_error()
+        cdp, err = self.runtime.cdp_or_error()
         if err is not None:
             return err
 
@@ -1092,7 +985,7 @@ class CDPHandler:
         # Scroll element into view and get bounding rect
         js = f"""
         (() => {{
-            const el = document.querySelector({selector!r});
+            const el = document.querySelector({_js_string(selector)});
             if (!el) return null;
             el.scrollIntoView({{block: 'center'}});
             const r = el.getBoundingClientRect();
@@ -1156,17 +1049,17 @@ class CDPHandler:
 
     async def _handle_screencast_start(self, arguments: dict[str, Any]) -> dict[str, Any]:
         """Begin screencast capture; delegates to :class:`ScreencastRecorder`."""
-        cdp, err = self._cdp_or_error()
+        cdp, err = self.runtime.cdp_or_error()
         if err is not None:
             return err
-        return await self._screencast.start(cdp, arguments)
+        return await self.runtime.screencast.start(cdp, arguments)
 
     async def _handle_screencast_stop(self, arguments: dict[str, Any]) -> dict[str, Any]:
         """Stop screencast capture and write frames; delegates to the recorder."""
-        cdp, err = self._cdp_or_error()
+        cdp, err = self.runtime.cdp_or_error()
         if err is not None:
             return err
-        return await self._screencast.stop(cdp, arguments)
+        return await self.runtime.screencast.stop(cdp, arguments)
 
     # ------------------------------------------------------------------ #
     # Semantic wait tools                                                  #
@@ -1185,12 +1078,12 @@ class CDPHandler:
         Returns:
             JSON-RPC style response dict.
         """
-        cdp, err = self._cdp_or_error()
+        cdp, err = self.runtime.cdp_or_error()
         if err is not None:
             return err
 
-        timeout_ms = int(arguments.get("timeout_ms", 5000))
-        idle_ms = int(arguments.get("idle_ms", 500))
+        timeout_ms = int(arguments.get("timeout_ms", DEFAULT_WAIT_TIMEOUT_MS))
+        idle_ms = int(arguments.get("idle_ms", DEFAULT_IDLE_MS))
 
         # JS: poll until resource count is stable for idle_ms
         js = f"""
@@ -1256,12 +1149,12 @@ class CDPHandler:
         Returns:
             JSON-RPC style response dict.
         """
-        cdp, err = self._cdp_or_error()
+        cdp, err = self.runtime.cdp_or_error()
         if err is not None:
             return err
 
-        timeout_ms = int(arguments.get("timeout_ms", 5000))
-        stable_ms = int(arguments.get("stable_ms", 300))
+        timeout_ms = int(arguments.get("timeout_ms", DEFAULT_WAIT_TIMEOUT_MS))
+        stable_ms = int(arguments.get("stable_ms", DEFAULT_STABLE_MS))
 
         js = f"""
         new Promise((resolve, reject) => {{
@@ -1336,7 +1229,7 @@ class CDPHandler:
         Returns:
             JSON-RPC style response dict with element text content.
         """
-        cdp, err = self._cdp_or_error()
+        cdp, err = self.runtime.cdp_or_error()
         if err is not None:
             return err
 
@@ -1358,7 +1251,7 @@ class CDPHandler:
         Returns:
             JSON-RPC style response dict with element outer HTML.
         """
-        cdp, err = self._cdp_or_error()
+        cdp, err = self.runtime.cdp_or_error()
         if err is not None:
             return err
 
@@ -1385,7 +1278,7 @@ class CDPHandler:
         Returns:
             JSON-RPC style response dict with attribute value.
         """
-        cdp, err = self._cdp_or_error()
+        cdp, err = self.runtime.cdp_or_error()
         if err is not None:
             return err
 
@@ -1397,7 +1290,7 @@ class CDPHandler:
             return make_error("attribute is required")
 
         res = await eval_on_element(
-            cdp, selector, f"el.getAttribute({attribute!r})", label="get_attr"
+            cdp, selector, f"el.getAttribute({_js_string(attribute)})", label="get_attr"
         )
         if not res.found:
             return make_error(f"E006: No element found matching selector '{selector}'")
@@ -1420,7 +1313,7 @@ class CDPHandler:
         Returns:
             JSON-RPC style response dict with exists bool and count.
         """
-        cdp, err = self._cdp_or_error()
+        cdp, err = self.runtime.cdp_or_error()
         if err is not None:
             return err
 
@@ -1428,7 +1321,7 @@ class CDPHandler:
         if not selector:
             return make_error("selector is required")
 
-        js = f"document.querySelectorAll({selector!r}).length"
+        js = f"document.querySelectorAll({_js_string(selector)}).length"
         result = await _cdp_call(
             cdp,
             "Runtime.evaluate",
@@ -1461,7 +1354,7 @@ class CDPHandler:
         Returns:
             JSON-RPC style response dict with visible bool.
         """
-        cdp, err = self._cdp_or_error()
+        cdp, err = self.runtime.cdp_or_error()
         if err is not None:
             return err
 
@@ -1475,10 +1368,10 @@ class CDPHandler:
 
     async def _refresh_frame_tree(self) -> None:
         """Refresh the frame tree from Chrome."""
-        if self._cdp_client and self._cdp_client.connected:
+        if self.runtime.client and self.runtime.client.connected:
             try:
-                result = await self._cdp_client.send("Page.getFrameTree")
+                result = await self.runtime.client.send("Page.getFrameTree")
                 if "frameTree" in result:
-                    self._frame_manager.update_from_frame_tree(result["frameTree"])
+                    self.runtime.frame_manager.update_from_frame_tree(result["frameTree"])
             except Exception:
                 logger.debug("Failed to refresh frame tree", exc_info=True)

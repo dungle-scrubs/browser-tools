@@ -81,8 +81,6 @@ build-backend = "hatchling.build"
 packages = ["src/browser_tools"]
 artifacts = [
     "src/browser_tools/*.js",
-    "src/browser_tools/*.mjs",
-    "src/browser_tools/*.sh",
 ]
 
 [tool.hatch.build.targets.sdist]
@@ -102,6 +100,7 @@ dev = [
     # group so pyright can resolve `camoufox.sync_api` when type-checking the
     # optional Camoufox engine paths.
     "camoufox[geoip]>=0.4.11",
+    "pillow>=10.0.0",
 ]
 
 [tool.pytest.ini_options]

@@ -66,7 +66,7 @@ def test_parse_handles_role_only_line():
 
 
 def test_parse_ignores_blank_and_garbage_lines():
-    nodes = parse_aria_snapshot("\n   \nnot a node line\n- button \"Go\"\n")
+    nodes = parse_aria_snapshot('\n   \nnot a node line\n- button "Go"\n')
     assert nodes == [SnapshotNode(role="button", name="Go", value=None)]
 
 
@@ -87,7 +87,9 @@ class FakeSession:
     def call_tool(self, tool: str, args: dict[str, Any] | None = None) -> dict[str, Any]:
         self.calls.append((tool, args or {}))
         if tool == "navigate":
-            return {"result": {"title": "T", "url": args["url"], "interstitial": {"detected": False}}}
+            return {
+                "result": {"title": "T", "url": args["url"], "interstitial": {"detected": False}}
+            }
         if tool == "snapshot":
             return {"result": {"tree": self._tree}}
         if tool == "evaluate":
@@ -117,7 +119,7 @@ def test_capture_builds_a_page_capture():
 
 
 def test_capture_navigates_settles_then_snapshots_in_order():
-    session = FakeSession(tree="- button \"Go\"", uid_targets={}, text="Go")
+    session = FakeSession(tree='- button "Go"', uid_targets={}, text="Go")
     AriaSnapshotEngine(session).capture(corpus_page("plain"))
     order = [tool for tool, _ in session.calls]
     assert order[0] == "navigate"
@@ -140,7 +142,7 @@ def test_capture_corpus_runs_all_pages():
 
         def capture(self, page: Any) -> Any:
             return AriaSnapshotEngine(
-                FakeSession(tree="- heading \"H\"", uid_targets={}, text="H")
+                FakeSession(tree='- heading "H"', uid_targets={}, text="H")
             ).capture(page)
 
     captures = capture_corpus(OnePageEngine())
@@ -154,14 +156,42 @@ def test_capture_corpus_runs_all_pages():
 # A recorded Accessibility.getFullAXTree response for a small form page.
 _NATIVE_AX_TREE = {
     "nodes": [
-        {"nodeId": "1", "role": {"value": "RootWebArea"}, "name": {"value": "Parity Form Page"},
-         "childIds": ["2", "3"], "backendDOMNodeId": 1, "ignored": False},
-        {"nodeId": "2", "parentId": "1", "role": {"value": "heading"},
-         "name": {"value": "Parity Form Page"}, "childIds": [], "backendDOMNodeId": 2, "ignored": False},
-        {"nodeId": "3", "parentId": "1", "role": {"value": "textbox"}, "name": {"value": "Email"},
-         "value": {"value": "current@value.com"}, "childIds": [], "backendDOMNodeId": 3, "ignored": False},
-        {"nodeId": "4", "parentId": "1", "role": {"value": "presentation"}, "name": {"value": ""},
-         "childIds": [], "backendDOMNodeId": 4, "ignored": True},
+        {
+            "nodeId": "1",
+            "role": {"value": "RootWebArea"},
+            "name": {"value": "Parity Form Page"},
+            "childIds": ["2", "3"],
+            "backendDOMNodeId": 1,
+            "ignored": False,
+        },
+        {
+            "nodeId": "2",
+            "parentId": "1",
+            "role": {"value": "heading"},
+            "name": {"value": "Parity Form Page"},
+            "childIds": [],
+            "backendDOMNodeId": 2,
+            "ignored": False,
+        },
+        {
+            "nodeId": "3",
+            "parentId": "1",
+            "role": {"value": "textbox"},
+            "name": {"value": "Email"},
+            "value": {"value": "current@value.com"},
+            "childIds": [],
+            "backendDOMNodeId": 3,
+            "ignored": False,
+        },
+        {
+            "nodeId": "4",
+            "parentId": "1",
+            "role": {"value": "presentation"},
+            "name": {"value": ""},
+            "childIds": [],
+            "backendDOMNodeId": 4,
+            "ignored": True,
+        },
     ]
 }
 

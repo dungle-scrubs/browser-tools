@@ -210,9 +210,7 @@ def click_steps(node: AxUidNode) -> Generator[CdpCall, dict[str, Any], Interacti
     )
 
 
-def fill_steps(
-    node: AxUidNode, text: str
-) -> Generator[CdpCall, dict[str, Any], InteractionResult]:
+def fill_steps(node: AxUidNode, text: str) -> Generator[CdpCall, dict[str, Any], InteractionResult]:
     """Sans-IO protocol for a native fill on a resolved node."""
     backend = node.backend_node_id
     assert backend is not None  # guaranteed by the resolver

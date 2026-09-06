@@ -13,8 +13,7 @@ until it is signalled. Because the flag is on the runner's own command line,
 ``pid_holds_user_data_dir(runner_pid, dir)`` attributes the hold to this PID
 without depending on how Playwright spells Firefox's profile flag internally.
 
-The in-process ``CamoufoxSession`` MCP tools are untouched; this is a separate
-entry point for the CLI lifecycle only.
+The reserved Camoufox driver remains separate from this CLI lifecycle entry point.
 """
 
 from __future__ import annotations

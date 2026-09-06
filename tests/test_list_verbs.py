@@ -121,9 +121,7 @@ class TestCollectOnSession:
         # would miss it entirely.
         fake = _RaceFakeCDP([], fired_after_delay=[("Runtime.consoleAPICalled", {"n": 2}, 0.02)])
         result = asyncio.run(
-            list_verbs.collect_on_session(
-                fake, "S1", ["Runtime.consoleAPICalled"], duration=0.05
-            )
+            list_verbs.collect_on_session(fake, "S1", ["Runtime.consoleAPICalled"], duration=0.05)
         )
         assert result == [{"method": "Runtime.consoleAPICalled", "params": {"n": 2}}]
 
@@ -244,7 +242,11 @@ class TestRenderNetworkEntries:
                 "params": {
                     "requestId": "r2",
                     "type": "Script",
-                    "response": {"status": 304, "statusText": "Not Modified", "url": "https://example.com/a.js"},
+                    "response": {
+                        "status": 304,
+                        "statusText": "Not Modified",
+                        "url": "https://example.com/a.js",
+                    },
                 },
             }
         ]
@@ -365,9 +367,7 @@ def list_transport(monkeypatch):
         monkeypatch.setattr(
             "browser_tools.one_shot.CDPClient", _make_list_transport(fired, targets)
         )
-        monkeypatch.setattr(
-            "browser_tools.one_shot.get_ws_url", lambda **kw: "ws://fake/browser"
-        )
+        monkeypatch.setattr("browser_tools.one_shot.get_ws_url", lambda **kw: "ws://fake/browser")
 
     return _install
 
@@ -383,13 +383,17 @@ class TestConsoleListFullPath:
                 )
             ]
         )
-        result = list_verbs.console_list(instance="site-01", duration=0, registry_path=registry_path)
+        result = list_verbs.console_list(
+            instance="site-01", duration=0, registry_path=registry_path
+        )
         assert result == [{"type": "log", "text": "hi", "timestamp": 1.0}]
 
     def test_no_events_returns_empty_list(self, registry_path, list_transport):
         _seed(registry_path, {"site-01": _entry()})
         list_transport([])
-        result = list_verbs.console_list(instance="site-01", duration=0, registry_path=registry_path)
+        result = list_verbs.console_list(
+            instance="site-01", duration=0, registry_path=registry_path
+        )
         assert result == []
 
     def test_unknown_instance_is_lifecycle_error(self, registry_path, list_transport):
@@ -412,15 +416,29 @@ class TestNetworkListFullPath:
             [
                 (
                     "Network.requestWillBeSent",
-                    {"requestId": "r1", "type": "Document", "request": {"method": "GET", "url": "https://example.com/"}},
+                    {
+                        "requestId": "r1",
+                        "type": "Document",
+                        "request": {"method": "GET", "url": "https://example.com/"},
+                    },
                 ),
                 (
                     "Network.responseReceived",
-                    {"requestId": "r1", "type": "Document", "response": {"status": 200, "statusText": "OK", "url": "https://example.com/"}},
+                    {
+                        "requestId": "r1",
+                        "type": "Document",
+                        "response": {
+                            "status": 200,
+                            "statusText": "OK",
+                            "url": "https://example.com/",
+                        },
+                    },
                 ),
             ]
         )
-        result = list_verbs.network_list(instance="site-01", duration=0, registry_path=registry_path)
+        result = list_verbs.network_list(
+            instance="site-01", duration=0, registry_path=registry_path
+        )
         assert result == [
             {
                 "requestId": "r1",
@@ -435,7 +453,9 @@ class TestNetworkListFullPath:
     def test_no_events_returns_empty_list(self, registry_path, list_transport):
         _seed(registry_path, {"site-01": _entry()})
         list_transport([])
-        result = list_verbs.network_list(instance="site-01", duration=0, registry_path=registry_path)
+        result = list_verbs.network_list(
+            instance="site-01", duration=0, registry_path=registry_path
+        )
         assert result == []
 
 
@@ -454,9 +474,7 @@ class TestCliFront:
         monkeypatch.setattr(
             "browser_tools.one_shot.CDPClient", _make_list_transport(fired, targets)
         )
-        monkeypatch.setattr(
-            "browser_tools.one_shot.get_ws_url", lambda **kw: "ws://fake/browser"
-        )
+        monkeypatch.setattr("browser_tools.one_shot.get_ws_url", lambda **kw: "ws://fake/browser")
 
     def test_console_list_prints_json_exit_ok(self, monkeypatch, capsys):
         _seed(self._registry_path, {"only-01": _entry()})
@@ -476,7 +494,11 @@ class TestCliFront:
             [
                 (
                     "Network.requestWillBeSent",
-                    {"requestId": "r1", "type": "XHR", "request": {"method": "GET", "url": "https://x/"}},
+                    {
+                        "requestId": "r1",
+                        "type": "XHR",
+                        "request": {"method": "GET", "url": "https://x/"},
+                    },
                 )
             ],
         )

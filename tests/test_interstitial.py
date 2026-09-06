@@ -17,6 +17,30 @@ from browser_tools.interstitial import (
 )
 
 
+@pytest.mark.asyncio
+async def test_exhausted_retries_report_each_remaining_detection_once(monkeypatch):
+    monkeypatch.setattr("browser_tools.interstitial.INTERSTITIAL_RETRY_DELAY_SECONDS", 0)
+    detections = [{"type": "auth_wall"}, {"type": "cloudflare_challenge"}]
+    result = await detect_with_retry(AsyncMock(return_value=detections))
+    assert result["detections"] == detections
+
+
+@pytest.mark.asyncio
+async def test_detection_survives_one_protocol_error():
+    from browser_tools.core.errors import CDPError
+    from browser_tools.interstitial import detect_interstitials_async
+
+    cdp = AsyncMock()
+    cdp.send.side_effect = [CDPError(-1, "context gone"), {"result": {"value": "[]"}}]
+    assert await detect_interstitials_async(cdp) == []
+
+
+def test_report_uses_configured_retry_delay(monkeypatch):
+    monkeypatch.setattr("browser_tools.interstitial.INTERSTITIAL_RETRY_DELAY_SECONDS", 7)
+    report = format_interstitials([{"type": "auth_wall"}], auto_retried=True, retries_used=2)
+    assert "~14s" in report
+
+
 class TestGetDetectionScript:
     """Tests for loading the detection script."""
 
@@ -432,37 +456,3 @@ class TestStealthRemoved:
         source = cdp_handler_path.read_text()
         assert "stealth.js" not in source
         assert "addScriptToEvaluateOnNewDocument" not in source
-
-
-class TestStealthDaemonWiring:
-    """Tests for stealth flag propagation through daemon.
-
-    The ``stealth`` argument stays on the frozen MCP surface (RFC-01, "MCP
-    compatibility contract") -- removing it would change a tool's argument
-    shape. It is accepted and stored but no longer triggers any JS injection
-    (see TestStealthRemoved): the flag is now inert.
-    """
-
-    def test_cdp_handler_accepts_stealth_flag(self) -> None:
-        """CDPHandler should propagate the stealth flag to its CDP runtime."""
-        from browser_tools.mcp_daemon import CDPHandler
-
-        handler = CDPHandler(None, mode="full", stealth=True)
-        assert handler._rt._stealth is True
-
-    def test_cdp_handler_defaults_stealth_false(self) -> None:
-        """CDPHandler should default to stealth=False on its CDP runtime."""
-        from browser_tools.mcp_daemon import CDPHandler
-
-        handler = CDPHandler(None)
-        assert handler._rt._stealth is False
-
-    def test_enterprise_detections_not_auto_retried(self) -> None:
-        """Enterprise bot protections should not be in auto-retry set."""
-        from browser_tools.interstitial import INTERSTITIAL_AUTO_RETRY_TYPES
-
-        enterprise_types = {"datadome", "akamai_bot_manager", "perimeterx", "imperva", "aws_waf"}
-        for t in enterprise_types:
-            assert t not in INTERSTITIAL_AUTO_RETRY_TYPES, (
-                f"{t} should not be auto-retried — requires human interaction"
-            )

@@ -154,8 +154,11 @@ async def launch_browser(
             "password_manager_enabled": False,
         },
     }
-    with open(os.path.join(default_dir, "Preferences"), "w") as f:
-        json.dump(prefs, f)
+    try:
+        with open(os.path.join(default_dir, "Preferences"), "x") as f:
+            json.dump(prefs, f)
+    except FileExistsError:
+        pass
 
     args = [
         binary,

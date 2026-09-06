@@ -11,6 +11,7 @@ tests do.
 from __future__ import annotations
 
 from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -45,7 +46,9 @@ class _FakeCdpClient:
     def __init__(self) -> None:
         self.methods: list[str] = []
 
-    async def send(self, method: str, params: dict[str, Any] | None = None, timeout: float | None = None) -> dict[str, Any]:
+    async def send(
+        self, method: str, params: dict[str, Any] | None = None, timeout: float | None = None
+    ) -> dict[str, Any]:
         self.methods.append(method)
         if method == "Accessibility.getFullAXTree":
             return _FORM_TREE
@@ -61,10 +64,10 @@ class _FakeCdpClient:
 
 
 def _handler_with_fake_client() -> tuple[CDPHandler, _FakeCdpClient]:
-    handler = CDPHandler(browser_url=None)
+    handler = CDPHandler(MagicMock())
     fake = _FakeCdpClient()
     # Shadow the CDP-or-error accessor so the native path drives the fake client.
-    handler._cdp_or_error = lambda: (fake, None)  # type: ignore[method-assign]
+    handler.runtime.cdp_or_error = lambda: (fake, None)  # type: ignore[method-assign]
     return handler, fake
 
 
@@ -132,7 +135,10 @@ async def test_native_stale_uid_is_refused_as_error_envelope() -> None:
 
 @pytest.mark.asyncio
 async def test_native_errors_when_cdp_unavailable() -> None:
-    handler = CDPHandler(browser_url=None)
-    handler._cdp_or_error = lambda: (None, {"result": {"content": [{"type": "text", "text": "down"}], "isError": True}})  # type: ignore[method-assign]
+    handler = CDPHandler(MagicMock())
+    handler.runtime.cdp_or_error = lambda: (
+        None,
+        {"result": {"content": [{"type": "text", "text": "down"}], "isError": True}},
+    )  # type: ignore[method-assign]
     resp = await handler._dispatch_native("take_snapshot", {})
     assert resp["result"].get("isError") is True

@@ -40,6 +40,7 @@ from browser_tools.native_snapshot import NativeSnapshotReader
 
 def _form_tree() -> dict[str, Any]:
     """root > (heading, form > (textbox=1-4 backend40, button=1-5 backend50))."""
+
     def node(nid, role, name="", parent=None, children=None, backend=None, value=None):
         raw: dict[str, Any] = {
             "nodeId": nid,

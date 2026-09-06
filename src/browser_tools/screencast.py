@@ -16,33 +16,24 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import contextlib
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Any
 
-try:
-    from .mcp_response import make_error, make_text
-except ImportError:  # script-mode execution (mcp_daemon run directly)
-    from mcp_response import make_error, make_text  # type: ignore[import-untyped,no-redef]
+from .core.errors import CDPError
+from .mcp_response import make_error, make_text
+from .process_utils import make_private_dirs
 
 logger = logging.getLogger(__name__)
 
 
-def _cdp_error_class() -> type[Exception]:
-    """Import CDPError lazily.
-
-    cdp_client uses a relative import of its own (chrome_utils) that fails
-    outside package context, so importing it at module load breaks the daemon
-    script's --help. Deferring until a capture actually starts keeps this module
-    importable in all execution modes - the same trick cdp_handler uses.
-    """
-    try:
-        from .cdp_client import CDPError
-    except ImportError:
-        from cdp_client import CDPError  # type: ignore[import-untyped,no-redef]
-    return CDPError
+def _write_private(base_fd: int, name: str, data: bytes) -> None:
+    """Exclusively create a private artifact below the opened output directory."""
+    fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=base_fd)
+    with os.fdopen(fd, "wb") as stream:
+        stream.write(data)
 
 
 class ScreencastRecorder:
@@ -59,11 +50,20 @@ class ScreencastRecorder:
         self._max_frames: int = 600
         self._format: str = "jpeg"
         self._cdp: Any = None
+        self._frame_callback = self.on_frame
 
     @property
     def active(self) -> bool:
         """Whether a screencast capture is currently in progress."""
         return self._active
+
+    @property
+    def frame_count(self) -> int:
+        return len(self._frames)
+
+    @property
+    def limit_reached(self) -> bool:
+        return len(self._frames) >= self._max_frames
 
     def on_frame(self, params: dict[str, Any]) -> None:
         """Buffer one frame and ack it so the stream continues.
@@ -99,7 +99,7 @@ class ScreencastRecorder:
     def _unsubscribe(self, cdp: Any) -> None:
         """Tear down a started capture's subscription and active flag."""
         self._active = False
-        cdp.off("Page.screencastFrame", self.on_frame)
+        cdp.off("Page.screencastFrame", self._frame_callback)
 
     async def start(self, cdp: Any, arguments: dict[str, Any]) -> dict[str, Any]:
         """Start buffering every painted frame via Page.startScreencast.
@@ -124,7 +124,7 @@ class ScreencastRecorder:
         self._max_frames = max(1, int(arguments.get("max_frames", 600)))
         self._active = True
         self._cdp = cdp
-        cdp.on("Page.screencastFrame", self.on_frame)
+        cdp.on("Page.screencastFrame", self._frame_callback)
 
         params: dict[str, Any] = {
             "format": fmt,
@@ -139,7 +139,11 @@ class ScreencastRecorder:
 
         try:
             await cdp.send("Page.startScreencast", params)
-        except _cdp_error_class() as exc:
+        except asyncio.CancelledError:
+            self._unsubscribe(cdp)
+            self._cdp = None
+            raise
+        except (CDPError, ConnectionError) as exc:
             self._unsubscribe(cdp)
             return make_error(f"Page.startScreencast failed: {exc}")
         except Exception:
@@ -165,13 +169,20 @@ class ScreencastRecorder:
         if not self._active:
             return make_error("no screencast in progress; call screencast_start first")
 
-        self._active = False
-        with contextlib.suppress(Exception):
-            await cdp.send("Page.stopScreencast")  # best-effort
-        cdp.off("Page.screencastFrame", self.on_frame)
+        self._unsubscribe(cdp)
+        self._cdp = None
+        transport_error = None
+        try:
+            await asyncio.wait_for(cdp.send("Page.stopScreencast"), timeout=5)
+        except (CDPError, ConnectionError) as exc:
+            transport_error = str(exc)
+        except TimeoutError:
+            pass
 
         frames = self._frames
         self._frames = []
+        if not frames:
+            return make_error("Capture received no frames")
         truncated = len(frames) >= self._max_frames
         ext = "jpg" if self._format == "jpeg" else "png"
 
@@ -186,18 +197,24 @@ class ScreencastRecorder:
         if not out_dir:
             return make_error("dir is required to write screencast frames")
         try:
-            base = Path(out_dir).resolve()
-            base.mkdir(parents=True, exist_ok=True)
-            manifest = []
-            for i, frame in enumerate(frames):
-                fname = f"frame_{i:05d}.{ext}"
-                (base / fname).write_bytes(base64.b64decode(frame["data"]))
-                manifest.append({"file": fname, "timestamp": frame["timestamp"]})
-            (base / "frames.json").write_text(json.dumps(manifest, indent=2))
+            base = Path(out_dir).absolute()
+            make_private_dirs(base)
+            directory_fd = os.open(base, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                manifest = []
+                for i, frame in enumerate(frames):
+                    fname = f"frame_{i:05d}.{ext}"
+                    _write_private(directory_fd, fname, base64.b64decode(frame["data"]))
+                    manifest.append({"file": fname, "timestamp": frame["timestamp"]})
+                _write_private(directory_fd, "frames.json", json.dumps(manifest, indent=2).encode())
+            finally:
+                os.close(directory_fd)
             lines.append(f"Wrote {len(frames)} frames + frames.json to {base}")
         except Exception:
             logger.exception("could not write screencast frames")
             return make_error("could not write frames")
+        if transport_error is not None:
+            return make_error(f"Capture transport failed: {transport_error}; output: {base}")
         return make_text("\n".join(lines))
 
 

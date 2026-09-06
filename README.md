@@ -1,164 +1,163 @@
 # Browser Tools
 
-[![CI](https://github.com/dungle-scrubs/browser-tools/actions/workflows/ci.yml/badge.svg)](https://github.com/dungle-scrubs/browser-tools/actions/workflows/ci.yml)
-[![Python 3.13+](https://img.shields.io/badge/python-3.13+-blue.svg)](https://www.python.org/downloads/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Code style: ruff](https://img.shields.io/badge/code%20style-ruff-000000.svg)](https://docs.astral.sh/ruff/)
-
-Browser automation, debugging, and anti-detect browsing CLI. Provides:
-
-- **Chrome DevTools MCP wrapper** — Snapshot-based page automation via
-  [chrome-devtools-mcp](https://github.com/ChromeDevTools/chrome-devtools-mcp)
-- **Persistent browser sessions** — Long-lived Chrome instances with named profiles,
-  daemon-based MCP reuse, and attach-to-running-browser support
-- **Frame-aware tools** — Iframe/CDP frame tree management, execution context
-  resolution, and storage inspection
-- **Interstitial detection** — Multi-signal heuristic detection for Cloudflare,
-  DataDome, Akamai, PerimeterX, Imperva, AWS WAF, and other challenge pages
-- **Camoufox anti-detect browsing** — Fingerprint-injected Firefox-based
-  browsing for bot-protected sites
-- **CPU profiling** — Direct CDP-based JavaScript CPU profiling with
-  threshold-triggered capture
+Browser automation and debugging from the command line. Launch a named browser,
+inspect its accessibility tree, click and fill nodes, record page behavior, or
+send any Chrome DevTools Protocol method. Commands share a running browser;
+each command gets an isolated CDP target session.
 
 ## Quick Start
 
-### Installation
+Install Python 3.13+ and Chrome, then:
 
 ```bash
-# Using uv (recommended)
 uv tool install browser-tools
-
-# Or with pip
-pip install browser-tools
+bt launch --headless
+bt Runtime.evaluate '{"expression":"document.body.textContent = \"Hello from browser-tools\""}'
+bt snapshot
+bt stop
 ```
 
-### Usage
+These commands omit the instance name and target only when one browser and one
+page exist. `launch` prints the assigned instance name. With multiple browsers,
+put that name after the verb. With multiple pages, use `--target 2`, an ID
+prefix, or `--url SUBSTRING`. Ambiguity is an error, never a silent tab choice.
+
+Chrome is the default engine. `--channel stable|beta|dev|canary` selects an
+installed channel. Base installation requires websockets only.
+
+## Commands
+
+| Verb | Purpose |
+| --- | --- |
+| `launch` | Start and register Chrome or Camoufox |
+| `status` | Show registered instances and liveness |
+| `stop` | Stop an instance or close a target |
+| `cleanup` | Remove stale registry entries and temporary sessions |
+| `guide` | Read the bundled command manual |
+| `help` | Inspect the running browser's live CDP schema |
+| `attach` | Stream subscribed CDP events |
+| `wait` | Wait for a matching event |
+| `console-list` | Collect console messages |
+| `network-list` | Collect network requests |
+| `snapshot` | Read a native UID accessibility tree |
+| `click` | Click a node with `--uid` |
+| `fill` | Fill a node with `--uid` and `--text` |
+| `wait-idle` | Wait for network quiet |
+| `wait-stable` | Wait for DOM quiet |
+| `detect` | Detect interstitial challenges |
+| `frames` | List, select, or reset frame selection |
+| `storage` | Read frame storage, masking cookie values by default |
+| `screenshot` | Capture a PNG |
+| `screencast` | Record frames in one foreground process |
+| `tool` | Invoke a handler tool with JSON arguments |
+
+Use `bt VERB --help` for options. All curated and event actions accept
+`--target SPEC` or `--url SUBSTRING`. Raw CDP uses
+`bt [INSTANCE] Domain.method '{...json params...}'` with the same target flags.
+Results go to stdout as JSON; diagnostics go to stderr. Exit codes are 0 for
+success, 1 for operational failure, and 2 for invalid usage.
 
 ```bash
-# Run the CLI
-browser-tools --help
-
-# Navigate then snapshot. Pass --isolated (or --browser-url) so both commands
-# reuse the SAME long-lived Chrome; a bare `browser-tools navigate` followed by
-# a bare `browser-tools take-snapshot` would each spawn a throwaway browser and
-# NOT share page or login state.
-browser-tools --isolated navigate --url https://example.com
-browser-tools --isolated take-snapshot
+bt tool get_text '{"selector":"h1"}'
+bt tool ax_find '{"role":"button"}'
+bt storage get --key example.com
+bt storage get --key example.com --reveal-values
 ```
 
-There is no `--profile` CLI flag. Named, login-bearing profiles are selected
-through a project config file (see [Project Configuration](#project-configuration))
-or the `use_browser_session` / `attach_browser` MCP tools. `--isolated` gives a
-dedicated persistent profile directory that is separate from named profiles.
+Frame selection lasts only for one invocation. `storage get --key` selects the
+frame and reads it in the same invocation. `tool` reports the available names
+when given an unknown name. It rejects standalone screencast start/stop calls
+because those calls cannot share recording state across processes.
 
-### Development setup
+## Recording
 
 ```bash
-# Clone and install in editable mode
-git clone https://github.com/dungle-scrubs/browser-tools.git
-cd browser-tools
-uv sync
+bt screencast record --dir ./capture --duration 10 --format png
 ```
 
-Runtime requirements:
+The command stays running while another CLI process drives the page. It reports
+readiness on stderr. Send SIGINT or SIGTERM to the recording process to finish
+early, or set `--duration` or `--max-frames` (default 600). A successful capture
+writes frame files and `frames.json` to a new or empty directory. Files are
+private and existing files are never overwritten. Connection loss saves any
+received frames and exits 1; a process crash or SIGKILL can lose buffered frames.
 
-- **Chrome Canary** by default (the default channel is `canary`). Use another
-  installed channel with `--channel stable|beta|dev`, e.g. `--channel stable`
-  for regular Google Chrome.
-- **Node.js** (>=20.19; Node 22+ recommended) for `chrome-devtools-mcp`
-- **Camoufox** (`camoufox fetch`) for anti-detect Firefox workflows
+`screencast start` is an alias for `record` and requires `--dir`.
+`screencast stop` explains how to signal the owner; it does not control another
+process. There is no background capture service.
+
+## Project Configuration and login state
+
+Use `bt launch --profile NAME` to retain login state across stops and restarts.
+Profiles live under `~/.cache/browser-tools/profiles`; set
+`BROWSER_TOOLS_PROFILES_DIR` to use a different root. Names use 1-64 characters
+from `[A-Za-z0-9._-]`, excluding `.` and `..`. `.ephemeral`, in any letter case,
+is reserved for unnamed Camoufox sessions. A live profile cannot be launched
+again. Stopping a named instance preserves its directory.
+
+The CLI does not read `.browser-tools.json`. Launch flags and environment
+variables supply launch defaults. `BROWSER_TOOLS_REGISTRY` overrides the
+registry path, whose default remains `/tmp/chrome-agent/registry.json`.
+
+On named launch, eligible idle profiles from `/tmp/browser-tools-profiles` move
+to the new root. Live or uncertain holders defer migration. Deferred profiles
+are retried on later launches; an unmigrated requested profile never becomes a
+new empty profile. Existing destination copies win collisions, with a warning.
+Unsafe paths and cross-filesystem moves are refused. Setting
+`BROWSER_TOOLS_PROFILES_DIR` bypasses migration.
+
+Stop concurrent old-version launch commands before upgrading. The new lifecycle
+lock coordinates this version's commands, not older or external launchers.
+Old `.ephemeral` sessions retain their paths until normal cleanup. Old MCP
+profiles under `~/.cache/tool-proxy/browser-tools/profiles` are left untouched;
+deleting them discards their login state. To roll back a migrated profile, stop
+its browser first and move its directory back only if the old destination is
+absent.
+
+## Camoufox and profiling
+
+`uv tool install 'browser-tools[camoufox]'` adds the optional Camoufox engine.
+`launch --engine camoufox` starts its persistent browser context. Camoufox has
+no CDP port: CLI navigation, interaction, snapshots, and recording do not drive
+it. Its retained driver awaits the command-channel RFC described in RFC-02.
+
+`browser-tools-profiler` remains a separate CDP CPU profiler. The `profiling`
+extra adds Pillow for enhanced screenshot blank-frame detection.
 
 ## Architecture
 
-```
-browser_tools_session.py     CLI entry point (argparse, command dispatch)
-        |
-        +-- browser_session.py       Tool-proxy session adapter (tool dispatch,
-        |                           camoufox routing, auth-wall promotion)
-        +-- chrome_config.py          MCP subprocess command builder
-        +-- chrome_utils.py           MCP invocation, formatting, errors
-        +-- mcp_response.py           Single owner of MCP response envelopes
-        +-- tool_registry.py          Single source of truth for tool routing flags
-        +-- persistent_browser.py     Chrome lifecycle: controller, reaper,
-        |                           teardown, shared on-disk session layout
-        |       +-- browser_state.py     Persisted state dataclasses
-        |       +-- page_selection.py    Active-page tracking (restore, refresh, normalize)
-        |       +-- mcp_session.py       Short-lived MCP session wrapper
-        |       +-- daemon_client.py      Unix socket client
-        |       +-- process_utils.py      Chrome process/port utilities
-        |       +-- profile_catalog.py    Named-profile catalog & live discovery
-        |       +-- session_store.py      Per-project session config & controller factories
-        |       +-- mcp_daemon.py         Long-lived MCP daemon (dispatch_tool routes by registry flags)
-        |               +-- mcp_broker.py      JSON-RPC-over-stdio request multiplexer
-        |               +-- cdp_handler.py     CDP tool implementations
-        |               +-- cdp_constants.py   Tuning constants (timeouts, thresholds)
-        |               +-- cdp_client.py      CDP WebSocket client
-        |               +-- frame_manager.py   Frame tree management
-        |               +-- interstitial.py    Challenge detection
-        |               +-- screenshot_utils.py Blank-frame detection
-        +-- camoufox_session.py     Camoufox anti-detect wrapper
-        +-- profiler.py            Standalone CPU profiler
-```
+- `cli`: argument parsing, dispatch, and exit codes.
+- `lifecycle`: registry adaptation, Named Profiles, migration, and lifecycle locks.
+- `one_shot`: target selection and isolated CDP sessions.
+- `passthrough`, `events`, `list_verbs`: raw protocol and event collection.
+- `curated`: handler orchestration and foreground Capture.
+- `cdp_handler`: session-bound CDPRuntime and tool implementations.
+- `tool_registry`: one handler table and invocation policies.
+- `interstitial`: detection, retry policy, and override loading.
+- `native_snapshot`, `native_interaction`: accessibility trees and UID actions.
+- `screencast`, `screenshot_utils`: frame recording and screenshot checks.
+- `frame_manager`: frame tree and execution-context tracking.
+- `process_utils`: exact process argv and process identity helpers.
+- `camoufox_runner`: detached Camoufox lifecycle host.
+- `profiler`: standalone CPU profiling.
+- `core/`: vendored CDP client and registry, adapted launcher and supervisor,
+  plus the optional typed `domains/` layer.
+
+The MCP front and its Node subprocess were retired by RFC-02. The retained
+`mcp_response` module only encodes and reads handler result envelopes.
 
 ## Development
 
 ```bash
 uv sync
 uv run ruff check src/ tests/
-uv run pytest
+uv run ruff format --check src/ tests/
+uv run pyright src/
+uv run pytest tests/ -q --ignore=tests/test_e2e_camoufox.py
 ```
 
-### Project Configuration
+Capture integration tests require Chrome. The Camoufox end-to-end suite also
+requires its downloaded browser binary. See [CONTRIBUTING.md](CONTRIBUTING.md),
+[SECURITY.md](SECURITY.md), and [LICENSE](LICENSE).
 
-Place a `.browser-tools.json` in your project root (searched upward from the
-project working directory):
-
-```json
-{
-  "preferredSession": {
-    "mode": "headed-auth",
-    "profile": "dev"
-  }
-}
-```
-
-This auto-selects a persistent headed browser session using the named profile.
-
-The config is read either as a flat object or wrapped in a `preferredSession`
-(or `preferred_session`) key. Recognized fields:
-
-| Field      | Meaning                                                             |
-| ---------- | ------------------------------------------------------------------- |
-| `mode`     | `headless`, `headed-auth` (aliases: `headed`, `auth`, `auth-headed`), or `headless-auth` |
-| `profile`  | Named profile that persists cookies/login across runs               |
-| `endpoint` | Existing Chrome remote-debugging endpoint to attach to (loopback)   |
-| `channel`  | `stable`, `canary` (default), `beta`, or `dev`                      |
-| `viewport` | Initial window size, e.g. `1280x720`                                |
-| `stealth`  | Inject anti-fingerprinting patches                                  |
-
-### Keeping login state across calls
-
-Auth/login state lives in a Chrome profile directory and survives only while
-the same directory is reused. To keep a session logged in:
-
-- **Use a named `profile`** (via the config above or
-  `use_browser_session(mode="headed-auth", profile="<name>")`). Named profiles
-  persist across restarts and are unaffected by headed↔headless switches,
-  viewport, or which directory you invoke from.
-- The **default/isolated** sessions are keyed per project and Chrome channel;
-  they are not a stable place to keep a long-lived login.
-- **Camoufox** persists login state only when you pass a `profile` to
-  `launch_camoufox`; without it, every launch starts logged out.
-
-## License
-
-MIT — see [LICENSE](LICENSE).
-
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and guidelines.
-All contributors are expected to follow the [Code of Conduct](CODE_OF_CONDUCT.md).
-
-## Security
-
-Found a vulnerability? See [SECURITY.md](SECURITY.md) for responsible disclosure.
+The development parity gate uses a pinned Node reference engine under `tests/parity`; Node is not a dependency of the installed CLI. Capture artifact finalization has a 30-second outer deadline, with five-second transport-stop and runtime-cleanup bounds.

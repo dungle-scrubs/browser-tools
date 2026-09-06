@@ -60,9 +60,11 @@ def make_fake_cdp_client_cls(responder=None, targets=None):
     call here is what proves a passthrough call reaches the shared client
     `send` path with its parsed params, not just that our own wrapper ran.
     """
-    targets = targets if targets is not None else [
-        {"targetId": "T1", "type": "page", "url": "https://example.com"}
-    ]
+    targets = (
+        targets
+        if targets is not None
+        else [{"targetId": "T1", "type": "page", "url": "https://example.com"}]
+    )
     calls: list[tuple[str, dict | None, str | None]] = []
 
     class FakeCDPClient:
@@ -103,9 +105,7 @@ def fake_transport(monkeypatch):
     def _install(responder=None, targets=None):
         fake_cls, calls = make_fake_cdp_client_cls(responder=responder, targets=targets)
         monkeypatch.setattr("browser_tools.one_shot.CDPClient", fake_cls)
-        monkeypatch.setattr(
-            "browser_tools.one_shot.get_ws_url", lambda **kw: "ws://fake/browser"
-        )
+        monkeypatch.setattr("browser_tools.one_shot.get_ws_url", lambda **kw: "ws://fake/browser")
         return calls
 
     return _install
@@ -149,9 +149,7 @@ class TestDisambiguation:
         assert method == "Page.navigate"
         assert params_json == '{"url": "https://x"}'
 
-    def test_instance_name_that_looks_like_a_method_still_resolves_as_instance(
-        self, registry_path
-    ):
+    def test_instance_name_that_looks_like_a_method_still_resolves_as_instance(self, registry_path):
         # A registered instance name always wins the disambiguation, even if
         # it happens to contain a dot (RFC-01: registry lookup first).
         _seed(registry_path, {"a.b": _entry()})
@@ -236,9 +234,7 @@ class TestTargetFlagExtraction:
 
     def test_both_target_and_url_is_usage_error(self):
         with pytest.raises(UsageError):
-            passthrough.extract_target_flags(
-                ["Page.navigate", "--target", "a", "--url", "b"]
-            )
+            passthrough.extract_target_flags(["Page.navigate", "--target", "a", "--url", "b"])
 
 
 # ---------------------------------------------------------------------------
@@ -247,9 +243,7 @@ class TestTargetFlagExtraction:
 
 
 class TestSend:
-    def test_reaches_client_send_path_with_parsed_params(
-        self, registry_path, fake_transport
-    ):
+    def test_reaches_client_send_path_with_parsed_params(self, registry_path, fake_transport):
         _seed(registry_path, {"site-01": _entry()})
         calls = fake_transport()
 
@@ -305,7 +299,10 @@ class TestSend:
         fake_transport()
         with pytest.raises(LifecycleError):
             passthrough.send(
-                instance="ghost", method="Page.enable", params_json=None, registry_path=registry_path
+                instance="ghost",
+                method="Page.enable",
+                params_json=None,
+                registry_path=registry_path,
             )
 
     def test_malformed_json_params_is_usage_error(self, registry_path, fake_transport):
@@ -367,9 +364,7 @@ class TestSend:
         assert attach_call[0] == "Target.attachToTarget"
         assert attach_call[1] == {"targetId": "BBBB2222", "flatten": True}
 
-    def test_ambiguous_target_without_flag_is_lifecycle_error(
-        self, registry_path, fake_transport
-    ):
+    def test_ambiguous_target_without_flag_is_lifecycle_error(self, registry_path, fake_transport):
         _seed(registry_path, {"site-01": _entry()})
         targets = [
             {"targetId": "AAAA1111", "type": "page", "url": "https://a.example"},
@@ -419,13 +414,9 @@ class TestHelp:
         passthrough.run_help(None, None, registry_path=registry_path)
         assert capsys.readouterr().out == passthrough.STATIC_HELP
 
-    def test_explicit_running_instance_prints_live_schema(
-        self, registry_path, capsys, monkeypatch
-    ):
+    def test_explicit_running_instance_prints_live_schema(self, registry_path, capsys, monkeypatch):
         _seed(registry_path, {"site-01": _entry(port=9222)})
-        monkeypatch.setattr(
-            core_protocol, "fetch_protocol_schema", lambda port: _FAKE_SCHEMA
-        )
+        monkeypatch.setattr(core_protocol, "fetch_protocol_schema", lambda port: _FAKE_SCHEMA)
         passthrough.run_help("site-01", None, registry_path=registry_path)
         out = capsys.readouterr().out
         assert "Page" in out
@@ -435,9 +426,7 @@ class TestHelp:
     ):
         _seed(registry_path, {"site-01": _entry(port=9222)})
         monkeypatch.setattr(lifecycle, "instance_is_live", lambda inst: True)
-        monkeypatch.setattr(
-            core_protocol, "fetch_protocol_schema", lambda port: _FAKE_SCHEMA
-        )
+        monkeypatch.setattr(core_protocol, "fetch_protocol_schema", lambda port: _FAKE_SCHEMA)
         passthrough.run_help(None, None, registry_path=registry_path)
         out = capsys.readouterr().out
         assert "Page" in out
@@ -459,13 +448,9 @@ class TestHelp:
         with pytest.raises(LifecycleError):
             passthrough.run_help("ghost", None, registry_path=registry_path)
 
-    def test_unknown_query_against_live_schema_is_usage_error(
-        self, registry_path, monkeypatch
-    ):
+    def test_unknown_query_against_live_schema_is_usage_error(self, registry_path, monkeypatch):
         _seed(registry_path, {"site-01": _entry(port=9222)})
-        monkeypatch.setattr(
-            core_protocol, "fetch_protocol_schema", lambda port: _FAKE_SCHEMA
-        )
+        monkeypatch.setattr(core_protocol, "fetch_protocol_schema", lambda port: _FAKE_SCHEMA)
         with pytest.raises(UsageError):
             passthrough.run_help("site-01", "NoSuchDomain", registry_path=registry_path)
 
@@ -534,9 +519,7 @@ class TestCliFront:
 
     def test_help_with_instance_prints_live_schema(self, capsys, monkeypatch):
         _seed(self._registry_path, {"site-01": _entry(port=9222)})
-        monkeypatch.setattr(
-            core_protocol, "fetch_protocol_schema", lambda port: _FAKE_SCHEMA
-        )
+        monkeypatch.setattr(core_protocol, "fetch_protocol_schema", lambda port: _FAKE_SCHEMA)
         rc = cli.main(["help", "site-01"])
         assert rc == cli.EXIT_OK
         assert "Page" in capsys.readouterr().out

@@ -351,8 +351,15 @@ class TestCliFront:
         def fake_launch(**kwargs):
             captured.update(kwargs)
             return lifecycle.ExtendedInstance(
-                name="x-01", port=9222, pid=1, browser_version="", user_data_dir="",
-                launched=None, pid_start=None, engine="chrome", profile=None,
+                name="x-01",
+                port=9222,
+                pid=1,
+                browser_version="",
+                user_data_dir="",
+                launched=None,
+                pid_start=None,
+                engine="chrome",
+                profile=None,
             )
 
         monkeypatch.setattr(lifecycle, "launch", fake_launch)

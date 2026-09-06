@@ -77,7 +77,7 @@ def screenshot_looks_blank(png_b64: str) -> bool:
     2. Compressed-size ratio (fallback) — uniform pixels compress to a
        tiny fraction of raw size. Parsing just the IHDR chunk gives us
        width/height with no decoding cost. If Pillow is not importable
-       in the daemon's Python, this is the floor.
+       in the current Python environment, this is the floor.
 
     Returns False on any decoding error so we never accidentally drop a
     real screenshot due to a corrupt-looking buffer.
@@ -106,17 +106,11 @@ def screenshot_looks_blank(png_b64: str) -> bool:
     try:
         import io as _io
 
-        from PIL import Image  # type: ignore[import-untyped]
+        from PIL import Image, ImageStat  # type: ignore[import-untyped]
 
         img = Image.open(_io.BytesIO(png_bytes)).convert("L")
         img.thumbnail((96, 96))
-        pixels = list(img.getdata())  # type: ignore[reportArgumentType]
-        if not pixels:
-            return False
-        n = len(pixels)
-        mean = sum(pixels) / n
-        var = sum((p - mean) * (p - mean) for p in pixels) / n
-        stddev = var**0.5
+        stddev = ImageStat.Stat(img).stddev[0]
         return stddev < SCREENSHOT_BLANK_LUMINANCE_STDDEV_THRESHOLD
     except (OSError, ImportError):
         # Pillow missing or decode failed — fall through to size-ratio.

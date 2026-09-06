@@ -43,11 +43,9 @@ if TYPE_CHECKING:
 from . import lifecycle
 from .core import attach as core_attach
 from .core import registry as core_registry
-from .core.attach import AmbiguousTargetError, TargetNotFoundError
-from .core.errors import CDPError, NoPageError
-from .core.registry import InstanceNotFoundError
+from .core.errors import CDPError
 from .lifecycle import LifecycleError
-from .one_shot import cli_cdp_errors, one_shot_page_session
+from .one_shot import cli_cdp_errors, one_shot_page_session, target_slot
 from .passthrough import UsageError
 
 #: ``wait``'s default deadline in seconds (RFC-01 "wait design").
@@ -102,26 +100,12 @@ def resolve_attach_args(args: list[str]) -> tuple[str | None, list[str]]:
     return instance, events
 
 
-def _target_slot(target: str | None, url: str | None) -> tuple[str | None, str | None]:
-    """Map the ``--target``/``--url`` pair to ``core.attach``'s ``(spec, by)``.
-
-    A numeric ``--target`` selects by 1-based index, a non-numeric one by
-    targetId prefix, and ``--url`` by URL substring -- the same mapping
-    ``passthrough.send`` applies. ``--target`` and ``--url`` are mutually
-    exclusive; the CLI front rejects the pair before calling here.
-    """
-    if target is not None:
-        return target, ("index" if target.isdigit() else "id")
-    if url is not None:
-        return url, "url"
-    return None, None
-
-
 # ---------------------------------------------------------------------------
 # attach
 # ---------------------------------------------------------------------------
 
 
+@cli_cdp_errors
 def run_attach(
     *,
     instance: str | None,
@@ -143,24 +127,17 @@ def run_attach(
     if instance is None:
         instance = lifecycle.resolve_single_instance(registry_path=registry_path)
 
-    spec, target_by = _target_slot(target, url)
+    spec, target_by = target_slot(target, url)
 
-    try:
-        asyncio.run(
-            core_attach.run_attach(
-                instance_name=instance,
-                subscriptions=events,
-                target_spec=spec,
-                target_by=target_by,
-                registry_path=registry_path,
-            )
+    asyncio.run(
+        core_attach.run_attach(
+            instance_name=instance,
+            subscriptions=events,
+            target_spec=spec,
+            target_by=target_by,
+            registry_path=registry_path,
         )
-    except InstanceNotFoundError as exc:
-        raise LifecycleError(str(exc)) from exc
-    except (AmbiguousTargetError, TargetNotFoundError, NoPageError) as exc:
-        raise LifecycleError(str(exc)) from exc
-    except ConnectionError as exc:
-        raise LifecycleError(str(exc)) from exc
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -253,7 +230,7 @@ def wait(
 
     info = core_registry.lookup(instance_name=instance, registry_path=registry_path)
 
-    spec, target_by = _target_slot(target, url)
+    spec, target_by = target_slot(target, url)
 
     async def _wait() -> dict[str, Any]:
         async with one_shot_page_session(info.port, spec, target_by) as (cdp, session_id):

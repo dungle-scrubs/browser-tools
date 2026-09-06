@@ -1,21 +1,7 @@
-"""Canonical construction and reading of MCP tool-call response envelopes.
+"""Legacy-shaped content envelopes retained by the handler and optional driver.
 
-Every tool response in browser-tools is an MCP content envelope:
-
-    {"content": [{"type": "text", "text": "..."}], "isError"?: bool}
-
-Two transports carry it, and each wraps the envelope differently:
-
-- **Daemon socket** (``DaemonClient`` <-> ``mcp_daemon``): newline-delimited
-  JSON-RPC frames ``{"jsonrpc": "2.0", "result": <envelope>, "id": n}``. The
-  ``id`` matches the request; the client reads until it sees its id.
-- **Wrapper return** (``browser_tools_session`` -> tool-proxy): the bare
-  envelope wrapped once as ``{"result": <envelope>}``, with no JSON-RPC
-  framing because it is a direct return value, not a socket message.
-
-Before this module existed the envelope was hand-built at ~20 sites, which
-let ``isError`` drift and the error-text prefix convention diverge. Build
-and read responses only through the helpers here.
+CLI orchestration extracts content and error flags from these internal values.
+No network transport or resident broker is implied by their shape.
 """
 
 from __future__ import annotations
@@ -51,25 +37,24 @@ def error_response(message: str) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# JSON-RPC framed envelope (daemon socket path)
+# JSON-RPC framed envelope (legacy framed shape)
 # ---------------------------------------------------------------------------
 
 
 def make_text(text: str) -> dict[str, Any]:
-    """Build a JSON-RPC framed success response for the daemon socket.
+    """Build a JSON-RPC framed success response for the legacy handler API.
 
-    The ``id`` is a placeholder (``0``); the daemon overwrites it with the
-    matching client request id before sending.
+    The ``id`` is retained for the internal envelope contract.
     """
     return {"jsonrpc": "2.0", "result": {"content": [_text_item(text)]}, "id": 0}
 
 
 def make_error(message: str) -> dict[str, Any]:
-    """Build a JSON-RPC framed error response for the daemon socket.
+    """Build a JSON-RPC framed error response for the legacy handler API.
 
-    The ``id`` is a placeholder (``0``); the daemon overwrites it. A clean
+    The ``id`` is retained for the internal envelope contract. A clean
     ``message`` is prefixed with ``Error: `` to match the established CDP/
-    daemon error-text convention; callers there pass unprefixed messages.
+    handler error-text convention; callers there pass unprefixed messages.
     """
     return {
         "jsonrpc": "2.0",
@@ -89,7 +74,7 @@ def extract_text_items(response: dict[str, Any]) -> list[str]:
     Tolerates all envelope shapes that appear in browser-tools:
     - bare legacy ``{"content": [...]}`` (no result wrapper)
     - wrapper return ``{"result": {"content": [...]}}``
-    - daemon JSON-RPC frame ``{"jsonrpc", "result": {"content": [...]}, "id"}``
+    - legacy JSON-RPC frame ``{"jsonrpc", "result": {"content": [...]}, "id"}``
 
     Returns an empty list when no content array is present, so callers can
     treat "no text" and "missing envelope" identically.
@@ -115,7 +100,7 @@ def extract_text_items(response: dict[str, Any]) -> list[str]:
 def append_text(response: dict[str, Any], text: str) -> None:
     """Append a text content item to an existing response envelope in place.
 
-    Used by the daemon to attach interstitial / screenshot diagnostics to an
+    Used to attach interstitial / screenshot diagnostics to an
     already-built response without rebuilding it.
     """
     result = response.get("result")

@@ -2,7 +2,7 @@
 
 RFC-01, "Native snapshot" (Phase 2, ticket #39). This module rebuilds the
 snapshot *read* path directly on Chrome DevTools Protocol's Accessibility
-domain, with no Node subprocess. It replaces the chrome-devtools-mcp snapshot
+domain, with no Node subprocess. It implements the parity-fixture snapshot
 for reading a page's accessibility tree and assigning stable UIDs to nodes.
 
 UID interaction (``click --uid`` / ``fill --uid``) is ticket #40 and is NOT
@@ -158,7 +158,7 @@ class NativeSnapshot:
     def format_tree(self) -> str:
         """Render an indented, UID-tagged text view of the visible tree.
 
-        The line shape mirrors chrome-devtools-mcp's textual snapshot
+        The line shape mirrors the parity fixture textual snapshot
         (``[uid=..] role "name"``) so a later cutover of the frozen
         ``take_snapshot`` tool onto this backend keeps the response shape. This
         module does not wire that cutover (see the module docstring).
@@ -350,7 +350,7 @@ def stitch_ax_frames(
 
     ``Accessibility.getFullAXTree`` returns only the frame it is called on: the
     top-frame result carries an ``Iframe`` node for each child frame but not the
-    child document's own nodes. chrome-devtools-mcp (the parity baseline) stitches
+    child document's own nodes. The parity baseline stitches
     child frames in; this reproduces that so the native node set reaches across a
     frame boundary (RFC-01 parity corpus's iframe case, ticket #41).
 
