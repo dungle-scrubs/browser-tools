@@ -7,9 +7,12 @@
 # `binary` parameter was added to launch_browser so the CLI front can resolve
 # the --channel policy flag to a Chrome binary before launch, and (#36) a
 # `user_data_dir` parameter so the CLI front can bind a persistent per-profile
-# user-data-dir instead of the throwaway session dir. Intra-package imports are
-# rewritten to browser_tools.core. Otherwise unchanged from chrome-agent
-# v0.5.7. See RFC-01, section "Vendoring rules".
+# user-data-dir instead of the throwaway session dir. A headed launch starts
+# with no window (--no-startup-window) and opens its first window in the
+# background over CDP, so the launch never takes the user's focus (see
+# _open_first_window). Intra-package imports are rewritten to
+# browser_tools.core. Otherwise unchanged from chrome-agent v0.5.7. See RFC-01,
+# section "Vendoring rules".
 
 """Browser launch and session management.
 
@@ -167,6 +170,8 @@ async def launch_browser(
     ]
     if headless:
         args.append("--headless=new")
+    else:
+        args.append("--no-startup-window")
     if extra_args:
         args.extend(extra_args)
 
@@ -214,6 +219,15 @@ async def launch_browser(
         process.kill()
         raise TimeoutError("Browser did not start within 30 seconds")
 
+    if not headless:
+        try:
+            await _open_first_window(port=port)
+        except Exception as exc:
+            # Nothing is registered yet, so a browser left running here would be
+            # an orphan no verb can see or stop.
+            process.kill()
+            raise RuntimeError(f"Browser started but its first window did not open: {exc}") from exc
+
     # Phase 6: Pin to desktop (Linux/X11, best-effort)
     if pin_to_desktop and not headless:
         await _move_to_launching_desktop(pid=process.pid)
@@ -255,6 +269,24 @@ async def launch_browser(
         )
 
     return instance_info
+
+
+async def _open_first_window(*, port: int) -> None:
+    """Open the browser's first window in the background.
+
+    Chrome started normally opens a window and makes itself the active app,
+    which takes keyboard focus and the window manager's focus from whatever
+    the user is doing (measured on macOS; ``open -g`` does not prevent it).
+    A browser started with ``--no-startup-window`` opens nothing, and a window
+    created over CDP with ``background`` set leaves focus where it is.
+    """
+    from .cdp_client import CDPClient, get_ws_url
+
+    async with CDPClient(ws_url=get_ws_url(port=port, target_type="browser")) as cdp:
+        await cdp.send(
+            method="Target.createTarget",
+            params={"url": "about:blank", "newWindow": True, "background": True},
+        )
 
 
 def cleanup_sessions(registry_path: str | None = None) -> list[str]:

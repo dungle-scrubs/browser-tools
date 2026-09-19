@@ -152,6 +152,83 @@ def extract_target_flags(argv: list[str]) -> tuple[list[str], str | None, str | 
 
 
 # ---------------------------------------------------------------------------
+# Focus guard
+# ---------------------------------------------------------------------------
+
+#: Methods that raise the browser window over whatever the person at the
+#: machine is doing. Measured on macOS (Chrome 153): each one makes Chrome the
+#: active app and moves the window manager's focus to it. No task needs them:
+#: input and screenshots reach the selected tab of a window that is behind
+#: other windows or on another workspace.
+FOCUS_TAKING_METHODS = frozenset(
+    {"Target.activateTarget", "Page.bringToFront", "Browser.setWindowBounds"}
+)
+
+#: Input methods that Chrome drops without an error when the target tab is a
+#: background tab (not the selected tab of its window). Measured: a click sent
+#: to a background tab reaches neither the top document nor a cross-origin
+#: iframe. The silent drop is what makes an agent reach for
+#: ``Target.activateTarget``, so these fail loudly instead.
+_INPUT_DELIVERY_PREFIXES = (
+    "Input.dispatch",
+    "Input.insertText",
+    "Input.imeSetComposition",
+    "Input.synthesize",
+)
+
+_WORK_IN_THE_BACKGROUND = (
+    "Input and screenshots reach the selected tab of a window even when the "
+    "window is behind other windows. To work in another page, open it in its "
+    "own window with Target.createTarget '{\"url\": \"...\", \"newWindow\": true}' "
+    "and pass the new targetId as --target, or navigate the current tab with "
+    "Page.navigate."
+)
+
+
+class HiddenTargetError(Exception):
+    """Input was sent to a background tab, which Chrome silently ignores."""
+
+
+def guard_focus(method: str, params: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Refuse calls that take the screen; return the params to send.
+
+    ``Target.createTarget`` always opens in the background: ``background`` is
+    set to true when omitted, and an explicit ``false`` is refused. Chrome's
+    default is foreground, which activates the new tab and raises its window.
+    """
+    if method in FOCUS_TAKING_METHODS:
+        raise UsageError(
+            f"{method} is refused: it raises the browser window over the user's "
+            f"work. {_WORK_IN_THE_BACKGROUND}"
+        )
+    if method == "Target.createTarget":
+        if params is not None and params.get("background") is False:
+            raise UsageError(
+                "Target.createTarget with background:false is refused: a foreground "
+                "tab raises the browser window over the user's work. Omit "
+                "background; it is always set to true."
+            )
+        return {**(params or {}), "background": True}
+    return params
+
+
+async def _refuse_input_to_hidden_tab(cdp: Any, session_id: str) -> None:
+    """Raise ``HiddenTargetError`` when the attached page is a background tab."""
+    result = await cdp.send(
+        method="Runtime.evaluate",
+        params={"expression": "document.visibilityState", "returnByValue": True},
+        session_id=session_id,
+    )
+    if result.get("result", {}).get("value") == "hidden":
+        raise HiddenTargetError(
+            "The target is a background tab (document.visibilityState is "
+            "'hidden'). Chrome drops input sent to it without an error. Do not "
+            "activate the tab: that raises the browser window over the user's "
+            f"work. {_WORK_IN_THE_BACKGROUND}"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Passthrough dispatch
 # ---------------------------------------------------------------------------
 
@@ -189,6 +266,7 @@ def send(
         if not isinstance(parsed, dict):
             raise UsageError("parameters must be a JSON object")
         params = parsed
+    params = guard_focus(method, params)
 
     target_by: str | None = None
     spec: str | None = None
@@ -201,9 +279,14 @@ def send(
 
     async def _send() -> dict[str, Any]:
         async with one_shot_page_session(info.port, spec, target_by) as (cdp, session_id):
+            if method.startswith(_INPUT_DELIVERY_PREFIXES):
+                await _refuse_input_to_hidden_tab(cdp, session_id)
             return await cdp.send(method=method, params=params, session_id=session_id)
 
-    return asyncio.run(_send())
+    try:
+        return asyncio.run(_send())
+    except HiddenTargetError as exc:
+        raise LifecycleError(str(exc)) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -226,7 +309,12 @@ static usage rather than the live protocol schema read from a browser.
       Send any CDP method the installed browser supports straight to it and
       print the JSON result to stdout. No curated tool is required to exist
       for the method. INSTANCE may be omitted when exactly one instance is
-      running; with several running, name one explicitly.
+      running; with several running, name one explicitly. Methods that raise
+      the browser window over the user's work (Target.activateTarget,
+      Page.bringToFront, Browser.setWindowBounds) are refused, and
+      Target.createTarget always opens in the background. To work in a second
+      page, open it with '{"url": "...", "newWindow": true}' and pass its
+      targetId as --target. Run `bt guide` for details.
 
 Launch a browser first: bt launch
 """

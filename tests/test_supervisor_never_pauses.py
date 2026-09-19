@@ -99,10 +99,18 @@ class TestTargetsAreWatchedNotIntercepted:
         assert retry["discover"] is True
 
 
+def _setup(cdp: FakeCDP) -> None:
+    """Run the per-session marking setup with the border setting on."""
+    scripts = supervisor.MarkerScripts.for_instance("t-01")
+    mark = supervisor.TabMark(session_id="S1")
+    border = supervisor.BorderSetting(lambda: True)
+    asyncio.run(supervisor._setup_session(cdp, "S1", scripts, mark, border))
+
+
 class TestEverySessionIsResumed:
     def test_resume_comes_before_any_marking_work(self) -> None:
         cdp = FakeCDP()
-        asyncio.run(supervisor._setup_session(cdp, "S1", "/*marker*/"))
+        _setup(cdp)
 
         methods = cdp.methods(session_id="S1")
         assert methods[0] == "Runtime.runIfWaitingForDebugger"
@@ -115,14 +123,14 @@ class TestEverySessionIsResumed:
     def test_marking_that_blows_up_still_leaves_the_target_resumed(self, failing: str) -> None:
         """Marking is best-effort; a target left paused is not."""
         cdp = FakeCDP(fail={failing})
-        asyncio.run(supervisor._setup_session(cdp, "S1", "/*marker*/"))
+        _setup(cdp)
 
         assert cdp.methods(session_id="S1").count("Runtime.runIfWaitingForDebugger") == 2
 
     def test_a_resume_that_fails_does_not_stop_the_marking(self) -> None:
         """The tab may have closed; the guard keeps working for other tabs."""
         cdp = FakeCDP(fail={"Runtime.runIfWaitingForDebugger"})
-        asyncio.run(supervisor._setup_session(cdp, "S1", "/*marker*/"))
+        _setup(cdp)
 
         assert "Page.addScriptToEvaluateOnNewDocument" in cdp.methods(session_id="S1")
 
@@ -165,7 +173,9 @@ class TestAttachRouting:
 
         async def drive():
             task = asyncio.get_event_loop().create_task(
-                supervisor._supervise_connection(port=1, draw_border=True, source="/*m*/")
+                supervisor._supervise_connection(
+                    port=1, scripts=supervisor.MarkerScripts.for_instance("t-01")
+                )
             )
             await asyncio.sleep(0)  # let the setup run up to the supervise loop
             for event in events:

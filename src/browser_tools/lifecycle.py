@@ -860,12 +860,44 @@ LIFECYCLE VERBS
   guide
       Print this manual.
 
+  window-border [on|off]
+      Show, or persistently set, whether marked windows draw the colored
+      border and corner badge over the page (default on). They cover the
+      page's outer edge and top-left corner; 'off' removes them from every
+      running browser within a second and keeps them off for later launches.
+      The tab-title prefix stays either way. --no-window-border on launch
+      turns off all marking for that one launch.
+
+NEVER TAKE THE SCREEN
+
+  A person is working on this machine. A browser window that comes to the
+  front takes their keyboard focus and moves their window manager to it, and
+  the next call takes it again. The tool keeps windows in the background:
+
+  - launch opens its window in the background.
+  - Target.activateTarget, Page.bringToFront, and Browser.setWindowBounds are
+    refused (exit 2). No task needs them.
+  - Target.createTarget always opens in the background; background:false is
+    refused (exit 2).
+  - Input sent to a background tab (a tab that is not the selected tab of its
+    window) fails (exit 1): Chrome drops it without an error.
+
+  Input and screenshots reach the selected tab of a window even when the
+  window is behind other windows or on another workspace. To work in a second
+  page, open it in its own window and target it:
+
+    bt Target.createTarget '{"url": "https://...", "newWindow": true}'
+    bt Input.dispatchMouseEvent '{...}' --target <targetId>
+
+  Or navigate the tab you already have with Page.navigate.
+
 RAW PROTOCOL
 
   [INSTANCE] Domain.method '{...json params...}' [--target SPEC]
       Send any CDP method the installed browser supports straight to it and
       print the JSON result. No curated tool needs to exist for the method.
       INSTANCE may be omitted only when exactly one instance is running.
+      Methods that raise the window are refused; see NEVER TAKE THE SCREEN.
 
   help [INSTANCE] [Domain.method]
       With a running instance, print the live CDP protocol schema read from

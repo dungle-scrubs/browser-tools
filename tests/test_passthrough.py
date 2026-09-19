@@ -385,6 +385,102 @@ class TestSend:
             )
 
 
+class TestFocusGuard:
+    """The passthrough never raises the browser window over the user's work.
+
+    Measured on macOS: activating a target, bringing a page to front, and a
+    foreground ``Target.createTarget`` each make Chrome the active app and move
+    the window manager's focus to it. Input sent to a background tab is dropped
+    by Chrome without an error, which is what drove an agent to activate tabs.
+    """
+
+    @pytest.mark.parametrize(
+        "method", ["Target.activateTarget", "Page.bringToFront", "Browser.setWindowBounds"]
+    )
+    def test_focus_taking_method_is_refused_before_any_cdp_traffic(
+        self, registry_path, fake_transport, method
+    ):
+        _seed(registry_path, {"site-01": _entry()})
+        calls = fake_transport()
+        with pytest.raises(UsageError) as exc:
+            passthrough.send(
+                instance="site-01", method=method, params_json=None, registry_path=registry_path
+            )
+        assert "raises the browser window" in str(exc.value)
+        assert calls == []
+
+    def test_create_target_is_forced_to_the_background(self, registry_path, fake_transport):
+        _seed(registry_path, {"site-01": _entry()})
+        calls = fake_transport()
+        passthrough.send(
+            instance="site-01",
+            method="Target.createTarget",
+            params_json='{"url": "https://example.com", "newWindow": true}',
+            registry_path=registry_path,
+        )
+        create = next(c for c in calls if c[0] == "Target.createTarget")
+        assert create[1] == {"url": "https://example.com", "newWindow": True, "background": True}
+
+    def test_create_target_with_background_false_is_refused(self, registry_path, fake_transport):
+        _seed(registry_path, {"site-01": _entry()})
+        calls = fake_transport()
+        with pytest.raises(UsageError):
+            passthrough.send(
+                instance="site-01",
+                method="Target.createTarget",
+                params_json='{"url": "https://example.com", "background": false}',
+                registry_path=registry_path,
+            )
+        assert calls == []
+
+    def test_input_to_a_background_tab_fails_instead_of_being_dropped(
+        self, registry_path, fake_transport
+    ):
+        _seed(registry_path, {"site-01": _entry()})
+
+        def responder(method, params):
+            if method == "Runtime.evaluate":
+                return {"result": {"type": "string", "value": "hidden"}}
+            return {}
+
+        calls = fake_transport(responder=responder)
+        with pytest.raises(LifecycleError) as exc:
+            passthrough.send(
+                instance="site-01",
+                method="Input.dispatchMouseEvent",
+                params_json='{"type": "mousePressed", "x": 1, "y": 1}',
+                registry_path=registry_path,
+            )
+        assert "background tab" in str(exc.value)
+        assert "Do not activate the tab" in str(exc.value)
+        assert not any(c[0] == "Input.dispatchMouseEvent" for c in calls)
+
+    def test_input_to_the_selected_tab_is_sent(self, registry_path, fake_transport):
+        _seed(registry_path, {"site-01": _entry()})
+
+        def responder(method, params):
+            if method == "Runtime.evaluate":
+                return {"result": {"type": "string", "value": "visible"}}
+            return {"ok": True}
+
+        calls = fake_transport(responder=responder)
+        result = passthrough.send(
+            instance="site-01",
+            method="Input.insertText",
+            params_json='{"text": "hi"}',
+            registry_path=registry_path,
+        )
+        assert result == {"ok": True}
+        assert ("Input.insertText", {"text": "hi"}, "S1") in calls
+
+    def test_cli_exit_code_for_a_refused_method_is_usage(self, registry_path, monkeypatch, capsys):
+        monkeypatch.setenv("BROWSER_TOOLS_REGISTRY", registry_path)
+        _seed(registry_path, {"site-01": _entry()})
+        rc = cli.main(["site-01", "Target.activateTarget", '{"targetId": "T1"}'])
+        assert rc == 2
+        assert "Target.activateTarget is refused" in capsys.readouterr().err
+
+
 # ---------------------------------------------------------------------------
 # Live-schema help
 # ---------------------------------------------------------------------------
