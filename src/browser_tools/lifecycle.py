@@ -67,6 +67,7 @@ from .process_utils import (
     pid_holds_user_data_dir,
     terminate_process_and_wait,
 )
+from .usage import UsageError
 
 if TYPE_CHECKING:
     from collections.abc import Generator
@@ -88,6 +89,43 @@ DEFAULT_PROFILES_ROOT = "/tmp/browser-tools-profiles"
 def profiles_root() -> Path:
     """Resolve the root directory that holds persistent profile dirs."""
     return Path(os.environ.get(PROFILES_ENV_VAR) or DEFAULT_PROFILES_ROOT)
+
+
+#: The character set a profile name may use: the one instance names use, from
+#: ``core.registry._derive_base_name`` (lowercase letters, digits, dots and
+#: hyphens), with a leading and trailing character that is alphanumeric. The
+#: edge restriction is what rules out ``.``, ``..`` and a hidden name, so no
+#: profile can collide with the root's own ``.locks`` and ``.ephemeral``.
+PROFILE_NAME_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$")
+
+
+class ProfileNameError(UsageError):
+    """A profile name outside the permitted character set (CLI exit code 2)."""
+
+
+def validate_profile_name(name: str) -> str:
+    """Return ``name`` if it is a usable profile name, else raise.
+
+    Checked before any filesystem work, so a rejected name never creates,
+    resolves or removes a path.
+
+    Raises:
+        ProfileNameError: The name is empty or uses a character outside
+            :data:`PROFILE_NAME_PATTERN` (CLI exit 2).
+    """
+    if not name:
+        raise ProfileNameError(
+            "A profile name is required. Names use lowercase letters, digits, "
+            "dots and hyphens, starting and ending with a letter or digit."
+        )
+    if not PROFILE_NAME_PATTERN.fullmatch(name):
+        raise ProfileNameError(
+            f"'{name}' is not a usable profile name. Names use lowercase "
+            "letters, digits, dots and hyphens, starting and ending with a "
+            "letter or digit -- the same characters instance names use. "
+            "List the profiles that exist with: bt profile list"
+        )
+    return name
 
 
 def profile_user_data_dir(profile: str) -> Path:
@@ -391,6 +429,94 @@ def resolve_channel_binary(channel: str | None) -> str | None:
 # ---------------------------------------------------------------------------
 
 
+def profile_list(registry_path: str | None = None) -> list[dict[str, Any]]:
+    """Report every named profile in the resolved root.
+
+    Reads the root through :func:`profiles_root`, never a constant, so a
+    changed ``BROWSER_TOOLS_PROFILES_DIR`` is honoured with no code change and
+    the root move in #81 needs none here either.
+
+    Needs no running instance. A root that does not exist, or holds nothing, is
+    an empty list rather than a failure: no profiles is a true answer.
+
+    Returns:
+        One entry per profile, sorted by name, each with ``name``, ``path``,
+        and ``held_by`` -- the live instance holding it, or None when it is
+        free. A profile is held by at most one live instance.
+    """
+    root = profiles_root()
+    if not root.is_dir():
+        return []
+
+    profiles: list[dict[str, Any]] = []
+    for child in sorted(root.iterdir(), key=lambda entry: entry.name):
+        if child.is_symlink() or not child.is_dir():
+            # A profile is a real directory the tool created under the root. A
+            # symlink is not one, and listing it would name something `profile
+            # delete` then refuses for leaving the root -- one rule, two verbs.
+            continue
+        if not PROFILE_NAME_PATTERN.fullmatch(child.name):
+            # The root also holds .locks and .ephemeral, which the name pattern
+            # excludes by construction: a profile name cannot begin with a dot.
+            continue
+        profiles.append(
+            {
+                "name": child.name,
+                "path": str(child),
+                "held_by": find_profile_holder(child.name, registry_path=registry_path),
+            }
+        )
+    return profiles
+
+
+def profile_delete(name: str, registry_path: str | None = None) -> dict[str, Any]:
+    """Remove one profile directory, or refuse and say why.
+
+    Three checks, in this order, before anything is removed:
+
+    1. The name is validated against :data:`PROFILE_NAME_PATTERN` (exit 2).
+    2. The resolved path is required to sit directly inside the resolved root
+       (exit 2). Containment is decided on the resolved path, not the string,
+       so a symlink planted in the root cannot carry a delete outside it.
+    3. A live holder refuses the delete (exit 1), naming the instance and
+       saying to stop it first. Removing a running browser's user-data-dir out
+       from under it loses the session it is still writing.
+
+    Returns:
+        ``{"deleted": name, "path": str}`` for the directory that was removed.
+
+    Raises:
+        ProfileNameError: The name or its resolved path is not usable (exit 2).
+        LifecycleError: No such profile, or a live instance holds it (exit 1).
+    """
+    validate_profile_name(name)
+
+    root = profiles_root().resolve()
+    target = (profiles_root() / name).resolve()
+    if target.parent != root:
+        raise ProfileNameError(
+            f"'{name}' resolves to {target}, which is outside the profile root "
+            f"{root}. Nothing was deleted. List the profiles that exist with: "
+            "bt profile list"
+        )
+
+    if not target.is_dir():
+        raise LifecycleError(
+            f"No profile named '{name}' in {root}. List what is there with: "
+            "bt profile list"
+        )
+
+    holder = find_profile_holder(name, registry_path=registry_path)
+    if holder is not None:
+        raise LifecycleError(
+            f"Profile '{name}' is held by live instance '{holder}'. Stop it "
+            f"first: bt stop {holder}"
+        )
+
+    shutil.rmtree(target)
+    return {"deleted": name, "path": str(target)}
+
+
 def resolve_single_instance(registry_path: str | None = None) -> str:
     """Resolve the implied instance when none was named on the command line.
 
@@ -480,6 +606,12 @@ def launch(
     engine = (engine or DEFAULT_ENGINE).lower()
     if engine not in VALID_ENGINES:
         raise LifecycleError(f"Unknown engine '{engine}'. Choose one of: {', '.join(VALID_ENGINES)}")
+
+    # The name becomes a path under the profile root, so it is checked here
+    # rather than only in `profile delete` (#98). Without this a launch could
+    # create a profile no profile verb can name, or write outside the root.
+    if profile is not None:
+        validate_profile_name(profile)
 
     # Hold the profile's launch lock for the WHOLE sequence: stale-lock
     # cleanup, the holder lookup, the launch, the registration and the
@@ -1108,6 +1240,22 @@ LIFECYCLE VERBS
   cleanup
       Remove stale registry entries and orphaned session directories. Live
       instances are never touched.
+
+  profile list
+      List every named profile in the profile root with its name, its path,
+      and the live instance holding it (null when free). Needs no running
+      instance; an empty root lists nothing.
+
+  profile delete NAME
+      Remove one profile directory, and its login state with it. This is the
+      only way a profile goes away: cleanup never prunes one on age. A name
+      outside the permitted character set, or one whose resolved path leaves
+      the profile root, is a usage error (exit 2) and deletes nothing. A
+      profile a live instance holds is refused (exit 1) naming the holder;
+      stop it first.
+
+      The profile root is $BROWSER_TOOLS_PROFILES_DIR, or
+      /tmp/browser-tools-profiles.
 
   guide
       Print this manual.

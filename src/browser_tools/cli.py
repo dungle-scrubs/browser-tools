@@ -28,9 +28,9 @@ import json
 import sys
 
 from . import curated, events, lifecycle, list_verbs, passthrough, user_settings
-from .endpoint import EndpointUsageError
 from .lifecycle import LifecycleError
 from .passthrough import UsageError as PassthroughUsageError
+from .usage import UsageError
 
 PROG = "browser-tools"
 
@@ -48,6 +48,7 @@ _KNOWN_VERBS = {
     "status",
     "stop",
     "cleanup",
+    "profile",
     "guide",
     "window-border",
     "help",
@@ -66,13 +67,6 @@ _KNOWN_VERBS = {
     "screenshot",
     "screencast",
 }
-
-
-#: The two exit-2 errors. ``endpoint.EndpointUsageError`` cannot subclass
-#: ``passthrough.UsageError`` -- ``passthrough`` imports ``endpoint``, so the
-#: dependency runs the other way -- and the CLI is the one place that has to
-#: know both spellings mean the same exit code.
-USAGE_ERRORS = (PassthroughUsageError, EndpointUsageError)
 
 
 #: Verbs that MUST NOT accept ``--endpoint`` (#97). They read or write the
@@ -136,6 +130,12 @@ def build_parser() -> argparse.ArgumentParser:
     stop.add_argument("--target", metavar="SPEC", help="Close a single tab instead of the browser")
 
     sub.add_parser("cleanup", help="Remove stale registry entries and session dirs")
+
+    profile = sub.add_parser("profile", help="List or delete named profiles")
+    profile_sub = profile.add_subparsers(dest="profile_action", metavar="ACTION")
+    profile_sub.add_parser("list", help="List every profile in the profile root")
+    profile_delete = profile_sub.add_parser("delete", help="Remove one profile directory")
+    profile_delete.add_argument("name", metavar="NAME", help="Profile to remove")
     sub.add_parser("guide", help="Print the bundled agent manual")
 
     border = sub.add_parser(
@@ -333,6 +333,18 @@ def _add_curated_verbs(
     _add_endpoint(cast_stop)
 
 
+def _run_profile(args: argparse.Namespace, registry_path: str | None) -> int:
+    """Dispatch ``profile list|delete NAME``."""
+    action = getattr(args, "profile_action", None)
+    if action == "list":
+        _print_json(lifecycle.profile_list(registry_path=registry_path))
+        return EXIT_OK
+    if action == "delete":
+        _print_json(lifecycle.profile_delete(args.name, registry_path=registry_path))
+        return EXIT_OK
+    raise PassthroughUsageError("profile takes one sub-action: list or delete NAME")
+
+
 def _print_json(payload: object) -> None:
     """Emit machine-readable output to stdout as JSON."""
     print(json.dumps(payload, indent=2))
@@ -402,6 +414,9 @@ def _run(args: argparse.Namespace) -> int:
         )
         _print_json({"stopped": True, "message": message})
         return EXIT_OK
+
+    if args.command == "profile":
+        return _run_profile(args, registry_path)
 
     if args.command == "cleanup":
         removed = lifecycle.cleanup(registry_path=registry_path)
@@ -784,7 +799,7 @@ def main(argv: list[str] | None = None) -> int:
             except LifecycleError as exc:
                 print(f"error: {exc}", file=sys.stderr)
                 return EXIT_OPERATIONAL
-            except USAGE_ERRORS as exc:
+            except UsageError as exc:
                 print(f"error: {exc}", file=sys.stderr)
                 return EXIT_USAGE
         # Neither a known instance nor Domain.method-shaped: fall through to
@@ -802,7 +817,7 @@ def main(argv: list[str] | None = None) -> int:
     except LifecycleError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_OPERATIONAL
-    except USAGE_ERRORS as exc:
+    except UsageError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_USAGE
 
