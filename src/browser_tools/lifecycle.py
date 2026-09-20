@@ -702,6 +702,45 @@ def _remove_entry(
         shutil.rmtree(user_data_dir, ignore_errors=True)
 
 
+def retire_instance(
+    *,
+    instance_name: str,
+    registry_path: str | None = None,
+) -> bool:
+    """Retire an instance whose browser has gone, keeping a bound profile.
+
+    The lifecycle-owned replacement for the vendored ``deregister``. That
+    function removes the entry and then deletes the recorded user-data dir
+    unconditionally, which destroys a named profile when a headed browser is
+    closed normally (#94). ``core/registry.py`` is verbatim vendored, so the
+    defect is corrected here, at its call site.
+
+    Profile-bound instances keep their directory: it is the profile's
+    identity, not a throwaway session. Unbound instances have theirs reaped
+    through the vendored ``_remove_session_dir``, whose retry loop is what
+    makes the reap survive Chrome helpers that briefly outlive the socket.
+
+    ``stop`` preserves a bound profile too, so with both paths preserving it
+    the order they run in no longer matters and the race between them is
+    closed by construction.
+
+    Returns True when an entry was removed. Idempotent, so it stays safe to
+    race with ``stop()`` and ``cleanup()``.
+    """
+    path = core_registry._resolve_path(registry_path)  # pyright: ignore[reportPrivateUsage]
+    reg = core_registry._load_registry(path)  # pyright: ignore[reportPrivateUsage]
+    entry = reg.pop(instance_name, None)
+    if entry is None:
+        return False
+    core_registry._save_registry(reg, path)  # pyright: ignore[reportPrivateUsage]
+
+    _, profile = read_engine_profile(entry)
+    session_dir = entry.get("user_data_dir")
+    if profile is None and session_dir:
+        core_registry._remove_session_dir(session_dir)  # pyright: ignore[reportPrivateUsage]
+    return True
+
+
 def _terminate_verified(ext: ExtendedInstance) -> None:
     """Terminate an instance's process only after verifying we own it.
 
