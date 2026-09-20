@@ -390,13 +390,12 @@ class TestFocusGuard:
 
     Measured on macOS: activating a target, bringing a page to front, and a
     foreground ``Target.createTarget`` each make Chrome the active app and move
-    the window manager's focus to it. Input sent to a background tab is dropped
+    the window manager's focus to it. ``Browser.setWindowBounds`` does not, so
+    it is sent like any other method. Input sent to a background tab is dropped
     by Chrome without an error, which is what drove an agent to activate tabs.
     """
 
-    @pytest.mark.parametrize(
-        "method", ["Target.activateTarget", "Page.bringToFront", "Browser.setWindowBounds"]
-    )
+    @pytest.mark.parametrize("method", ["Target.activateTarget", "Page.bringToFront"])
     def test_focus_taking_method_is_refused_before_any_cdp_traffic(
         self, registry_path, fake_transport, method
     ):
@@ -408,6 +407,18 @@ class TestFocusGuard:
             )
         assert "raises the browser window" in str(exc.value)
         assert calls == []
+
+    def test_set_window_bounds_is_sent(self, registry_path, fake_transport):
+        """Measured: resize, minimize and restore all left the focus alone."""
+        _seed(registry_path, {"site-01": _entry()})
+        calls = fake_transport()
+        passthrough.send(
+            instance="site-01",
+            method="Browser.setWindowBounds",
+            params_json='{"windowId": 1, "bounds": {"width": 900}}',
+            registry_path=registry_path,
+        )
+        assert any(c[0] == "Browser.setWindowBounds" for c in calls)
 
     def test_create_target_is_forced_to_the_background(self, registry_path, fake_transport):
         _seed(registry_path, {"site-01": _entry()})

@@ -875,8 +875,8 @@ NEVER TAKE THE SCREEN
   the next call takes it again. The tool keeps windows in the background:
 
   - launch opens its window in the background.
-  - Target.activateTarget, Page.bringToFront, and Browser.setWindowBounds are
-    refused (exit 2). No task needs them.
+  - Target.activateTarget and Page.bringToFront are refused (exit 2). No task
+    needs them.
   - Target.createTarget always opens in the background; background:false is
     refused (exit 2).
   - Input sent to a background tab (a tab that is not the selected tab of its

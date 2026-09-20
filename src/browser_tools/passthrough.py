@@ -160,9 +160,11 @@ def extract_target_flags(argv: list[str]) -> tuple[list[str], str | None, str | 
 #: active app and moves the window manager's focus to it. No task needs them:
 #: input and screenshots reach the selected tab of a window that is behind
 #: other windows or on another workspace.
-FOCUS_TAKING_METHODS = frozenset(
-    {"Target.activateTarget", "Page.bringToFront", "Browser.setWindowBounds"}
-)
+#:
+#: ``Browser.setWindowBounds`` is not here. It was refused on the assumption
+#: that it belongs with these, and the measurement says otherwise: resizing,
+#: minimizing and restoring a window all left the focus where it was.
+FOCUS_TAKING_METHODS = frozenset({"Target.activateTarget", "Page.bringToFront"})
 
 #: Input methods that Chrome drops without an error when the target tab is a
 #: background tab (not the selected tab of its window). Measured: a click sent
@@ -310,8 +312,8 @@ static usage rather than the live protocol schema read from a browser.
       print the JSON result to stdout. No curated tool is required to exist
       for the method. INSTANCE may be omitted when exactly one instance is
       running; with several running, name one explicitly. Methods that raise
-      the browser window over the user's work (Target.activateTarget,
-      Page.bringToFront, Browser.setWindowBounds) are refused, and
+      the browser window over the user's work (Target.activateTarget and
+      Page.bringToFront) are refused, and
       Target.createTarget always opens in the background. To work in a second
       page, open it with '{"url": "...", "newWindow": true}' and pass its
       targetId as --target. Run `bt guide` for details.
