@@ -17,7 +17,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 # Import the daemon class under test
-from browser_tools.mcp_daemon import CDPHandler as BrowserCDPHandler
+from browser_tools.cdp_handler import CDPHandler as BrowserCDPHandler
 from browser_tools.screencast import ScreencastRecorder
 
 # ---------------------------------------------------------------------------

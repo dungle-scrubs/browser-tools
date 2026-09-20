@@ -562,14 +562,14 @@ class TestStealthDaemonWiring:
 
     def test_cdp_handler_accepts_stealth_flag(self) -> None:
         """CDPHandler should propagate the stealth flag to its CDP runtime."""
-        from browser_tools.mcp_daemon import CDPHandler
+        from browser_tools.cdp_handler import CDPHandler
 
         handler = CDPHandler(None, mode="full", stealth=True)
         assert handler._rt._stealth is True
 
     def test_cdp_handler_defaults_stealth_false(self) -> None:
         """CDPHandler should default to stealth=False on its CDP runtime."""
-        from browser_tools.mcp_daemon import CDPHandler
+        from browser_tools.cdp_handler import CDPHandler
 
         handler = CDPHandler(None)
         assert handler._rt._stealth is False

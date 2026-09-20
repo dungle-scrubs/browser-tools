@@ -22,6 +22,8 @@ surfaced (and, via cross-frame stitching, closed) the iframe gap.
 
 from __future__ import annotations
 
+import contextlib
+
 import pytest
 from live_chromium import PlaywrightChromiumSession, chromium_available
 from parity_comparison import compare_corpus, corpus_covers, corpus_matches
@@ -43,23 +45,31 @@ pytestmark = [
 ]
 
 
+# Only the *launch* may skip. Wrapping the capture too meant any failure inside
+# the corpus run reported as "could not launch", so an upstream argument change
+# in chrome-devtools-mcp silently turned the authoritative gate off while the
+# suite stayed green. A gate that skips on its own failures is not a gate.
+
+
 def _capture_native_twice() -> tuple[dict, dict]:
-    try:
-        with PlaywrightChromiumSession() as session:
-            session.navigate("about:blank")
-            engine = NativeInteractionEngine(session)
-            return capture_corpus(engine), capture_corpus(engine)
-    except Exception as exc:  # missing browser binary, sandbox denial, etc.
-        pytest.skip(f"could not launch a live Chromium: {exc}")
+    with contextlib.ExitStack() as stack:
+        try:
+            session = stack.enter_context(PlaywrightChromiumSession())
+        except Exception as exc:  # missing browser binary, sandbox denial, etc.
+            pytest.skip(f"could not launch a live Chromium: {exc}")
+        session.navigate("about:blank")
+        engine = NativeInteractionEngine(session)
+        return capture_corpus(engine), capture_corpus(engine)
 
 
 def _capture_node_twice() -> tuple[dict, dict]:
-    try:
-        with NodeMcpSession() as node:
-            engine = NodeEngine(node)
-            return capture_corpus(engine), capture_corpus(engine)
-    except Exception as exc:  # npx/network/Chrome unavailable
-        pytest.skip(f"could not launch the chrome-devtools-mcp Node engine: {exc}")
+    with contextlib.ExitStack() as stack:
+        try:
+            node = stack.enter_context(NodeMcpSession())
+        except Exception as exc:  # npx/network/Chrome unavailable
+            pytest.skip(f"could not launch the chrome-devtools-mcp Node engine: {exc}")
+        engine = NodeEngine(node)
+        return capture_corpus(engine), capture_corpus(engine)
 
 
 @pytest.fixture(scope="module")

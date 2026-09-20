@@ -131,8 +131,8 @@ class TestListFramesAwaitsItsRefresh:
     @staticmethod
     def _handler_with_empty_frame_tree(frames_after_refresh: list[dict[str, Any]]):
         """A handler whose frame manager fills in only once a refresh runs."""
+        from browser_tools.cdp_handler import CDPHandler as BrowserCDPHandler
         from browser_tools.cdp_handler import CDPRuntime
-        from browser_tools.mcp_daemon import CDPHandler as BrowserCDPHandler
 
         known: list[dict[str, Any]] = []
 

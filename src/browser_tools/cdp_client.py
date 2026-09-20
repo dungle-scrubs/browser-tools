@@ -21,8 +21,6 @@ import urllib.error
 import urllib.request
 from typing import Any
 
-from .chrome_utils import BrowserToolsError
-
 try:
     import websockets  # type: ignore[import-untyped]
     from websockets.asyncio.client import connect as ws_connect
@@ -33,7 +31,7 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
-class CDPError(BrowserToolsError):
+class CDPError(Exception):
     """Error from a CDP protocol call."""
 
 

@@ -9,12 +9,17 @@ fresh MCP session before invoking the requested tool.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import fcntl
+import json
+import logging
 import os
 import signal
 import subprocess
+import threading
 import time
+import urllib.request
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -38,13 +43,11 @@ from .daemon_supervisor import (
 from .live_chrome import LiveChrome, resolve_live_chrome
 from .page_selection import PageSelection
 from .process_utils import (
-    build_browser_command,
     clean_stale_singleton_lock,
     enumerate_tabs,  # type: ignore[reportUnusedImport]  # noqa: F401  # re-exported for tests
     find_free_port,
     is_devtools_available,
     is_process_alive,
-    open_first_window,
     pid_holds_user_data_dir,  # type: ignore[reportUnusedImport]  # noqa: F401  # re-exported for session_reaper
     read_process_command,  # type: ignore[reportUnusedImport]  # noqa: F401  # re-exported for tests
     read_process_start_time,
@@ -60,13 +63,15 @@ from .project_identity import (
 )
 from .session_layout import (  # re-exported: session_layout owns the layout now
     CACHE_DIR,  # type: ignore[reportUnusedImport]  # noqa: F401
-    INITIAL_PAGE_URL,  # type: ignore[reportUnusedImport]  # noqa: F401
+    INITIAL_PAGE_URL,
     build_session_key,
     clear_session_files,  # type: ignore[reportUnusedImport]  # noqa: F401
 )
 from .session_reaper import (
     reap_orphaned_sessions,  # type: ignore[reportUnusedImport]  # noqa: F401  # re-exported for callers
 )
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_BROWSER_TIMEOUT_SECONDS = 60
 BROWSER_READY_TIMEOUT_SECONDS = 10.0
@@ -78,6 +83,124 @@ LAUNCH_PORT_ATTEMPTS = 3
 DAEMON_RECOVERY_RETRY_COUNT = 1
 # Grace period after SIGTERM before escalating to SIGKILL.
 CHROME_QUIT_TIMEOUT_SECONDS = 5.0
+
+# How long to wait for the first window to appear before giving up on it. The
+# browser is already up and answering by this point; the window is the last
+# step, and a browser without it is still usable.
+FIRST_WINDOW_TIMEOUT_SECONDS = 10.0
+
+
+def build_browser_command(
+    *,
+    executable: str,
+    port: int,
+    user_data_dir: Path,
+    headless: bool,
+    viewport: str | None,
+    system_profile: bool = False,
+) -> list[str]:
+    """Build the Chrome launch command for a persistent remote-debugging session.
+
+    Args:
+        executable: Chrome executable path.
+        port: Remote debugging port.
+        user_data_dir: Dedicated browser profile directory.
+        headless: Whether to launch headless.
+        viewport: Initial window size formatted as WIDTHxHEIGHT.
+        system_profile: When True the user-data-dir is the user's real everyday
+            profile (mode='real'); ``--disable-sync`` is omitted so Google sign-in
+            and sync keep working as they do in the user's normal browser.
+
+    Returns:
+        Command list for subprocess.Popen.
+
+    A headed launch passes ``--no-startup-window`` and no URL: Chrome started
+    with a window becomes the active app and takes the user's focus, and a URL
+    argument opens a window regardless of the flag. The first window is created
+    afterwards, in the background, by :func:`open_first_window`. Headless keeps
+    the URL, because it has no window to steal focus with.
+    """
+    command = [
+        executable,
+        f"--remote-debugging-port={port}",
+        f"--user-data-dir={user_data_dir}",
+        "--no-first-run",
+        "--no-default-browser-check",
+    ]
+    if not system_profile:
+        command.append("--disable-sync")
+    if headless:
+        command.append("--headless=new")
+    else:
+        command.append("--no-startup-window")
+    if viewport:
+        width, height = viewport.lower().split("x", 1)
+        command.append(f"--window-size={width},{height}")
+    if headless:
+        command.append(INITIAL_PAGE_URL)
+    return command
+
+
+def _browser_ws_url(browser_url: str) -> str:
+    """Read the browser-level WebSocket URL from ``/json/version``."""
+    request = urllib.request.Request(f"{browser_url}/json/version")
+    with urllib.request.urlopen(request, timeout=5) as response:
+        return json.loads(response.read())["webSocketDebuggerUrl"]
+
+
+def _first_window_cdp_client(ws_url: str) -> Any:
+    """Build the CDP client :func:`open_first_window` drives.
+
+    Imported here rather than at module load: ``cdp_client`` pulls in
+    ``websockets``, and this module is imported by paths that never launch a
+    browser. A seam the tests replace, too.
+    """
+    from .cdp_client import CDPClient
+
+    return CDPClient(ws_url)
+
+
+def open_first_window(browser_url: str) -> None:
+    """Open the browser's first window, without taking the user's focus.
+
+    The counterpart to ``--no-startup-window``: Chrome started that way opens
+    nothing, and a window created over CDP with ``background`` set leaves
+    focus where it is. This is the same pattern ``core/launcher.py`` uses for
+    the CLI launch; the MCP front reaches it from synchronous code, so the
+    CDP call runs on its own loop in a short-lived thread rather than
+    assuming whether a loop is already running here.
+
+    Best-effort: a browser that came up but would not open its window is
+    still a usable browser, and the caller's own readiness check owns that
+    verdict.
+
+    Args:
+        browser_url: Base URL of the remote debugging endpoint.
+    """
+
+    async def _open() -> None:
+        async with _first_window_cdp_client(_browser_ws_url(browser_url)) as cdp:
+            await cdp.send(
+                "Target.createTarget",
+                {"url": INITIAL_PAGE_URL, "newWindow": True, "background": True},
+            )
+
+    error: list[BaseException] = []
+
+    def _run() -> None:
+        try:
+            asyncio.run(_open())
+        except BaseException as exc:
+            error.append(exc)
+
+    thread = threading.Thread(target=_run, name="bt-first-window", daemon=True)
+    thread.start()
+    thread.join(timeout=FIRST_WINDOW_TIMEOUT_SECONDS)
+    if thread.is_alive():
+        logger.warning("first window did not open within %ss", FIRST_WINDOW_TIMEOUT_SECONDS)
+    elif error:
+        logger.warning("first window did not open: %s", error[0])
+
 
 
 def is_owned_profile_dir(user_data_dir: str | Path | None) -> bool:
