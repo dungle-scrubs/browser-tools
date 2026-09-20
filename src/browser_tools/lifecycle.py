@@ -44,6 +44,7 @@ import asyncio
 import contextlib
 import fcntl
 import json
+import logging
 import os
 import re
 import shutil
@@ -72,6 +73,8 @@ from .usage import UsageError
 if TYPE_CHECKING:
     from collections.abc import Generator
 
+logger = logging.getLogger(__name__)
+
 DEFAULT_ENGINE = "chrome"
 VALID_ENGINES = ("chrome", "camoufox")
 
@@ -79,16 +82,66 @@ VALID_ENGINES = ("chrome", "camoufox")
 #: and tests). ``None`` keeps the vendored default (/tmp/chrome-agent/...).
 REGISTRY_ENV_VAR = "BROWSER_TOOLS_REGISTRY"
 
-#: Root for persistent per-profile user-data-dirs and ephemeral Camoufox
-#: session dirs. It is deliberately OUTSIDE the vendored session root
-#: (/tmp/chrome-agent) so the launch-time orphan sweep never reaps a profile.
+#: Root for persistent per-profile user-data-dirs. It is durable storage, and
+#: deliberately outside the vendored session root (/tmp/chrome-agent) so the
+#: launch-time orphan sweep never reaps a profile.
+#:
+#: A profile holds a login. Under ``/tmp`` macOS deleted every signed-in
+#: session at boot and on its periodic sweep, and the failure was silent: the
+#: browser turned up logged out days later with no error anywhere (#81). The
+#: word "persistent" is what made it costly.
 PROFILES_ENV_VAR = "BROWSER_TOOLS_PROFILES_DIR"
-DEFAULT_PROFILES_ROOT = "/tmp/browser-tools-profiles"
+XDG_DATA_ENV_VAR = "XDG_DATA_HOME"
+
+#: Where profiles lived before #81. Still read, so a launch that names a
+#: profile left behind there migrates it instead of starting logged out. The
+#: override exists so a test, or a second machine layout, can point it
+#: somewhere harmless: code that reads a real login directory must be able to
+#: run without one.
+LEGACY_PROFILES_ENV_VAR = "BROWSER_TOOLS_LEGACY_PROFILES_DIR"
+LEGACY_PROFILES_ROOT = "/tmp/browser-tools-profiles"
+
+#: Under the resolved XDG data directory.
+PROFILES_SUBPATH = "browser-tools/profiles"
+
+#: Unbound Camoufox needs a user-data-dir for its liveness hold but keeps no
+#: login, so it stays temporary. It lives outside the profile root: a bare
+#: root substitution would have moved throwaway session dirs into durable
+#: storage, where nothing reaps them.
+EPHEMERAL_ROOT = "/tmp/browser-tools-ephemeral"
 
 
 def profiles_root() -> Path:
-    """Resolve the root directory that holds persistent profile dirs."""
-    return Path(os.environ.get(PROFILES_ENV_VAR) or DEFAULT_PROFILES_ROOT)
+    """Resolve the durable root directory that holds named profile dirs.
+
+    The precedence, with an empty value at any level falling through to the
+    next (RFC-01 v6, "Profile storage"):
+
+    1. ``BROWSER_TOOLS_PROFILES_DIR``
+    2. ``$XDG_DATA_HOME/browser-tools/profiles``
+    3. ``~/.local/share/browser-tools/profiles``
+
+    The registry stays in ``/tmp`` and is not affected: a cleared registry
+    after a reboot is self-consistent, because no browser survives one.
+    Persistent state belongs to profiles.
+    """
+    override = os.environ.get(PROFILES_ENV_VAR)
+    if override:
+        return Path(override)
+    xdg = os.environ.get(XDG_DATA_ENV_VAR)
+    if xdg:
+        return Path(xdg) / PROFILES_SUBPATH
+    return Path.home() / ".local" / "share" / PROFILES_SUBPATH
+
+
+def legacy_profiles_root() -> Path:
+    """The pre-#81 profile root, still read so nothing is abandoned there."""
+    return Path(os.environ.get(LEGACY_PROFILES_ENV_VAR) or LEGACY_PROFILES_ROOT)
+
+
+def ephemeral_root() -> Path:
+    """The temp root for unbound Camoufox session dirs, outside the profiles."""
+    return Path(EPHEMERAL_ROOT)
 
 
 #: The character set a profile name may use: the one instance names use, from
@@ -445,27 +498,31 @@ def profile_list(registry_path: str | None = None) -> list[dict[str, Any]]:
         free. A profile is held by at most one live instance.
     """
     root = profiles_root()
-    if not root.is_dir():
-        return []
-
+    legacy = legacy_profiles_root()
     profiles: list[dict[str, Any]] = []
-    for child in sorted(root.iterdir(), key=lambda entry: entry.name):
-        if child.is_symlink() or not child.is_dir():
-            # A profile is a real directory the tool created under the root. A
-            # symlink is not one, and listing it would name something `profile
-            # delete` then refuses for leaving the root -- one rule, two verbs.
+    seen: set[str] = set()
+
+    # A profile is a real directory the tool created under the root. A symlink
+    # is not one, and listing it would name something `profile delete` then
+    # refuses for leaving the root -- one rule, two verbs. The name pattern
+    # excludes the root's own `.locks`, because a profile name cannot begin
+    # with a dot.
+    for is_legacy, source in ((False, root), (True, legacy)):
+        if is_legacy and source.resolve() == root.resolve():
             continue
-        if not PROFILE_NAME_PATTERN.fullmatch(child.name):
-            # The root also holds .locks and .ephemeral, which the name pattern
-            # excludes by construction: a profile name cannot begin with a dot.
-            continue
-        profiles.append(
-            {
-                "name": child.name,
-                "path": str(child),
-                "held_by": find_profile_holder(child.name, registry_path=registry_path),
-            }
-        )
+        for child in _migratable_profiles(source):
+            if child.name in seen:
+                continue
+            seen.add(child.name)
+            profiles.append(
+                {
+                    "name": child.name,
+                    "path": str(child),
+                    "held_by": find_profile_holder(child.name, registry_path=registry_path),
+                    "legacy": is_legacy,
+                }
+            )
+    profiles.sort(key=lambda entry: entry["name"])
     return profiles
 
 
@@ -491,19 +548,31 @@ def profile_delete(name: str, registry_path: str | None = None) -> dict[str, Any
     """
     validate_profile_name(name)
 
-    root = profiles_root().resolve()
-    target = (profiles_root() / name).resolve()
-    if target.parent != root:
-        raise ProfileNameError(
-            f"'{name}' resolves to {target}, which is outside the profile root "
-            f"{root}. Nothing was deleted. List the profiles that exist with: "
-            "bt profile list"
-        )
+    # The legacy root is searched too, so a profile that has not been migrated
+    # yet can still be deleted by name (#81). Containment is checked against
+    # whichever root holds it, never against the string.
+    roots = [profiles_root()]
+    if legacy_profiles_root().resolve() != profiles_root().resolve():
+        roots.append(legacy_profiles_root())
 
-    if not target.is_dir():
+    target: Path | None = None
+    for candidate_root in roots:
+        resolved_root = candidate_root.resolve()
+        candidate = (candidate_root / name).resolve()
+        if candidate.parent != resolved_root:
+            raise ProfileNameError(
+                f"'{name}' resolves to {candidate}, which is outside the "
+                f"profile root {resolved_root}. Nothing was deleted. List the "
+                "profiles that exist with: bt profile list"
+            )
+        if candidate.is_dir():
+            target = candidate
+            break
+
+    if target is None:
         raise LifecycleError(
-            f"No profile named '{name}' in {root}. List what is there with: "
-            "bt profile list"
+            f"No profile named '{name}' in {profiles_root()}. List what is "
+            "there with: bt profile list"
         )
 
     holder = find_profile_holder(name, registry_path=registry_path)
@@ -525,6 +594,210 @@ def instance_is_registered(name: str, registry_path: str | None = None) -> bool:
     the verb or a ``Domain.method``.
     """
     return any(inst.name == name for inst in read_instances(registry_path=registry_path))
+
+
+#: Prefix for the staging directory a migration writes into. A half-finished
+#: transfer is never visible at the profile's real name, and the name pattern
+#: excludes a leading dot, so a leftover staging dir is never read as a profile.
+MIGRATION_STAGING_PREFIX = ".migrating-"
+
+#: The files whose presence proves a profile carries a login. Verified
+#: byte-for-byte after a transfer, before the source is removed.
+LOGIN_BEARING_FILES = (
+    "Default/Cookies",
+    "Default/Network/Cookies",
+    "Default/Login Data",
+)
+
+
+class ProfileMigrationError(LifecycleError):
+    """A profile could not be migrated (CLI exit code 1)."""
+
+
+def _directory_manifest(root: Path) -> dict[str, int]:
+    """Every regular file under ``root``, relative path to size in bytes."""
+    manifest: dict[str, int] = {}
+    for path in root.rglob("*"):
+        if path.is_symlink() or not path.is_file():
+            continue
+        with contextlib.suppress(OSError):
+            manifest[str(path.relative_to(root))] = path.stat().st_size
+    return manifest
+
+
+def _verify_transfer(source: Path, destination: Path) -> None:
+    """Confirm ``destination`` holds everything ``source`` did.
+
+    Raises:
+        ProfileMigrationError: A file is missing, a size differs, or a
+            login-bearing file does not match byte for byte.
+    """
+    before = _directory_manifest(source)
+    after = _directory_manifest(destination)
+    missing = sorted(set(before) - set(after))
+    if missing:
+        raise ProfileMigrationError(
+            f"transfer to {destination} is missing {len(missing)} file(s), "
+            f"first: {missing[0]}"
+        )
+    differing = sorted(name for name, size in before.items() if after[name] != size)
+    if differing:
+        raise ProfileMigrationError(
+            f"transfer to {destination} has {len(differing)} file(s) of a "
+            f"different size, first: {differing[0]}"
+        )
+    for name in LOGIN_BEARING_FILES:
+        original, copy = source / name, destination / name
+        if original.is_file() and original.read_bytes() != copy.read_bytes():
+            raise ProfileMigrationError(f"{name} does not match after the transfer")
+
+
+def _migratable_profiles(root: Path) -> list[Path]:
+    """Every real, well-named profile directory directly under ``root``."""
+    if not root.is_dir():
+        return []
+    return sorted(
+        child
+        for child in root.iterdir()
+        if child.is_dir()
+        and not child.is_symlink()
+        and PROFILE_NAME_PATTERN.fullmatch(child.name)
+    )
+
+
+def _transfer_profile(source: Path, destination_root: Path) -> None:
+    """Move one profile directory into ``destination_root``, verifying first.
+
+    Copies into a staging sibling, verifies the copy against the source,
+    renames it into place, and only then removes the source. The RFC's
+    sequence is move-verify-rename; copying first keeps the login readable at
+    its old path until the new one is proven, which matters because the thing
+    being moved is the user's authenticated session (#81).
+
+    Raises:
+        ProfileMigrationError: The destination already exists, or the copy did
+            not verify. The source is left untouched in both cases.
+    """
+    destination = destination_root / source.name
+    if destination.exists():
+        raise ProfileMigrationError(
+            f"'{source.name}' already exists at {destination}. Migration does "
+            f"not merge two profiles; move or delete one of them first."
+        )
+
+    clean_stale_singleton_lock(source)
+    destination_root.mkdir(parents=True, exist_ok=True)
+    staging = destination_root / f"{MIGRATION_STAGING_PREFIX}{source.name}-{os.getpid()}"
+    if staging.exists():
+        shutil.rmtree(staging)
+    try:
+        shutil.copytree(source, staging, symlinks=True)
+        _verify_transfer(source, staging)
+        staging.rename(destination)
+    except Exception:
+        with contextlib.suppress(OSError):
+            shutil.rmtree(staging)
+        raise
+    shutil.rmtree(source)
+
+
+def migrate_profiles(
+    *,
+    back: bool = False,
+    dry_run: bool = False,
+    registry_path: str | None = None,
+) -> dict[str, Any]:
+    """Move named profiles between the legacy ``/tmp`` root and the durable one.
+
+    Profiles under ``/tmp`` were deleted by the operating system at every boot,
+    silently, so the browser turned up logged out days later with no error
+    anywhere (#81). Changing the default without moving what is already there
+    would create fresh empty profiles at the new path and leave the
+    authenticated ones in ``/tmp`` until the operating system deleted them.
+
+    ``back`` runs the reverse migration, which is the rollback for this change:
+    once the profiles have moved on disk, reverting the code does not move them
+    back.
+
+    A profile a live instance holds is refused rather than moved, and a name
+    that exists on both sides is refused rather than merged. Neither refusal
+    stops the others: the result reports each profile's outcome.
+
+    Returns:
+        ``{"from": str, "to": str, "migrated": [...], "refused": [{...}],
+        "dry_run": bool}``.
+    """
+    source_root = profiles_root() if back else legacy_profiles_root()
+    destination_root = legacy_profiles_root() if back else profiles_root()
+
+    result: dict[str, Any] = {
+        "from": str(source_root),
+        "to": str(destination_root),
+        "migrated": [],
+        "refused": [],
+        "dry_run": dry_run,
+    }
+    if source_root.resolve() == destination_root.resolve():
+        return result
+
+    for source in _migratable_profiles(source_root):
+        name = source.name
+        holder = find_profile_holder(name, registry_path=registry_path)
+        if holder is not None:
+            result["refused"].append(
+                {
+                    "name": name,
+                    "reason": f"held by live instance '{holder}'; stop it first: bt stop {holder}",
+                }
+            )
+            continue
+        if (destination_root / name).exists():
+            result["refused"].append(
+                {
+                    "name": name,
+                    "reason": f"already exists at {destination_root / name}; "
+                    "migration does not merge two profiles",
+                }
+            )
+            continue
+        if dry_run:
+            result["migrated"].append({"name": name, "path": str(destination_root / name)})
+            continue
+        try:
+            _transfer_profile(source, destination_root)
+        except (ProfileMigrationError, OSError) as exc:
+            result["refused"].append({"name": name, "reason": str(exc)})
+            continue
+        result["migrated"].append({"name": name, "path": str(destination_root / name)})
+    return result
+
+
+def migrate_one_profile(name: str, registry_path: str | None = None) -> bool:
+    """Bring one named profile forward from the legacy root, if it is only there.
+
+    ``launch --profile NAME`` calls this: without it, a profile left in the old
+    root would be shadowed by a fresh empty directory at the new one and the
+    launch would start logged out, which is the exact silent failure #81 is
+    about.
+
+    Returns:
+        True when a profile was moved.
+    """
+    source = legacy_profiles_root() / name
+    destination = profiles_root() / name
+    if destination.exists() or not source.is_dir() or source.is_symlink():
+        return False
+    if source.resolve() == destination.resolve():
+        return False
+    holder = find_profile_holder(name, registry_path=registry_path)
+    if holder is not None:
+        raise ProfileMigrationError(
+            f"Profile '{name}' is still in the old root and held by live "
+            f"instance '{holder}'. Stop it first: bt stop {holder}"
+        )
+    _transfer_profile(source, profiles_root())
+    logger.info("Migrated profile %s to %s", name, destination)
+    return True
 
 
 def resolve_single_instance(registry_path: str | None = None) -> str:
@@ -635,6 +908,7 @@ def launch(
         # per-profile dir; an unbound Camoufox instance still needs a dir for its
         # liveness hold, so it gets a throwaway one that stop/cleanup reaps.
         if profile is not None:
+            migrate_one_profile(profile, registry_path=registry_path)
             user_data_dir = profile_user_data_dir(profile)
             user_data_dir.mkdir(parents=True, exist_ok=True)
             # Clean stale singleton locks (dead holder) BEFORE the exclusivity check
@@ -647,7 +921,7 @@ def launch(
                     f"Stop it first, or launch a different profile."
                 )
         elif engine == "camoufox":
-            base = profiles_root() / ".ephemeral"
+            base = ephemeral_root()
             base.mkdir(parents=True, exist_ok=True)
             user_data_dir = Path(tempfile.mkdtemp(prefix="camoufox-", dir=str(base)))
         else:
@@ -899,9 +1173,19 @@ def _is_under_profiles_root(user_data_dir: str) -> bool:
     if not user_data_dir:
         return False
     try:
-        return Path(user_data_dir).resolve().is_relative_to(profiles_root().resolve())
+        resolved = Path(user_data_dir).resolve()
     except OSError:
         return False
+    for root in (profiles_root(), legacy_profiles_root()):
+        try:
+            if resolved.is_relative_to(root.resolve()):
+                return True
+        except OSError:
+            continue
+    # The legacy root is checked too: an entry written before #81 still points
+    # into /tmp/browser-tools-profiles, and dropping that check would hand a
+    # not-yet-migrated login to the vendored sweep.
+    return False
 
 
 class ProfileLockBusy(LifecycleError):
@@ -1278,8 +1562,32 @@ LIFECYCLE VERBS
       profile a live instance holds is refused (exit 1) naming the holder;
       stop it first.
 
-      The profile root is $BROWSER_TOOLS_PROFILES_DIR, or
-      /tmp/browser-tools-profiles.
+  profile migrate [--dry-run] [--back]
+      Move profiles still sitting in the old /tmp root into the durable one.
+      --dry-run reports what would move and moves nothing. --back reverses
+      the migration, and is the rollback for the root move: once the profiles
+      have moved on disk, reverting the code does not move them back.
+
+      A profile a live instance holds is refused, and a name that exists on
+      both sides is refused rather than merged. Neither stops the others; the
+      result reports each profile's outcome. The transfer is verified against
+      the source before the source is removed.
+
+  THE PROFILE ROOT
+
+      Profiles are durable storage, resolved in this order, with an empty
+      value falling through to the next:
+
+        1. $BROWSER_TOOLS_PROFILES_DIR
+        2. $XDG_DATA_HOME/browser-tools/profiles
+        3. ~/.local/share/browser-tools/profiles
+
+      It used to be /tmp/browser-tools-profiles, where the operating system
+      deleted every signed-in session at boot, silently. A profile still
+      there is listed with "legacy": true, and `launch --profile NAME` brings
+      that one forward before it launches. The registry stays in /tmp: a
+      cleared registry after a reboot is self-consistent, because no browser
+      survives one.
 
   guide
       Print this manual.

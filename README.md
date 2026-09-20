@@ -171,6 +171,14 @@ same directory is reused. To keep a session logged in:
 - `bt profile list` shows every profile with its path and its live holder, and
   `bt profile delete NAME` removes one. Deleting a profile deletes its login
   state; `cleanup` never removes a profile on age.
+
+Profiles live in durable storage: `$BROWSER_TOOLS_PROFILES_DIR`, else
+`$XDG_DATA_HOME/browser-tools/profiles`, else
+`~/.local/share/browser-tools/profiles`. They used to live under `/tmp`, where
+the operating system deleted every signed-in session at boot, silently. A
+profile still there is listed with `"legacy": true`; `bt profile migrate`
+moves them all across (`--dry-run` first, `--back` to reverse it), and
+`launch --profile NAME` brings that one forward by itself.
 - **Camoufox** persists login state only when you pass `--profile`; without it,
   every launch starts logged out.
 

@@ -136,6 +136,17 @@ def build_parser() -> argparse.ArgumentParser:
     profile_sub.add_parser("list", help="List every profile in the profile root")
     profile_delete = profile_sub.add_parser("delete", help="Remove one profile directory")
     profile_delete.add_argument("name", metavar="NAME", help="Profile to remove")
+    profile_migrate = profile_sub.add_parser(
+        "migrate", help="Move profiles left in the old /tmp root into durable storage"
+    )
+    profile_migrate.add_argument(
+        "--back", action="store_true",
+        help="Reverse the migration (the rollback for the root move)",
+    )
+    profile_migrate.add_argument(
+        "--dry-run", action="store_true",
+        help="Report what would move, and move nothing",
+    )
     sub.add_parser("guide", help="Print the bundled agent manual")
 
     border = sub.add_parser(
@@ -359,7 +370,16 @@ def _run_profile(args: argparse.Namespace, registry_path: str | None) -> int:
     if action == "delete":
         _print_json(lifecycle.profile_delete(args.name, registry_path=registry_path))
         return EXIT_OK
-    raise PassthroughUsageError("profile takes one sub-action: list or delete NAME")
+    if action == "migrate":
+        _print_json(
+            lifecycle.migrate_profiles(
+                back=args.back, dry_run=args.dry_run, registry_path=registry_path
+            )
+        )
+        return EXIT_OK
+    raise PassthroughUsageError(
+        "profile takes one sub-action: list, delete NAME, or migrate"
+    )
 
 
 def _one_instance(leading: str | None, inline: str | None) -> str | None:

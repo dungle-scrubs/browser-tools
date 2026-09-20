@@ -287,7 +287,7 @@ class TestProfileVerbsThroughTheCli:
 
     def test_a_missing_sub_action_exits_2(self, profile_root, capsys):
         assert cli.main(["profile"]) == 2
-        assert "list or delete NAME" in capsys.readouterr().err
+        assert "list, delete NAME, or migrate" in capsys.readouterr().err
 
     def test_delete_without_a_name_exits_2(self, profile_root):
         with pytest.raises(SystemExit) as exc:
