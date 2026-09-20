@@ -193,18 +193,28 @@ class TestSupervisorBuildsOverlayWhenBorderOn:
 
 
 class _FakeCDP:
-    """Records CDP calls; answers addScriptToEvaluateOnNewDocument with ids."""
+    """Records CDP calls; answers addScriptToEvaluateOnNewDocument with ids.
 
-    def __init__(self) -> None:
+    ``fail`` names methods that raise, so a partial failure can be driven: a
+    tab that navigates or closes between two calls of one change.
+    """
+
+    def __init__(self, fail: set[str] | None = None) -> None:
         self.calls: list[tuple[str, dict | None, str | None]] = []
+        self.fail = fail or set()
         self._next = 0
 
     async def send(self, method, params=None, session_id=None):
         self.calls.append((method, params, session_id))
+        if method in self.fail:
+            raise RuntimeError(f"{method} failed")
         if method == "Page.addScriptToEvaluateOnNewDocument":
             self._next += 1
             return {"identifier": str(self._next)}
         return {}
+
+    def methods(self) -> list[str]:
+        return [m for m, _, _ in self.calls]
 
 
 class TestBorderSettingIsAppliedToMarkedTabs:
@@ -253,6 +263,41 @@ class TestBorderSettingIsAppliedToMarkedTabs:
         added = [c for c in cdp.calls if c[0] == "Page.addScriptToEvaluateOnNewDocument"]
         assert len(added) == 1
         assert ("Runtime.evaluate", {"expression": scripts.border}, "S1") in cdp.calls
+
+    def test_a_failed_injection_still_keeps_the_registration_id(self):
+        """Chrome returns the id on registration; the current document is
+        touched after. If that second call fails (the tab navigated), losing
+        the id would leave every future document in the tab drawing a border
+        that can no longer be turned off."""
+        cdp, scripts = _FakeCDP(fail={"Runtime.evaluate"}), self._scripts()
+        mark = supervisor.TabMark(session_id="S1")
+        asyncio.run(supervisor._set_tab_border(cdp, mark, True, scripts))
+
+        assert mark.border_script == "1"
+
+        cdp.calls.clear()
+        cdp.fail = set()
+        asyncio.run(supervisor._set_tab_border(cdp, mark, False, scripts))
+        assert ("Page.removeScriptToEvaluateOnNewDocument", {"identifier": "1"}, "S1") in cdp.calls
+        assert mark.border_script is None
+
+    def test_a_failed_removal_keeps_the_id_for_the_next_attempt(self):
+        cdp, scripts = _FakeCDP(fail={"Page.removeScriptToEvaluateOnNewDocument"}), self._scripts()
+        mark = supervisor.TabMark(session_id="S1", border_script="7")
+        asyncio.run(supervisor._set_tab_border(cdp, mark, False, scripts))
+
+        assert mark.border_script == "7"
+
+    def test_turning_off_clears_a_border_this_supervisor_did_not_register(self):
+        """After a reconnect the tab's mark is fresh and holds no id, while the
+        page may still carry a border drawn before the drop. The removal
+        expression runs anyway; it is idempotent and keyed to the instance."""
+        cdp, scripts = _FakeCDP(), self._scripts()
+        mark = supervisor.TabMark(session_id="S1")
+        asyncio.run(supervisor._set_tab_border(cdp, mark, False, scripts))
+
+        assert ("Runtime.evaluate", {"expression": scripts.border_removal}, "S1") in cdp.calls
+        assert "Page.removeScriptToEvaluateOnNewDocument" not in cdp.methods()
 
     def test_setting_refresh_reports_changes_and_survives_read_errors(self):
         values = iter([True, True, False, RuntimeError("unreadable")])

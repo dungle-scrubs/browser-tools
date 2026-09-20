@@ -332,11 +332,10 @@ async def _release_target(cdp: CDPClient, session_id: str) -> None:
         pass
 
 
-async def _add_marker_script(cdp: CDPClient, session_id: str, source: str) -> str | None:
-    """Run ``source`` in the current document and in every future one.
+async def _register_marker_script(cdp: CDPClient, session_id: str, source: str) -> str | None:
+    """Register ``source`` to run in every future document of this session.
 
-    Future documents get it in an isolated world, on every navigation. The
-    already-loaded document needs a one-time injection. Returns the script
+    It runs in an isolated world, on every navigation. Returns the script
     identifier that ``Page.removeScriptToEvaluateOnNewDocument`` takes.
     """
     added = await cdp.send(
@@ -344,8 +343,21 @@ async def _add_marker_script(cdp: CDPClient, session_id: str, source: str) -> st
         params={"source": source, "worldName": ISOLATED_WORLD},
         session_id=session_id,
     )
-    await cdp.send(method="Runtime.evaluate", params={"expression": source}, session_id=session_id)
     return added.get("identifier")
+
+
+async def _evaluate(cdp: CDPClient, session_id: str, expression: str) -> None:
+    """Run ``expression`` once in the session's current document."""
+    await cdp.send(
+        method="Runtime.evaluate", params={"expression": expression}, session_id=session_id
+    )
+
+
+async def _add_marker_script(cdp: CDPClient, session_id: str, source: str) -> str | None:
+    """Register ``source`` for future documents, then run it in the current one."""
+    identifier = await _register_marker_script(cdp, session_id, source)
+    await _evaluate(cdp, session_id, source)
+    return identifier
 
 
 @dataclass
@@ -365,23 +377,39 @@ class TabMark:
 async def _set_tab_border(
     cdp: CDPClient, mark: TabMark, want: bool, scripts: MarkerScripts
 ) -> None:
-    """Add or remove the border on one tab so it matches ``want``. Idempotent."""
+    """Add or remove the border on one tab so it matches ``want``. Idempotent.
+
+    The registration identifier is stored the moment Chrome returns it, before
+    the current document is touched: a failure between the two (the tab
+    navigates, the page goes away) would otherwise lose the identifier, and a
+    later "off" could not unregister the script, so every future document in
+    that tab would keep drawing the border.
+
+    Turning off always runs the removal expression, even when this supervisor
+    holds no identifier. A border can be drawn in the page while this mark is
+    fresh: the connection dropped and reconnected, or an earlier supervisor
+    process of the same instance drew it. The expression is idempotent and the
+    ids are derived from the instance name, so it clears that border too.
+    """
     async with mark.lock:
         try:
-            if want and mark.border_script is None:
-                mark.border_script = await _add_marker_script(cdp, mark.session_id, scripts.border)
-            elif not want and mark.border_script is not None:
-                identifier, mark.border_script = mark.border_script, None
-                await cdp.send(
-                    method="Page.removeScriptToEvaluateOnNewDocument",
-                    params={"identifier": identifier},
-                    session_id=mark.session_id,
-                )
-                await cdp.send(
-                    method="Runtime.evaluate",
-                    params={"expression": scripts.border_removal},
-                    session_id=mark.session_id,
-                )
+            if want:
+                if mark.border_script is None:
+                    mark.border_script = await _register_marker_script(
+                        cdp, mark.session_id, scripts.border
+                    )
+                    await _evaluate(cdp, mark.session_id, scripts.border)
+            else:
+                if mark.border_script is not None:
+                    await cdp.send(
+                        method="Page.removeScriptToEvaluateOnNewDocument",
+                        params={"identifier": mark.border_script},
+                        session_id=mark.session_id,
+                    )
+                    # Cleared only once Chrome confirms: a failed removal keeps
+                    # the identifier so the next change can retry it.
+                    mark.border_script = None
+                await _evaluate(cdp, mark.session_id, scripts.border_removal)
         except Exception:
             pass  # the tab may close mid-change; other tabs are unaffected
 

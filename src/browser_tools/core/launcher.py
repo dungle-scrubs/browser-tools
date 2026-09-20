@@ -222,10 +222,14 @@ async def launch_browser(
     if not headless:
         try:
             await _open_first_window(port=port)
-        except Exception as exc:
+        except BaseException as exc:
             # Nothing is registered yet, so a browser left running here would be
-            # an orphan no verb can see or stop.
+            # an orphan no verb can see or stop. BaseException, not Exception: a
+            # launch cancelled while this awaits (Ctrl-C, a cancelled task)
+            # leaves the same orphan, and CancelledError is not an Exception.
             process.kill()
+            if isinstance(exc, asyncio.CancelledError):
+                raise
             raise RuntimeError(f"Browser started but its first window did not open: {exc}") from exc
 
     # Phase 6: Pin to desktop (Linux/X11, best-effort)

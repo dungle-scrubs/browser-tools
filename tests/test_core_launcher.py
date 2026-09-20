@@ -189,6 +189,39 @@ class TestHeadedLaunchLeavesFocusAlone:
         )
         assert "--no-startup-window" not in captured["args"]
 
+    def test_a_cancelled_launch_kills_the_unregistered_browser(self, monkeypatch, tmp_path):
+        """Ctrl-C while the first window is opening cancels this task.
+        CancelledError is not an Exception, so a plain ``except Exception``
+        would skip the kill and leave Chrome running with no registry entry
+        and no supervisor."""
+        captured: dict = {}
+        killed: list[int] = []
+
+        class _KillableProcess(_FakeProcess):
+            def kill(self):
+                killed.append(self.pid)
+
+        async def cancelled_open(*, port):
+            raise asyncio.CancelledError()
+
+        _patch_launch_plumbing(monkeypatch, captured)
+        monkeypatch.setattr(
+            launcher.subprocess, "Popen", lambda args, **kwargs: _KillableProcess()
+        )
+        monkeypatch.setattr(launcher, "_open_first_window", cancelled_open)
+
+        with pytest.raises(asyncio.CancelledError):
+            asyncio.run(
+                launcher.launch_browser(
+                    port_override=9338,
+                    headless=False,
+                    working_dir=str(tmp_path),
+                    registry_path=str(tmp_path / "registry.json"),
+                    user_data_dir=str(tmp_path / "udd"),
+                )
+            )
+        assert killed == [424242]
+
     def test_failed_first_window_kills_the_unregistered_browser(self, monkeypatch, tmp_path):
         captured: dict = {}
         killed: list[int] = []
