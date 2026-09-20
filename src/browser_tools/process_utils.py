@@ -8,8 +8,10 @@ under 800 lines.
 
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import json
+import logging
 import os
 import re
 import shutil
@@ -17,6 +19,7 @@ import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -25,6 +28,13 @@ from typing import Any
 from urllib.parse import urlparse
 
 from .session_layout import INITIAL_PAGE_URL as _initial_page_url
+
+logger = logging.getLogger(__name__)
+
+# How long to wait for the first window to appear before giving up on it. The
+# browser is already up and answering by this point; the window is the last
+# step, and a browser without it is still usable.
+FIRST_WINDOW_TIMEOUT_SECONDS = 10.0
 
 _DEBUG_PORT_PATTERN = re.compile(r"--remote-debugging-port=(\d+)")
 _USER_DATA_DIR_PATTERN = re.compile(r"--user-data-dir=(\S+)")
@@ -169,6 +179,12 @@ def build_browser_command(
 
     Returns:
         Command list for subprocess.Popen.
+
+    A headed launch passes ``--no-startup-window`` and no URL: Chrome started
+    with a window becomes the active app and takes the user's focus, and a URL
+    argument opens a window regardless of the flag. The first window is created
+    afterwards, in the background, by :func:`open_first_window`. Headless keeps
+    the URL, because it has no window to steal focus with.
     """
     command = [
         executable,
@@ -181,11 +197,75 @@ def build_browser_command(
         command.append("--disable-sync")
     if headless:
         command.append("--headless=new")
+    else:
+        command.append("--no-startup-window")
     if viewport:
         width, height = viewport.lower().split("x", 1)
         command.append(f"--window-size={width},{height}")
-    command.append(_initial_page_url)
+    if headless:
+        command.append(_initial_page_url)
     return command
+
+
+def _browser_ws_url(browser_url: str) -> str:
+    """Read the browser-level WebSocket URL from ``/json/version``."""
+    request = urllib.request.Request(f"{browser_url}/json/version")
+    with urllib.request.urlopen(request, timeout=5) as response:
+        return json.loads(response.read())["webSocketDebuggerUrl"]
+
+
+def _first_window_cdp_client(ws_url: str) -> Any:
+    """Build the CDP client :func:`open_first_window` drives.
+
+    Imported here rather than at module load: ``cdp_client`` pulls in
+    ``websockets``, and this module is imported by paths that never launch a
+    browser. A seam the tests replace, too.
+    """
+    from .cdp_client import CDPClient
+
+    return CDPClient(ws_url)
+
+
+def open_first_window(browser_url: str) -> None:
+    """Open the browser's first window, without taking the user's focus.
+
+    The counterpart to ``--no-startup-window``: Chrome started that way opens
+    nothing, and a window created over CDP with ``background`` set leaves
+    focus where it is. This is the same pattern ``core/launcher.py`` uses for
+    the CLI launch; the MCP front reaches it from synchronous code, so the
+    CDP call runs on its own loop in a short-lived thread rather than
+    assuming whether a loop is already running here.
+
+    Best-effort: a browser that came up but would not open its window is
+    still a usable browser, and the caller's own readiness check owns that
+    verdict.
+
+    Args:
+        browser_url: Base URL of the remote debugging endpoint.
+    """
+
+    async def _open() -> None:
+        async with _first_window_cdp_client(_browser_ws_url(browser_url)) as cdp:
+            await cdp.send(
+                "Target.createTarget",
+                {"url": _initial_page_url, "newWindow": True, "background": True},
+            )
+
+    error: list[BaseException] = []
+
+    def _run() -> None:
+        try:
+            asyncio.run(_open())
+        except BaseException as exc:
+            error.append(exc)
+
+    thread = threading.Thread(target=_run, name="bt-first-window", daemon=True)
+    thread.start()
+    thread.join(timeout=FIRST_WINDOW_TIMEOUT_SECONDS)
+    if thread.is_alive():
+        logger.warning("first window did not open within %ss", FIRST_WINDOW_TIMEOUT_SECONDS)
+    elif error:
+        logger.warning("first window did not open: %s", error[0])
 
 
 def find_free_port() -> int:
