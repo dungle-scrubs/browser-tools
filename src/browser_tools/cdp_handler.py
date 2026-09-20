@@ -728,12 +728,17 @@ class CDPHandler:
 
         frames = fm.get_flat_frames()
         if not frames:
-            # Try refreshing frame tree if CDP is available
-            if self._cdp_client and self._cdp_client.connected:
-                _ = asyncio.ensure_future(self._refresh_frame_tree())  # noqa: RUF006
-                return make_text("No frames available. Refreshing frame tree...")
-
-            return make_text("No frames available. CDP client not connected.")
+            if not (self._cdp_client and self._cdp_client.connected):
+                return make_text("No frames available. CDP client not connected.")
+            # An empty tree usually means nothing has refreshed it yet. Refresh
+            # and answer from the result: this handler runs on the MCP dispatch
+            # path, not the CDP read loop, so awaiting here cannot deadlock.
+            # Firing a detached task and telling the caller to ask again left
+            # the result unobserved and cost a second round trip.
+            await self._refresh_frame_tree()
+            frames = fm.get_flat_frames()
+            if not frames:
+                return make_text("No frames available.")
 
         lines = ["Frames in current page:\n"]
         for frame in frames:

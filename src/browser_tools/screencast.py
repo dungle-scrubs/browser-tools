@@ -9,7 +9,10 @@ The recorder is constructed without a CDP client and bound to one on each
 start(); the frame callback the CDP read loop fires (:meth:`on_frame`) acks via
 the bound client. Acks are scheduled with ``ensure_future`` rather than awaited,
 because the read loop is what resolves the ack's response - awaiting inline
-would deadlock.
+would deadlock. The recorder holds every in-flight ack task, because the event
+loop keeps only a weak reference: an unheld task can be garbage-collected
+mid-flight, and the ack then never happens, stalling the stream through CDP
+flow control.
 """
 
 from __future__ import annotations
@@ -59,11 +62,20 @@ class ScreencastRecorder:
         self._max_frames: int = 600
         self._format: str = "jpeg"
         self._cdp: Any = None
+        self._acks: set[asyncio.Task[None]] = set()
 
     @property
     def active(self) -> bool:
         """Whether a screencast capture is currently in progress."""
         return self._active
+
+    @property
+    def pending_acks(self) -> int:
+        """How many frame acks are in flight.
+
+        Zero outside a capture, and zero again once :meth:`stop` returns.
+        """
+        return len(self._acks)
 
     def on_frame(self, params: dict[str, Any]) -> None:
         """Buffer one frame and ack it so the stream continues.
@@ -85,9 +97,9 @@ class ScreencastRecorder:
         session_id = params.get("sessionId")
         cdp = self._cdp
         if session_id is not None and cdp is not None:
-            _ = asyncio.ensure_future(  # noqa: RUF006
-                self._ack(cdp, session_id)
-            )
+            task = asyncio.ensure_future(self._ack(cdp, session_id))
+            self._acks.add(task)
+            task.add_done_callback(self._acks.discard)
 
     async def _ack(self, cdp: Any, session_id: int) -> None:
         """Ack a frame; failures are best-effort (the stream will retry)."""
@@ -95,6 +107,21 @@ class ScreencastRecorder:
             await cdp.send("Page.screencastFrameAck", {"sessionId": session_id})
         except Exception:
             logger.debug("screencast ack failed", exc_info=True)
+
+    async def _drain_acks(self) -> None:
+        """Wait out every in-flight ack, so none outlives the capture.
+
+        An ack still pending when the capture ends has nothing left to ack.
+        Cancel it and collect it, rather than leave a task the loop will
+        later report as destroyed while pending.
+        """
+        pending = list(self._acks)
+        for task in pending:
+            task.cancel()
+        for task in pending:
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+        self._acks.clear()
 
     def _unsubscribe(self, cdp: Any) -> None:
         """Tear down a started capture's subscription and active flag."""
@@ -120,6 +147,7 @@ class ScreencastRecorder:
             return make_error("format must be 'jpeg' or 'png'")
 
         self._frames = []
+        self._acks = set()
         self._format = fmt
         self._max_frames = max(1, int(arguments.get("max_frames", 600)))
         self._active = True
@@ -169,6 +197,7 @@ class ScreencastRecorder:
         with contextlib.suppress(Exception):
             await cdp.send("Page.stopScreencast")  # best-effort
         cdp.off("Page.screencastFrame", self.on_frame)
+        await self._drain_acks()
 
         frames = self._frames
         self._frames = []
