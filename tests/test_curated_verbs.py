@@ -81,9 +81,10 @@ class FakeHandler:
     detection: ClassVar[dict | None] = None
     instances: ClassVar[list[FakeHandler]] = []
 
-    def __init__(self, browser_url, mode="full", stealth=False):
+    def __init__(self, browser_url, mode="full", stealth=False, target_spec=None):
         self.browser_url = browser_url
         self.mode = mode
+        self.target_spec = target_spec
         self.tool_calls: list[tuple[str, dict]] = []
         self.native_calls: list[tuple[str, dict]] = []
         self.detection_runs = 0
@@ -113,6 +114,9 @@ class FakeHandler:
         self.detection_runs += 1
         self.detection_budgets.append(max_retries)
         return FakeHandler.detection
+
+    def page_visibility_state(self) -> str | None:
+        return "visible"
 
 
 @pytest.fixture
