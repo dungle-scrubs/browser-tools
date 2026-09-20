@@ -293,12 +293,16 @@ class CDPRuntime:
         browser_url: str | None,
         mode: str = "full",
         stealth: bool = False,
+        target_spec: str | None = None,
     ) -> None:
         """Initialize the CDP runtime.
 
         Args:
             browser_url: Chrome remote debugging URL.
             mode: Access mode ('full' or 'inspect').
+            target_spec: Which page to attach to, as an index into the page
+                targets sorted by target ID, or a target ID. None takes the
+                first page in that order, which is what ``--target 0`` names.
             stealth: Accepted for MCP surface compatibility only. No JavaScript
                 is injected for fingerprint purposes (RFC-01, "Anti-detection":
                 each JS override is independently detectable). Chrome
@@ -309,6 +313,7 @@ class CDPRuntime:
         self._browser_url = browser_url
         self._mode = mode
         self._stealth = stealth
+        self._target_spec = target_spec
         self._loop: asyncio.AbstractEventLoop | None = None
         self._ready = threading.Event()
         self._stop_event: asyncio.Event | None = None
@@ -393,10 +398,10 @@ class CDPRuntime:
     async def _connect_cdp(self) -> None:
         """Connect the CDP client to Chrome."""
         try:
-            from .cdp_client import CDPClient, get_page_ws_url_async
+            from .cdp_client import CDPClient, resolve_page_ws_url_async
 
             browser_url: str = self._browser_url  # type: ignore[assignment]  # guarded by if-self._browser_url
-            ws_url = await get_page_ws_url_async(browser_url)
+            ws_url = await resolve_page_ws_url_async(browser_url, self._target_spec)
             if not ws_url:
                 return
 
@@ -489,6 +494,33 @@ class CDPRuntime:
             logger.debug("_await_paint_ready_async failed", exc_info=True)
             return False
 
+    def page_visibility_state(self) -> str | None:
+        """Read ``document.visibilityState`` of the attached page (thread-safe).
+
+        Chrome drops input sent to a background tab without an error, so a
+        verb that delivers input asks this first. Returns "visible",
+        "hidden", or None when the state cannot be read -- None means
+        "unknown", and an unknown state must not block a working page.
+        """
+        loop = self._loop
+        client = self._cdp_client
+        if loop is None or client is None or not client.connected:
+            return None
+
+        async def _read() -> Any:
+            return await client.send(
+                "Runtime.evaluate",
+                {"expression": "document.visibilityState", "returnByValue": True},
+            )
+
+        try:
+            result = asyncio.run_coroutine_threadsafe(_read(), loop).result(timeout=5)
+        except Exception:
+            logger.debug("page_visibility_state failed", exc_info=True)
+            return None
+        value = result.get("result", {}).get("value")
+        return value if isinstance(value, str) else None
+
     def run_post_navigation_detection(
         self, max_retries: int | None = None
     ) -> dict[str, Any] | None:
@@ -538,6 +570,7 @@ class CDPHandler:
         browser_url: str | None,
         mode: str = "full",
         stealth: bool = False,
+        target_spec: str | None = None,
     ) -> None:
         """Initialize the handler registry over a fresh CDP runtime.
 
@@ -546,8 +579,9 @@ class CDPHandler:
             mode: Access mode ('full' or 'inspect').
             stealth: Accepted for MCP surface compatibility only; see
                 :class:`CDPRuntime`. No JavaScript is injected.
+            target_spec: Which page to attach to; see :class:`CDPRuntime`.
         """
-        self._rt = CDPRuntime(browser_url, mode, stealth=stealth)
+        self._rt = CDPRuntime(browser_url, mode, stealth=stealth, target_spec=target_spec)
         # Tool name -> bound handler. Built from the class-level _CDP_HANDLERS
         # table, which is parity-checked against tool_registry.CDP_TOOLS above.
         self._handlers: dict[str, Any] = {
@@ -590,6 +624,10 @@ class CDPHandler:
     ) -> dict[str, Any] | None:
         """Run post-navigation interstitial detection (delegates to runtime)."""
         return self._rt.run_post_navigation_detection(max_retries)
+
+    def page_visibility_state(self) -> str | None:
+        """Read the attached page's visibility state (delegates to runtime)."""
+        return self._rt.page_visibility_state()
 
     # --- Runtime state, exposed to the handlers as a documented seam. These
     #     read through to the runtime so the handlers access the browser via a

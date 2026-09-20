@@ -74,7 +74,7 @@ from .interstitial import INTERSTITIAL_RETRY_DELAY_SECONDS, format_interstitials
 from .lifecycle import LifecycleError
 from .mcp_response import extract_text_items
 from .one_shot import cli_cdp_errors, one_shot_page_session
-from .passthrough import UsageError
+from .passthrough import HIDDEN_TAB_MESSAGE, UsageError
 from .screenshot_utils import (
     SCREENSHOT_BLANK_MAX_RETRIES,
     SCREENSHOT_BLANK_RETRY_DELAY_SECONDS,
@@ -118,7 +118,9 @@ def _resolve_port(instance: str | None, registry_path: str | None) -> int:
 
 
 @contextlib.contextmanager
-def _cdp_handler_session(port: int) -> Generator[CDPHandler]:
+def _cdp_handler_session(
+    port: int, target_spec: str | None = None
+) -> Generator[CDPHandler]:
     """Yield a connected one-shot :class:`CDPHandler`, then tear it down.
 
     Builds the handler against ``http://127.0.0.1:{port}``, runs its event loop
@@ -126,8 +128,12 @@ def _cdp_handler_session(port: int) -> Generator[CDPHandler]:
     the CDP connection to come up, and always stops it afterward. A connection
     that never comes up within :data:`HANDLER_CONNECT_TIMEOUT_SECONDS` is a
     ``LifecycleError`` (CLI exit 1).
+
+    ``target_spec`` names the page, read the same way ``passthrough.send``
+    reads ``--target``: a 1-based index into the page targets sorted by target
+    ID, or a target ID prefix. None takes the first page in that order.
     """
-    handler = CDPHandler(f"http://127.0.0.1:{port}", mode="full")
+    handler = CDPHandler(f"http://127.0.0.1:{port}", mode="full", target_spec=target_spec)
     thread = threading.Thread(target=handler.run, name="curated-cdp", daemon=True)
     thread.start()
     deadline = time.monotonic() + HANDLER_CONNECT_TIMEOUT_SECONDS
@@ -185,33 +191,73 @@ def _native_or_raise(handler: CDPHandler, name: str, arguments: dict[str, Any]) 
 # ---------------------------------------------------------------------------
 
 
-def snapshot(*, instance: str | None, registry_path: str | None = None) -> dict[str, Any]:
-    """Return the native UID accessibility tree (frozen ``take_snapshot``)."""
+def _refuse_input_to_hidden_tab(handler: CDPHandler) -> None:
+    """Raise ``LifecycleError`` when the attached page is a background tab.
+
+    Chrome drops input sent to a background tab without an error, so a verb
+    that dispatched anyway would print a success result for an interaction
+    that never happened. The raw passthrough already refuses this
+    (``passthrough._refuse_input_to_hidden_tab``); the message is shared so
+    both surfaces give one answer, including the remedy.
+
+    An unreadable state is "unknown", not "hidden": a page whose visibility
+    cannot be read still gets its input.
+    """
+    if handler.page_visibility_state() != "hidden":
+        return
+    raise LifecycleError(HIDDEN_TAB_MESSAGE)
+
+
+def snapshot(
+    *,
+    instance: str | None,
+    target: str | None = None,
+    registry_path: str | None = None,
+) -> dict[str, Any]:
+    """Return the native UID accessibility tree (frozen ``take_snapshot``).
+
+    Reading a background tab is fine -- only input is dropped -- so this is
+    not focus-guarded. ``target`` selects the page whose UIDs are returned,
+    which is what makes those UIDs usable with ``click --target``.
+    """
     port = _resolve_port(instance, registry_path)
-    with _cdp_handler_session(port) as handler:
+    with _cdp_handler_session(port, target) as handler:
         tree = _native_or_raise(handler, "take_snapshot", {})
     return {"snapshot": tree}
 
 
-def click(*, instance: str | None, uid: str, registry_path: str | None = None) -> dict[str, Any]:
+def click(
+    *,
+    instance: str | None,
+    uid: str,
+    target: str | None = None,
+    registry_path: str | None = None,
+) -> dict[str, Any]:
     """Native UID click (frozen ``click``), over the #40 interaction path.
 
     Takes a fresh snapshot first so the UID resolves against the current,
     identically-ordered tree of the (unchanged) page in this one-shot process.
     """
     port = _resolve_port(instance, registry_path)
-    with _cdp_handler_session(port) as handler:
+    with _cdp_handler_session(port, target) as handler:
+        _refuse_input_to_hidden_tab(handler)
         _native_or_raise(handler, "take_snapshot", {})
         text = _native_or_raise(handler, "click", {"uid": uid})
     return {"uid": uid, "result": text}
 
 
 def fill(
-    *, instance: str | None, uid: str, text: str, registry_path: str | None = None
+    *,
+    instance: str | None,
+    uid: str,
+    text: str,
+    target: str | None = None,
+    registry_path: str | None = None,
 ) -> dict[str, Any]:
     """Native UID fill (frozen ``fill``), over the #40 interaction path."""
     port = _resolve_port(instance, registry_path)
-    with _cdp_handler_session(port) as handler:
+    with _cdp_handler_session(port, target) as handler:
+        _refuse_input_to_hidden_tab(handler)
         _native_or_raise(handler, "take_snapshot", {})
         result = _native_or_raise(handler, "fill", {"uid": uid, "value": text})
     return {"uid": uid, "text": text, "result": result}

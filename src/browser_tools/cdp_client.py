@@ -253,6 +253,68 @@ def get_page_ws_url(browser_url: str, page_index: int = 0) -> str | None:
     return None
 
 
+def resolve_page_ws_url(browser_url: str, target_spec: str | None = None) -> str | None:
+    """Find the WebSocket URL of the page ``target_spec`` names.
+
+    The page targets are sorted by target ID first, the same deterministic
+    order ``one_shot_page_session`` uses, so ``--target N`` means the same page
+    on both transports and an omitted spec is ``--target 1``. Without the sort,
+    Chrome's own ``/json/list`` order is roughly most-recently-used, so the
+    handler transport and the session transport could disagree about which page
+    is "the first one".
+
+    Args:
+        browser_url: Base URL of the remote debugging endpoint.
+        target_spec: A 1-based index into the sorted page targets, or a target
+            ID prefix, read the same way ``passthrough.send`` reads ``--target``.
+            None selects the first.
+
+    Returns:
+        The page WebSocket URL, or None if unavailable.
+
+    Raises:
+        TargetNotFoundError: ``target_spec`` matched no page.
+        AmbiguousTargetError: ``target_spec`` matched more than one page.
+    """
+    from .core.attach import resolve_target
+
+    try:
+        request = urllib.request.Request(f"{browser_url}/json/list")
+        with urllib.request.urlopen(request, timeout=5) as response:
+            tabs = json.loads(response.read())
+    except (urllib.error.URLError, OSError, json.JSONDecodeError):
+        logger.debug("Failed to list targets from %s", browser_url, exc_info=True)
+        return None
+
+    # /json/list spells the target ID "id"; Target.getTargets spells it
+    # "targetId". resolve_target reads the latter, so carry it across.
+    pages = [
+        {**tab, "targetId": tab.get("id", "")} for tab in tabs if tab.get("type") == "page"
+    ]
+    pages.sort(key=lambda page: page["targetId"])
+    if not pages:
+        return None
+    if target_spec is None:
+        return pages[0].get("webSocketDebuggerUrl")
+
+    target_id = resolve_target(
+        page_targets=pages,
+        target_spec=target_spec,
+        target_by="index" if target_spec.isdigit() else "id",
+    )
+    for page in pages:
+        if page["targetId"] == target_id:
+            return page.get("webSocketDebuggerUrl")
+    return None
+
+
+async def resolve_page_ws_url_async(
+    browser_url: str, target_spec: str | None = None
+) -> str | None:
+    """Awaitable :func:`resolve_page_ws_url`, for callers on an event loop."""
+    return await asyncio.to_thread(resolve_page_ws_url, browser_url, target_spec)
+
+
 async def get_page_ws_url_async(browser_url: str, page_index: int = 0) -> str | None:
     """Awaitable :func:`get_page_ws_url`, for callers on an event loop.
 

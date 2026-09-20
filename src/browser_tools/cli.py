@@ -206,15 +206,18 @@ def _add_curated_verbs(
     """
     snapshot = sub.add_parser("snapshot", help="Native UID accessibility tree")
     snapshot.add_argument("instance", nargs="?", metavar="INSTANCE", help="Instance (omit if only one)")
+    snapshot.add_argument("--target", metavar="SPEC", help="Select the page target (1-based index or id)")
 
     click = sub.add_parser("click", help="Native UID click")
     click.add_argument("instance", nargs="?", metavar="INSTANCE", help="Instance (omit if only one)")
     click.add_argument("--uid", metavar="N", help="UID from a prior snapshot")
+    click.add_argument("--target", metavar="SPEC", help="Select the page target (1-based index or id)")
 
     fill = sub.add_parser("fill", help="Native UID fill")
     fill.add_argument("instance", nargs="?", metavar="INSTANCE", help="Instance (omit if only one)")
     fill.add_argument("--uid", metavar="N", help="UID from a prior snapshot")
     fill.add_argument("--text", metavar="T", help="Text to fill")
+    fill.add_argument("--target", metavar="SPEC", help="Select the page target (1-based index or id)")
 
     wait_idle = sub.add_parser("wait-idle", help="Wait for network idle")
     wait_idle.add_argument("instance", nargs="?", metavar="INSTANCE", help="Instance (omit if only one)")
@@ -469,13 +472,24 @@ def _run_curated(args: argparse.Namespace, registry_path: str | None) -> int:
     (exit 1), handled by the caller.
     """
     if args.command == "snapshot":
-        _print_json(curated.snapshot(instance=args.instance, registry_path=registry_path))
+        _print_json(
+            curated.snapshot(
+                instance=args.instance, target=args.target, registry_path=registry_path
+            )
+        )
         return EXIT_OK
 
     if args.command == "click":
         if not args.uid:
             raise PassthroughUsageError("click requires --uid N (a UID from a prior snapshot)")
-        _print_json(curated.click(instance=args.instance, uid=args.uid, registry_path=registry_path))
+        _print_json(
+            curated.click(
+                instance=args.instance,
+                uid=args.uid,
+                target=args.target,
+                registry_path=registry_path,
+            )
+        )
         return EXIT_OK
 
     if args.command == "fill":
@@ -485,7 +499,11 @@ def _run_curated(args: argparse.Namespace, registry_path: str | None) -> int:
             raise PassthroughUsageError("fill requires --text T")
         _print_json(
             curated.fill(
-                instance=args.instance, uid=args.uid, text=args.text, registry_path=registry_path
+                instance=args.instance,
+                uid=args.uid,
+                text=args.text,
+                target=args.target,
+                registry_path=registry_path,
             )
         )
         return EXIT_OK

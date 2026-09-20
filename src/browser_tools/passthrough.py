@@ -178,12 +178,22 @@ _INPUT_DELIVERY_PREFIXES = (
     "Input.synthesize",
 )
 
-_WORK_IN_THE_BACKGROUND = (
+WORK_IN_THE_BACKGROUND = (
     "Input and screenshots reach the selected tab of a window even when the "
     "window is behind other windows. To work in another page, open it in its "
     "own window with Target.createTarget '{\"url\": \"...\", \"newWindow\": true}' "
     "and pass the new targetId as --target, or navigate the current tab with "
     "Page.navigate."
+)
+
+
+#: The one spelling of the hidden-tab refusal. The curated verbs raise the
+#: same text through ``LifecycleError``, so both surfaces give one answer.
+HIDDEN_TAB_MESSAGE = (
+    "The target is a background tab (document.visibilityState is "
+    "'hidden'). Chrome drops input sent to it without an error. Do not "
+    "activate the tab: that raises the browser window over the user's "
+    f"work. {WORK_IN_THE_BACKGROUND}"
 )
 
 
@@ -201,7 +211,7 @@ def guard_focus(method: str, params: dict[str, Any] | None) -> dict[str, Any] | 
     if method in FOCUS_TAKING_METHODS:
         raise UsageError(
             f"{method} is refused: it raises the browser window over the user's "
-            f"work. {_WORK_IN_THE_BACKGROUND}"
+            f"work. {WORK_IN_THE_BACKGROUND}"
         )
     if method == "Target.createTarget":
         if params is not None and params.get("background") is False:
@@ -222,12 +232,7 @@ async def _refuse_input_to_hidden_tab(cdp: Any, session_id: str) -> None:
         session_id=session_id,
     )
     if result.get("result", {}).get("value") == "hidden":
-        raise HiddenTargetError(
-            "The target is a background tab (document.visibilityState is "
-            "'hidden'). Chrome drops input sent to it without an error. Do not "
-            "activate the tab: that raises the browser window over the user's "
-            f"work. {_WORK_IN_THE_BACKGROUND}"
-        )
+        raise HiddenTargetError(HIDDEN_TAB_MESSAGE)
 
 
 # ---------------------------------------------------------------------------
