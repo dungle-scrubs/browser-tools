@@ -387,10 +387,20 @@ class TestSingletonLockHelpers:
         assert not (tmp_path / "SingletonSocket").exists()
 
     def test_clean_stale_singleton_lock_preserves_live_lock(self, tmp_path: Path) -> None:
-        """Live singleton files are left alone."""
+        """Singleton files of a process that really holds this dir are left alone.
+
+        A live PID alone is not enough since #95: it must be a Chrome holding
+        THIS user-data-dir, or a recycled PID preserves a stale lock forever.
+        """
         (tmp_path / "SingletonLock").symlink_to("host-12345")
 
-        with patch("browser_tools.process_utils.is_process_alive", return_value=True):
+        with (
+            patch("browser_tools.process_utils.is_process_alive", return_value=True),
+            patch(
+                "browser_tools.process_utils.pid_holds_user_data_dir",
+                return_value=True,
+            ),
+        ):
             clean_stale_singleton_lock(tmp_path)
 
         assert (tmp_path / "SingletonLock").is_symlink()

@@ -382,6 +382,13 @@ def read_singleton_lock_pid(user_data_dir: Path) -> int | None:
 def clean_stale_singleton_lock(user_data_dir: Path) -> None:
     """Remove Chrome singleton files when no live process holds the profile.
 
+    A live PID is not enough. The recorded PID must belong to a Chrome that
+    actually holds *this* directory (#95). ``/tmp`` used to erase the lock at
+    every reboot, so a recycled PID could only mislead within one uptime; a
+    durable profile root outlives the registry, and the operating system
+    reuses PIDs freely, so a lock left by a process killed before a reboot
+    would otherwise be preserved forever by an unrelated live process.
+
     Args:
         user_data_dir: Chrome profile directory.
 
@@ -389,7 +396,11 @@ def clean_stale_singleton_lock(user_data_dir: Path) -> None:
         None.
     """
     lock_pid = read_singleton_lock_pid(user_data_dir)
-    if lock_pid is not None and is_process_alive(lock_pid):
+    if (
+        lock_pid is not None
+        and is_process_alive(lock_pid)
+        and pid_holds_user_data_dir(lock_pid, user_data_dir)
+    ):
         return
     for name in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
         try:
