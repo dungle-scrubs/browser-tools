@@ -42,8 +42,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import fcntl
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -51,7 +53,7 @@ import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .core import instance_status as core_status
 from .core import launcher as core_launcher
@@ -64,6 +66,9 @@ from .process_utils import (
     pid_holds_user_data_dir,
     terminate_process_and_wait,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Generator
 
 DEFAULT_ENGINE = "chrome"
 VALID_ENGINES = ("chrome", "camoufox")
@@ -445,80 +450,88 @@ def launch(
     if engine not in VALID_ENGINES:
         raise LifecycleError(f"Unknown engine '{engine}'. Choose one of: {', '.join(VALID_ENGINES)}")
 
-    # Resolve the user-data-dir. Profile-bound instances get the persistent
-    # per-profile dir; an unbound Camoufox instance still needs a dir for its
-    # liveness hold, so it gets a throwaway one that stop/cleanup reaps.
-    if profile is not None:
-        user_data_dir = profile_user_data_dir(profile)
-        user_data_dir.mkdir(parents=True, exist_ok=True)
-        # Clean stale singleton locks (dead holder) BEFORE the exclusivity check
-        # so a crashed previous run does not wedge the profile forever.
-        clean_stale_singleton_lock(user_data_dir)
-        holder = find_profile_holder(profile, registry_path=registry_path)
-        if holder is not None:
-            raise LifecycleError(
-                f"Profile '{profile}' is already held by live instance '{holder}'. "
-                f"Stop it first, or launch a different profile."
-            )
-    elif engine == "camoufox":
-        base = profiles_root() / ".ephemeral"
-        base.mkdir(parents=True, exist_ok=True)
-        user_data_dir = Path(tempfile.mkdtemp(prefix="camoufox-", dir=str(base)))
-    else:
-        user_data_dir = None
+    # Hold the profile's launch lock for the WHOLE sequence: stale-lock
+    # cleanup, the holder lookup, the launch, the registration and the
+    # annotation. Checking for a holder and then launching is not atomic, so
+    # two concurrent launches could both observe no holder and race into the
+    # registry (#95). A caller that waits here sees the registered winner.
+    with contextlib.ExitStack() as stack:
+        if profile is not None:
+            stack.enter_context(profile_launch_lock(profile))
+        # Resolve the user-data-dir. Profile-bound instances get the persistent
+        # per-profile dir; an unbound Camoufox instance still needs a dir for its
+        # liveness hold, so it gets a throwaway one that stop/cleanup reaps.
+        if profile is not None:
+            user_data_dir = profile_user_data_dir(profile)
+            user_data_dir.mkdir(parents=True, exist_ok=True)
+            # Clean stale singleton locks (dead holder) BEFORE the exclusivity check
+            # so a crashed previous run does not wedge the profile forever.
+            clean_stale_singleton_lock(user_data_dir)
+            holder = find_profile_holder(profile, registry_path=registry_path)
+            if holder is not None:
+                raise LifecycleError(
+                    f"Profile '{profile}' is already held by live instance '{holder}'. "
+                    f"Stop it first, or launch a different profile."
+                )
+        elif engine == "camoufox":
+            base = profiles_root() / ".ephemeral"
+            base.mkdir(parents=True, exist_ok=True)
+            user_data_dir = Path(tempfile.mkdtemp(prefix="camoufox-", dir=str(base)))
+        else:
+            user_data_dir = None
 
-    if engine == "camoufox":
-        # Guaranteed above: either `profile is not None` (user_data_dir is the
-        # persistent per-profile dir) or `engine == "camoufox"` (user_data_dir
-        # is the ephemeral tempdir). The only None-producing branch requires
-        # both `profile is None` and `engine != "camoufox"`.
-        assert user_data_dir is not None
-        return _launch_camoufox(
+        if engine == "camoufox":
+            # Guaranteed above: either `profile is not None` (user_data_dir is the
+            # persistent per-profile dir) or `engine == "camoufox"` (user_data_dir
+            # is the ephemeral tempdir). The only None-producing branch requires
+            # both `profile is None` and `engine != "camoufox"`.
+            assert user_data_dir is not None
+            return _launch_camoufox(
+                profile=profile,
+                headless=headless,
+                user_data_dir=user_data_dir,
+                registry_path=registry_path,
+            )
+
+        binary = resolve_channel_binary(channel)
+
+        try:
+            info = asyncio.run(
+                core_launcher.launch_browser(
+                    port_override=port,
+                    fingerprint=fingerprint,
+                    headless=headless,
+                    working_dir=os.getcwd(),
+                    registry_path=registry_path,
+                    extra_args=browser_args or None,
+                    window_border=window_border,
+                    binary=binary,
+                    user_data_dir=str(user_data_dir) if user_data_dir is not None else None,
+                )
+            )
+        except BrowserNotFoundError as exc:
+            raise LifecycleError(str(exc)) from exc
+        except (RuntimeError, TimeoutError, OSError) as exc:
+            raise LifecycleError(f"Launch failed: {exc}") from exc
+
+        annotate_entry(
+            info.name,
+            engine=engine,
             profile=profile,
-            headless=headless,
-            user_data_dir=user_data_dir,
             registry_path=registry_path,
         )
 
-    binary = resolve_channel_binary(channel)
-
-    try:
-        info = asyncio.run(
-            core_launcher.launch_browser(
-                port_override=port,
-                fingerprint=fingerprint,
-                headless=headless,
-                working_dir=os.getcwd(),
-                registry_path=registry_path,
-                extra_args=browser_args or None,
-                window_border=window_border,
-                binary=binary,
-                user_data_dir=str(user_data_dir) if user_data_dir is not None else None,
-            )
+        return ExtendedInstance(
+            name=info.name,
+            port=info.port,
+            pid=info.pid,
+            browser_version=info.browser_version,
+            user_data_dir=info.user_data_dir,
+            launched=None,
+            pid_start=info.pid_start,
+            engine=engine,
+            profile=profile,
         )
-    except BrowserNotFoundError as exc:
-        raise LifecycleError(str(exc)) from exc
-    except (RuntimeError, TimeoutError, OSError) as exc:
-        raise LifecycleError(f"Launch failed: {exc}") from exc
-
-    annotate_entry(
-        info.name,
-        engine=engine,
-        profile=profile,
-        registry_path=registry_path,
-    )
-
-    return ExtendedInstance(
-        name=info.name,
-        port=info.port,
-        pid=info.pid,
-        browser_version=info.browser_version,
-        user_data_dir=info.user_data_dir,
-        launched=None,
-        pid_start=info.pid_start,
-        engine=engine,
-        profile=profile,
-    )
 
 
 #: Seconds to wait for the detached Camoufox runner to report readiness.
@@ -700,6 +713,75 @@ def _remove_entry(
     core_registry._save_registry(reg, path)  # pyright: ignore[reportPrivateUsage]
     if reap_dir and user_data_dir and os.path.exists(user_data_dir):
         shutil.rmtree(user_data_dir, ignore_errors=True)
+
+
+def _is_under_profiles_root(user_data_dir: str) -> bool:
+    """Whether a recorded path resolves inside the profile root.
+
+    RFC-01 defines registry contents as untrusted input, so a deletion
+    decision rests on the resolved path, not on a field an old, partial or
+    malformed entry may be missing (#95). An entry pointing into the profile
+    root is a profile whatever its ``profile`` field says.
+    """
+    if not user_data_dir:
+        return False
+    try:
+        return Path(user_data_dir).resolve().is_relative_to(profiles_root().resolve())
+    except OSError:
+        return False
+
+
+class ProfileLockBusy(LifecycleError):
+    """Another process holds this profile's launch lock."""
+
+
+@contextlib.contextmanager
+def profile_launch_lock(
+    profile: str,
+    *,
+    lock_root: str | None = None,
+    timeout: float = 30.0,
+) -> Generator[None]:
+    """Hold an exclusive per-profile lock for the whole launch sequence.
+
+    Profile exclusivity is a MUST: a profile is held by at most one live
+    instance, and a second ``launch --profile NAME`` must fail naming the
+    holder. The check and the registration were not atomic, so two concurrent
+    launches could both observe no holder before either reached the registry
+    (#95). Chrome's own singleton may stop the second browser from becoming
+    usable, but that is not the specified behaviour and it names no holder.
+
+    The lock spans stale-lock cleanup, the holder lookup, the launch, the
+    registration and the profile annotation, so a racing caller waits and then
+    sees the registered winner rather than an empty registry.
+
+    Raises ``ProfileLockBusy`` when the lock is not acquired within ``timeout``.
+    """
+    root = Path(lock_root) if lock_root is not None else profiles_root() / ".locks"
+    root.mkdir(parents=True, exist_ok=True)
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", profile)
+    lock_path = root / f"{safe}.lock"
+
+    deadline = time.monotonic() + timeout
+    handle = open(lock_path, "a+")  # noqa: SIM115 - released in the finally below
+    try:
+        while True:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    raise ProfileLockBusy(
+                        f"Profile '{profile}' is being launched by another process. "
+                        f"Waited {timeout:g}s for its launch to finish."
+                    ) from None
+                time.sleep(0.05)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    finally:
+        handle.close()
 
 
 def retire_instance(
@@ -896,7 +978,8 @@ def cleanup(registry_path: str | None = None) -> list[str]:
     preserved_removed: list[str] = []
     for name, entry in list(reg.items()):
         ext = _entry_to_ext(name, entry)
-        if ext.profile is not None and not instance_is_live(ext):
+        bound = ext.profile is not None or _is_under_profiles_root(ext.user_data_dir)
+        if bound and not instance_is_live(ext):
             del reg[name]
             preserved_removed.append(name)
     if preserved_removed:
