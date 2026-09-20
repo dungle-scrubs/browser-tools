@@ -2,10 +2,10 @@
 number: 02
 title: "Calibrated interstitial triage"
 type: feature
-status: Draft
+status: Withdrawn
 author: "Kevin Frilot"
 date: 2026-09-20
-version: 3
+version: 4
 ---
 
 # RFC-02: Calibrated interstitial triage
@@ -23,9 +23,65 @@ supersedes RFC-01's prohibition on inference, narrowing it to a prohibition on
 solving, which this RFC restates as a normative requirement. It adds no captcha
 solving.
 
-This is version 3. Version 2 answered review `review-01`. Version 3 removes the
-headless-to-headed promotion gate after finding that the code it would have changed
-has no production caller. See "Changes in this revision".
+**This RFC is Withdrawn. Nothing in the body below is normative.** It is retained as
+the record of what was considered and why it was not built. The two defects it
+uncovered are being fixed without it; see "Withdrawal" immediately below.
+
+## Withdrawal
+
+**Status: Withdrawn, 2026-09-20, at version 4. Not built.**
+
+### Why
+
+The case for inference was that the retry decision fires automatically after a
+navigation, with no caller present to ask. That describes one code path: the optional
+MCP front at `mcp_daemon.py:497`.
+
+The MCP front is not a surface this project needs to optimize. The only other caller of
+`run_post_navigation_detection` is the CLI `detect` verb (`curated.py:270`), which a
+caller invokes on purpose. A caller is present at every triage, and `detect` has no wait
+control today (`cli.py:241-242`). A `--wait` flag answers the same question with
+certainty, no dependency, and no data leaving the machine.
+
+The model's one remaining advantage was telling a self-clearing Cloudflare challenge
+from a Cloudflare block page, which share a title regex at `detect_interstitial.js:30`.
+Splitting that regex addresses it for nothing. That alternative was already in this
+document under Alternatives Considered, "Better regular expressions", where it was
+rejected for reasons that no longer hold.
+
+### What was salvaged
+
+Two defects this RFC uncovered are real, independent of any model, and are being fixed
+as ordinary work:
+
+1. **The retry loop double-counts.** `interstitial.py:160-165` returns
+   `detections + non_retryable`, where `non_retryable` was computed from the first pass
+   and never reassigned, so a persistent non-retryable detection is reported twice.
+2. **Vendor presence is reported as a challenge.** `detect_interstitial.js:132` fires on
+   the DataDome cookie alone, and `:184`, `:211`, `:238` do the same for PerimeterX,
+   Imperva and AWS WAF. Those cookies are on every page of a protected site, so
+   `bt detect` tells a caller it is blocked when it is not. The Presence Signal and
+   Challenge Signal split in Design, "The Challenge Gate", fixes this with no model.
+   That split was designed here as a privacy control and turns out to be a correctness
+   fix on the CLI surface.
+
+Also going in with them: `--wait` / `--no-wait` on `detect`, and the Cloudflare regex
+split.
+
+### What was decided along the way, and still holds
+
+- The MCP front stays. RFC-01 kept it for harnesses that cannot run a CLI, and that
+  reason is unaffected. This RFC simply stopped treating it as a target. Issue #63
+  stands on its own.
+- RFC-01's inference prohibition at `:31` and `:248` is **not** amended. No amendment
+  lands, because nothing needs it. RFC-01 keeps its status and version.
+- `:81` was never amendable. It describes upstream chrome-agent at merge time.
+
+### What a future proposal would need
+
+Evidence that an agent polling `bt detect --no-wait` costs enough to justify a hosted
+dependency and page-evidence egress. That is a measurement nobody has taken. Without it
+this is a solution looking for its problem.
 
 ## Introduction
 
@@ -690,6 +746,13 @@ Gate, and the prediction horizon are settled in Design. What remains is measurem
    then decide Phases 1 and 2 on that answer. **Decider:** Kevin.
 
 ## Changes in this revision
+
+**Version 4** (2026-09-20) withdraws the RFC. Open Question 5 was answered: the MCP
+front is not a surface this project needs, which leaves `bt detect` as the only caller
+and therefore a present caller at every triage. A `--wait` flag answers the retry
+question with no model. The two defects found along the way move to ordinary work. See
+"Withdrawal" for the full reasoning and for what still holds. No RFC-01 amendment
+lands.
 
 **Version 3** (2026-09-20) narrows the RFC after a finding that came out of Open
 Question 5 in version 2:
