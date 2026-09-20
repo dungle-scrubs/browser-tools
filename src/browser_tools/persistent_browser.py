@@ -44,6 +44,7 @@ from .process_utils import (
     find_free_port,
     is_devtools_available,
     is_process_alive,
+    open_first_window,
     pid_holds_user_data_dir,  # type: ignore[reportUnusedImport]  # noqa: F401  # re-exported for session_reaper
     read_process_command,  # type: ignore[reportUnusedImport]  # noqa: F401  # re-exported for tests
     read_process_start_time,
@@ -653,6 +654,12 @@ class PersistentChromeController:
                 raise MCPInvocationError(f"Failed to launch Chrome: {exc}") from exc
 
             if wait_for_devtools(browser_url, timeout_seconds=BROWSER_READY_TIMEOUT_SECONDS):
+                if not self.headless:
+                    # Chrome was started with --no-startup-window, so it has no
+                    # window yet. Open the first one over CDP, in the
+                    # background, rather than let Chrome open it and take the
+                    # user's focus.
+                    open_first_window(browser_url)
                 return browser_url, process.pid
 
             last_error = (
