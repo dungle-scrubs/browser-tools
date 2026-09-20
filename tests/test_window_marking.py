@@ -77,7 +77,9 @@ def _patch_headed_launch(monkeypatch, captured: dict) -> None:
     def fake_spawn(*, port, name, registry_path, draw_border):
         captured["draw_border"] = draw_border
         captured["name"] = name
-        return None
+        # The launcher records the returned process's pid on the registry
+        # entry, so the double must carry one.
+        return _FakeProcess()
 
     # launch_browser does ``from .supervisor import spawn_supervisor`` at call
     # time, so the attribute must be patched on the supervisor module itself.

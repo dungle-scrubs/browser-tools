@@ -10,7 +10,9 @@
 # user-data-dir instead of the throwaway session dir. A headed launch starts
 # with no window (--no-startup-window) and opens its first window in the
 # background over CDP, so the launch never takes the user's focus (see
-# _open_first_window). Intra-package imports are rewritten to
+# _open_first_window). The spawned supervisor's PID is recorded on the registry
+# entry so `bt status` can report a supervisor that has died (#65).
+# Intra-package imports are rewritten to
 # browser_tools.core. Otherwise unchanged from chrome-agent v0.5.7. See RFC-01,
 # section "Vendoring rules".
 
@@ -264,12 +266,24 @@ async def launch_browser(
     # Headless launches get no supervisor (no window to close or mark); their
     # registry entries are reclaimed by the launch-time prune above / cleanup.
     if not headless:
+        from browser_tools.lifecycle import record_supervisor
+
         from .supervisor import spawn_supervisor
-        spawn_supervisor(
+        resolved_registry = _resolve_path(registry_path)
+        supervisor_process = spawn_supervisor(
             port=port,
             name=instance_info.name,
-            registry_path=_resolve_path(registry_path),
+            registry_path=resolved_registry,
             draw_border=window_border and fp_profile is None,
+        )
+        # Record it so a supervisor that later dies reads as missing rather
+        # than as an instance that never had one (#65). Same identity pair the
+        # browser's own liveness uses, so a recycled PID is not mistaken for it.
+        record_supervisor(
+            instance_info.name,
+            pid=supervisor_process.pid,
+            pid_start=process_start_time(pid=supervisor_process.pid),
+            registry_path=resolved_registry,
         )
 
     return instance_info

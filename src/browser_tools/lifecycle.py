@@ -111,6 +111,7 @@ class ExtendedInstance:
     pid_start: str | None
     engine: str
     profile: str | None
+    supervisor: str | None = None
 
 
 def registry_path_from_env() -> str | None:
@@ -159,6 +160,54 @@ def annotate_entry(
     core_registry._save_registry(reg, path)  # pyright: ignore[reportPrivateUsage]
 
 
+def record_supervisor(
+    name: str,
+    *,
+    pid: int,
+    pid_start: str | None,
+    registry_path: str | None = None,
+) -> None:
+    """Record which process supervises ``name``, so a missing one is visible.
+
+    Same shape and same reason as :func:`annotate_entry`: ``core/registry.py``
+    is a verbatim vendored module, so extended fields are written here through
+    the registry's own atomic load/save helpers.
+
+    Recorded at spawn rather than by the supervisor itself. A supervisor that
+    died -- the state #65 found -- must read as missing, not as an instance
+    that never had one.
+
+    Idempotent and a no-op if the entry is gone (raced with stop/cleanup).
+    """
+    path = core_registry._resolve_path(registry_path)  # pyright: ignore[reportPrivateUsage]
+    reg = core_registry._load_registry(path)  # pyright: ignore[reportPrivateUsage]
+    entry = reg.get(name)
+    if entry is None:
+        return
+    entry["supervisor_pid"] = pid
+    entry["supervisor_pid_start"] = pid_start
+    core_registry._save_registry(reg, path)  # pyright: ignore[reportPrivateUsage]
+
+
+def supervisor_state(entry: dict[str, Any]) -> str | None:
+    """Whether ``entry``'s supervisor is still running.
+
+    Returns "running", "missing", or None when no supervisor was ever
+    recorded. None is not a fault: a headless launch gets no supervisor by
+    design, and entries written before supervisors were recorded have nothing
+    to check.
+
+    Without a supervisor a live instance carries no window marking and is
+    never retired from the registry when its browser closes, and nothing else
+    reports that (#65).
+    """
+    pid = entry.get("supervisor_pid")
+    if not isinstance(pid, int):
+        return None
+    ours = process_is_ours(pid=pid, expected_start=entry.get("supervisor_pid_start"))
+    return "running" if ours else "missing"
+
+
 def _entry_to_ext(name: str, entry: dict[str, Any]) -> ExtendedInstance:
     """Build an ``ExtendedInstance`` from a raw registry entry."""
     engine, profile = read_engine_profile(entry)
@@ -172,6 +221,7 @@ def _entry_to_ext(name: str, entry: dict[str, Any]) -> ExtendedInstance:
         pid_start=entry.get("pid_start"),
         engine=engine,
         profile=profile,
+        supervisor=supervisor_state(entry),
     )
 
 
@@ -614,6 +664,9 @@ def status(
                 "alive": alive,
                 "engine": ext.engine,
                 "profile": ext.profile,
+                # "running", "missing", or null when none was ever recorded
+                # (a headless launch has no supervisor by design).
+                "supervisor": ext.supervisor,
                 "targets": [
                     {
                         "id": t.short_id,
