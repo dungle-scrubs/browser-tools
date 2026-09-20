@@ -28,6 +28,22 @@ uv run pytest tests/ -q
 uv run pytest tests/test_cdp_client.py -v
 ```
 
+### The installed CLI is not this repo
+
+`bt` on a development machine is usually a separate install (`uv tool install`),
+so it can be older than the checkout. When observed behavior contradicts the
+source, check which code is running before reading further:
+
+```bash
+cat ~/.local/share/uv/tools/browser-tools/uv-receipt.toml   # where it came from
+uv tool install --force .                                   # install this checkout
+```
+
+A running instance also keeps its supervisor. The supervisor injects the window
+marker into tabs and holds the CDP connection for the browser's lifetime, so an
+instance launched by the previous install keeps the previous behavior until that
+instance is stopped and relaunched.
+
 ## Pre-commit
 
 ```bash

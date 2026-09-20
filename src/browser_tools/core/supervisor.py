@@ -4,14 +4,15 @@
 # See /NOTICE for the full vendoring notice.
 #
 # This file is an ADAPTED vendored module (RFC-01, "Adapted modules"). The
-# window marker no longer draws anything inside the page. Upstream drew a
-# colored border and a corner badge as fixed-position elements over the
-# viewport; both sat on top of page content (the badge over whatever the page
-# put top-left, the border over its outer 6px) and got in the way of seeing
-# the page. The marker is now the tab title prefix alone, which lives in the
-# browser's tab strip, outside the page. The script also guards on the top
-# frame: Page.addScriptToEvaluateOnNewDocument runs in every iframe as well,
-# and only the top document's title is the tab title.
+# window marker is two scripts. The tab title prefix always runs. The colored
+# border and corner badge that upstream drew over the viewport are a separate
+# script that follows a persistent user setting (browser_tools.user_settings,
+# ``bt window-border on|off``): the border sits on the page's outer edge and
+# the badge on its top-left corner, so a person who needs to see that UI turns
+# them off, and every running supervisor adds or removes them on its open tabs
+# within a second. Both scripts guard on the top frame:
+# Page.addScriptToEvaluateOnNewDocument runs in every iframe as well, and only
+# the top document is the window. The badge fades while the pointer is near it.
 #
 # The attach path is also adapted (see "Never hold a document paused" in the
 # module docstring): targets are found by discovery instead of auto-attach and
@@ -33,16 +34,20 @@ connection open for the browser's lifetime. It does two jobs:
    thing that can observe a close as it happens.
 
 2. **Window marker** (optional) -- while the browser is alive, mark every tab
-   (current and future) by prefixing its title with the instance name, so an
-   agent-driven window is easy to tell apart from the user's own Chrome in
-   the tab strip and window title. Nothing is drawn inside the page.
+   (current and future) so an agent-driven window is easy to tell apart from
+   the user's own Chrome: its title is prefixed with the instance name, and,
+   while the ``window_border`` user setting is on (the default), a colored
+   border and corner badge are drawn over the page. The setting is re-read
+   every second and applied to the open tabs, so turning it off clears the
+   border from a running browser.
    ``Page.addScriptToEvaluateOnNewDocument`` re-runs the marker on every new
    document, but only while the registering connection is alive -- hence the
    same long-lived process.
 
-The marker is page-observable (a modified ``document.title``), so it is
-suppressed under a fingerprint profile; the lifecycle job still runs. The
-injected code is a side-effect-free IIFE that leaks no globals.
+The marker is page-observable (a modified ``document.title``, and a host
+element while the border is drawn), so it is suppressed under a fingerprint
+profile; the lifecycle job still runs. The injected code is a side-effect-free
+IIFE that leaks no globals.
 See ``planning/03-specs/BRW-03-learnings/01-detection-audit.md``.
 
 **Never hold a document paused.** The supervisor is a permanently-attached CDP
@@ -73,12 +78,15 @@ paused document. Three rules keep the supervisor out of that state:
 """
 
 import asyncio
+import hashlib
 import json
 import os
 import subprocess
 import sys
 import threading
 import time
+from collections.abc import Callable
+from dataclasses import dataclass, field
 
 from .cdp_client import CDPClient, get_ws_url
 
@@ -110,13 +118,62 @@ _FREEZE_OVERSHOOT_SECONDS = 5.0
 EXIT_EVENT_LOOP_STALLED = 3
 
 
-def build_overlay_script(*, name: str) -> str:
-    """Build the IIFE injected into each page to mark the tab.
+# How close (CSS px) the pointer must come to the corner badge for it to fade
+# out, so moving the mouse toward whatever the badge covers reveals it.
+BADGE_YIELD_PX = 48
 
-    Keeps ``document.title`` prefixed with the instance name (re-applied
-    idempotently on SPA/title changes). Draws nothing inside the page: upstream
-    also drew a fixed border and a corner badge over the viewport, and both
-    covered page content. Leaks no globals.
+# Curated palette of vivid, well-separated colors, each dark enough for white
+# badge text. A fixed palette (vs. a continuous hue) avoids deceptively-similar
+# colors for different instances -- two instances are either an obvious match
+# or obviously different, never a near-match that reads as the same.
+_PALETTE = (
+    "#d11149",  # crimson
+    "#c2185b",  # pink
+    "#7b1fa2",  # purple
+    "#512da8",  # deep purple
+    "#303f9f",  # indigo
+    "#1976d2",  # blue
+    "#0277bd",  # light blue
+    "#00838f",  # cyan
+    "#00695c",  # teal
+    "#2e7d32",  # green
+    "#e65100",  # orange
+    "#d84315",  # deep orange
+    "#5d4037",  # brown
+    "#455a64",  # blue grey
+)
+
+
+def derive_color(name: str) -> str:
+    """A stable palette color for an instance name (same name, same color)."""
+    digest = int(hashlib.md5(name.encode()).hexdigest(), 16)
+    return _PALETTE[digest % len(_PALETTE)]
+
+
+@dataclass(frozen=True)
+class BorderIds:
+    """DOM names the border uses, derived from the instance name.
+
+    Deterministic rather than random so a restarted supervisor can remove a
+    border that an earlier supervisor process of the same instance drew.
+    """
+
+    host_id: str
+    off_event: str
+
+    @classmethod
+    def for_instance(cls, name: str) -> "BorderIds":
+        token = hashlib.sha256(name.encode()).hexdigest()[:12]
+        return cls(host_id=f"bt-marker-{token}", off_event=f"bt-marker-off-{token}")
+
+
+_TOP_FRAME_GUARD = "  try { if (window.self !== window.top) return; } catch(e) { return; }"
+
+
+def build_title_script(*, name: str) -> str:
+    """Build the IIFE that keeps ``document.title`` prefixed with the instance name.
+
+    Re-applied idempotently on SPA/title changes. Leaks no globals.
 
     Runs in the top document only. ``Page.addScriptToEvaluateOnNewDocument``
     evaluates the source in every frame, and only the top document's title is
@@ -127,7 +184,7 @@ def build_overlay_script(*, name: str) -> str:
     NAME = json.dumps(name)
     return (
         "(() => {"
-        "  try { if (window.self !== window.top) return; } catch(e) { return; }"
+        f"{_TOP_FRAME_GUARD}"
         f"  var NAME={NAME};"
         "  var PREFIX = '\\uD83E\\uDD16 ' + NAME + ' \\u2014 ';"  # 🤖 NAME —
         "  function fixTitle(){ try { var t = document.title || ''; if (t.indexOf(PREFIX) !== 0) document.title = PREFIX + t; } catch(e){} }"
@@ -142,6 +199,107 @@ def build_overlay_script(*, name: str) -> str:
         "  else { document.addEventListener('DOMContentLoaded', watchTitle); }"
         "})();"
     )
+
+
+def build_border_script(*, name: str, color: str, ids: BorderIds) -> str:
+    """Build the IIFE that draws the border and corner badge.
+
+    Draws a fixed, click-through 6px border and a corner badge inside a closed
+    shadow DOM on a host element, and re-draws them if the page wipes them.
+    Top frame only (see ``build_title_script``). The badge covers whatever the
+    page puts in its top-left corner, so it fades out while the pointer is
+    within ``BADGE_YIELD_PX`` of it.
+
+    ``ids.off_event`` dispatched on ``document`` stops the script for good:
+    observers and listeners are dropped and the host removed. DOM events cross
+    isolated worlds, so one dispatch from the main world stops copies running
+    in the marker's isolated world too. Leaks no globals.
+    """
+    NAME = json.dumps(name)
+    COLOR = json.dumps(color)
+    HOST = json.dumps(ids.host_id)
+    OFF = json.dumps(ids.off_event)
+    return (
+        "(() => {"
+        f"{_TOP_FRAME_GUARD}"
+        f"  var NAME={NAME}, COLOR={COLOR}, HOST_ID={HOST}, OFF={OFF};"
+        f"  var YIELD_PX = {BADGE_YIELD_PX};"
+        "  var badge = null, stopped = false, observers = [];"
+        "  function draw(){"
+        "    try {"
+        "      if (stopped) return true;"
+        "      if (!document.documentElement) return false;"
+        "      if (document.getElementById(HOST_ID)) return true;"
+        "      var host = document.createElement('div');"
+        "      host.id = HOST_ID;"
+        "      host.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;z-index:2147483647;pointer-events:none;margin:0;padding:0;border:0;background:transparent';"
+        "      var html = '<div style=\"position:fixed;top:0;left:0;right:0;bottom:0;border:6px solid ' + COLOR + ';box-sizing:border-box;pointer-events:none\"></div>'"
+        "               + '<div style=\"position:fixed;top:0;left:0;background:' + COLOR + ';color:#fff;font:600 12px/1.45 system-ui,-apple-system,Segoe UI,sans-serif;padding:3px 9px;border-bottom-right-radius:6px;pointer-events:none;white-space:nowrap;transition:opacity .15s ease\">\\uD83E\\uDD16 ' + NAME + '</div>';"
+        "      var root = host.attachShadow ? host.attachShadow({mode:'closed'}) : host;"
+        "      root.innerHTML = html;"
+        "      badge = root.children[1];"
+        "      document.documentElement.appendChild(host);"
+        "      return true;"
+        "    } catch(e){ return false; }"
+        "  }"
+        "  function observe(target, options, callback){ var mo = new MutationObserver(callback); observers.push(mo); mo.observe(target, options); return mo; }"
+        "  function onMove(e){"
+        "    if (!badge) return;"
+        "    var r = badge.getBoundingClientRect();"
+        "    badge.style.opacity = (e.clientX < r.right + YIELD_PX && e.clientY < r.bottom + YIELD_PX) ? '0' : '1';"
+        "  }"
+        "  function onLeave(){ if (badge) badge.style.opacity = '1'; }"
+        "  function keepDrawn(){"
+        "    try { if (document.documentElement) observe(document.documentElement, {childList:true}, function(){ if (!document.getElementById(HOST_ID)) draw(); }); } catch(e){}"
+        "  }"
+        "  function stop(){"
+        "    stopped = true;"
+        "    observers.forEach(function(o){ o.disconnect(); });"
+        "    document.removeEventListener('mousemove', onMove, true);"
+        "    document.removeEventListener('mouseleave', onLeave, true);"
+        "    document.removeEventListener(OFF, stop);"
+        "    var h = document.getElementById(HOST_ID); if (h) h.remove();"
+        "  }"
+        "  try {"
+        "    document.addEventListener(OFF, stop);"
+        "    document.addEventListener('mousemove', onMove, {capture:true, passive:true});"
+        "    document.addEventListener('mouseleave', onLeave, {capture:true, passive:true});"
+        "  } catch(e){}"
+        "  if (!draw()) { var first = observe(document, {childList:true, subtree:true}, function(){ if (draw()) first.disconnect(); }); }"
+        "  if (document.head || document.readyState !== 'loading') { keepDrawn(); }"
+        "  else { document.addEventListener('DOMContentLoaded', keepDrawn); }"
+        "})();"
+    )
+
+
+def build_border_removal(*, ids: BorderIds) -> str:
+    """Build the expression that stops every border script and removes the border."""
+    HOST = json.dumps(ids.host_id)
+    OFF = json.dumps(ids.off_event)
+    return (
+        "(() => {"
+        f"  document.dispatchEvent(new Event({OFF}));"
+        f"  var h = document.getElementById({HOST}); if (h) h.remove();"
+        "})();"
+    )
+
+
+@dataclass(frozen=True)
+class MarkerScripts:
+    """The marker sources for one instance, built once per supervisor."""
+
+    title: str
+    border: str
+    border_removal: str
+
+    @classmethod
+    def for_instance(cls, name: str) -> "MarkerScripts":
+        ids = BorderIds.for_instance(name)
+        return cls(
+            title=build_title_script(name=name),
+            border=build_border_script(name=name, color=derive_color(name), ids=ids),
+            border_removal=build_border_removal(ids=ids),
+        )
 
 
 async def _resume_target(cdp: CDPClient, session_id: str) -> None:
@@ -174,7 +332,116 @@ async def _release_target(cdp: CDPClient, session_id: str) -> None:
         pass
 
 
-async def _setup_session(cdp: CDPClient, session_id: str, source: str) -> None:
+async def _register_marker_script(cdp: CDPClient, session_id: str, source: str) -> str | None:
+    """Register ``source`` to run in every future document of this session.
+
+    It runs in an isolated world, on every navigation. Returns the script
+    identifier that ``Page.removeScriptToEvaluateOnNewDocument`` takes.
+    """
+    added = await cdp.send(
+        method="Page.addScriptToEvaluateOnNewDocument",
+        params={"source": source, "worldName": ISOLATED_WORLD},
+        session_id=session_id,
+    )
+    return added.get("identifier")
+
+
+async def _evaluate(cdp: CDPClient, session_id: str, expression: str) -> None:
+    """Run ``expression`` once in the session's current document."""
+    await cdp.send(
+        method="Runtime.evaluate", params={"expression": expression}, session_id=session_id
+    )
+
+
+async def _add_marker_script(cdp: CDPClient, session_id: str, source: str) -> str | None:
+    """Register ``source`` for future documents, then run it in the current one."""
+    identifier = await _register_marker_script(cdp, session_id, source)
+    await _evaluate(cdp, session_id, source)
+    return identifier
+
+
+@dataclass
+class TabMark:
+    """The marker state of one attached page session.
+
+    ``border_script`` is the identifier of the registered border script, or
+    None while no border is registered. ``lock`` serialises the add/remove
+    work, which runs both from the tab's own setup and from a setting change.
+    """
+
+    session_id: str
+    border_script: str | None = None
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+
+
+async def _set_tab_border(
+    cdp: CDPClient, mark: TabMark, want: bool, scripts: MarkerScripts
+) -> None:
+    """Add or remove the border on one tab so it matches ``want``. Idempotent.
+
+    The registration identifier is stored the moment Chrome returns it, before
+    the current document is touched: a failure between the two (the tab
+    navigates, the page goes away) would otherwise lose the identifier, and a
+    later "off" could not unregister the script, so every future document in
+    that tab would keep drawing the border.
+
+    Turning off always runs the removal expression, even when this supervisor
+    holds no identifier. A border can be drawn in the page while this mark is
+    fresh: the connection dropped and reconnected, or an earlier supervisor
+    process of the same instance drew it. The expression is idempotent and the
+    ids are derived from the instance name, so it clears that border too.
+    """
+    async with mark.lock:
+        try:
+            if want:
+                if mark.border_script is None:
+                    mark.border_script = await _register_marker_script(
+                        cdp, mark.session_id, scripts.border
+                    )
+                    await _evaluate(cdp, mark.session_id, scripts.border)
+            else:
+                if mark.border_script is not None:
+                    await cdp.send(
+                        method="Page.removeScriptToEvaluateOnNewDocument",
+                        params={"identifier": mark.border_script},
+                        session_id=mark.session_id,
+                    )
+                    # Cleared only once Chrome confirms: a failed removal keeps
+                    # the identifier so the next change can retry it.
+                    mark.border_script = None
+                await _evaluate(cdp, mark.session_id, scripts.border_removal)
+        except Exception:
+            pass  # the tab may close mid-change; other tabs are unaffected
+
+
+class BorderSetting:
+    """The live value of the user's border setting, as the supervisor sees it."""
+
+    def __init__(self, read: Callable[[], bool]) -> None:
+        self._read = read
+        self.on = self._safe_read(default=True)
+
+    def _safe_read(self, *, default: bool) -> bool:
+        try:
+            return bool(self._read())
+        except Exception:
+            return default
+
+    def refresh(self) -> bool:
+        """Re-read the setting. Returns True when the value changed."""
+        value = self._safe_read(default=self.on)
+        changed = value != self.on
+        self.on = value
+        return changed
+
+
+async def _setup_session(
+    cdp: CDPClient,
+    session_id: str,
+    scripts: MarkerScripts,
+    mark: TabMark,
+    border: BorderSetting,
+) -> None:
     """Resume a page session, then register the marker on it.
 
     The resume comes first and unconditionally: marking a window must never be
@@ -186,21 +453,12 @@ async def _setup_session(cdp: CDPClient, session_id: str, source: str) -> None:
     await _resume_target(cdp, session_id)
     try:
         await cdp.send(method="Page.enable", session_id=session_id)
-        # Future documents: re-run on every navigation, in an isolated world.
-        await cdp.send(
-            method="Page.addScriptToEvaluateOnNewDocument",
-            params={"source": source, "worldName": ISOLATED_WORLD},
-            session_id=session_id,
-        )
-        # The already-loaded document needs a one-time injection.
-        await cdp.send(
-            method="Runtime.evaluate",
-            params={"expression": source},
-            session_id=session_id,
-        )
+        await _add_marker_script(cdp, session_id, scripts.title)
     except Exception:
         # tab may close mid-setup; the guard keeps running for other tabs
         await _resume_target(cdp, session_id)
+        return
+    await _set_tab_border(cdp, mark, border.on, scripts)
 
 
 class Heartbeat:
@@ -331,7 +589,13 @@ async def _enable_page_discovery(cdp: CDPClient) -> None:
         await cdp.send(method="Target.setDiscoverTargets", params=params)
 
 
-async def _mark_target(cdp: CDPClient, target_id: str, source: str) -> None:
+async def _mark_target(
+    cdp: CDPClient,
+    target_id: str,
+    scripts: MarkerScripts,
+    marks: dict[str, TabMark],
+    border: BorderSetting,
+) -> None:
     """Attach to one page target and install the marker on its session."""
     try:
         result = await cdp.send(
@@ -341,20 +605,28 @@ async def _mark_target(cdp: CDPClient, target_id: str, source: str) -> None:
     except Exception:
         return  # the tab closed between the notice and the attach
     session_id = result.get("sessionId")
-    if session_id:
-        await _setup_session(cdp, session_id, source)
+    if not session_id:
+        return
+    mark = TabMark(session_id=session_id)
+    marks[target_id] = mark
+    await _setup_session(cdp, session_id, scripts, mark, border)
 
 
 async def _supervise_connection(
-    *, port: int, draw_border: bool, source: str | None, heartbeat: Heartbeat | None = None
+    *,
+    port: int,
+    scripts: MarkerScripts | None,
+    border: BorderSetting | None = None,
+    heartbeat: Heartbeat | None = None,
 ) -> None:
     """Hold one browser-level CDP connection until it drops.
 
-    Connects, and (when ``draw_border`` and ``source`` are set) installs the
-    window marker on every current and future page target, then blocks until the
-    connection drops or stops answering. Returns when disconnected; raises if
-    the connect itself fails. Caller decides whether a drop means the browser
-    closed (retire) or was a transient blip (reconnect).
+    Connects, and (when ``scripts`` is set) installs the window marker on every
+    current and future page target, then blocks until the connection drops or
+    stops answering. Every second it re-reads the border setting and, when it
+    changed, adds or removes the border on every marked tab. Returns when
+    disconnected; raises if the connect itself fails. Caller decides whether a
+    drop means the browser closed (retire) or was a transient blip (reconnect).
     """
     browser_ws = get_ws_url(port=port, target_type="browser")
     cdp = CDPClient(ws_url=browser_ws)
@@ -370,7 +642,11 @@ async def _supervise_connection(
         pending.add(task)
         task.add_done_callback(pending.discard)
 
-    if draw_border and source is not None:
+    marks: dict[str, TabMark] = {}
+    if border is None:
+        border = BorderSetting(lambda: True)
+
+    if scripts is not None:
         handled: set[str] = set()
 
         def on_created(params: dict) -> None:
@@ -381,10 +657,12 @@ async def _supervise_connection(
             if info.get("type") != "page":
                 return  # not marked, so not attached to either
             handled.add(target_id)
-            spawn(_mark_target(cdp, target_id, source))
+            spawn(_mark_target(cdp, target_id, scripts, marks, border))
 
         def on_destroyed(params: dict) -> None:
-            handled.discard(params.get("targetId", ""))
+            target_id = params.get("targetId", "")
+            handled.discard(target_id)
+            marks.pop(target_id, None)
 
         def on_attached(params: dict) -> None:
             # Nothing is expected here -- the supervisor attaches on its own
@@ -409,6 +687,9 @@ async def _supervise_connection(
             await asyncio.sleep(1)
             if heartbeat is not None:
                 heartbeat.beat()
+            if scripts is not None and border.refresh():
+                for mark in list(marks.values()):
+                    spawn(_set_tab_border(cdp, mark, border.on, scripts))
             now = loop.time()
             if now >= next_ping:
                 next_ping = now + _HEALTH_PING_INTERVAL_SECONDS
@@ -449,14 +730,17 @@ async def run_supervisor(
     name: str,
     registry_path: str | None = None,
     draw_border: bool = True,
+    border_setting: Callable[[], bool] = lambda: True,
     watchdog: bool = True,
 ) -> None:
     """Supervise a launched browser until it actually closes.
 
-    Holds a browser-level CDP connection. While alive and ``draw_border`` is set,
-    marks every page target with the window marker (title prefix). The instance is retired from
-    the registry (and its session directory removed) ONLY when the browser is
-    truly gone -- detected by its CDP port no longer listening.
+    Holds a browser-level CDP connection. While alive and ``draw_border`` is
+    set, marks every page target: the title prefix always, and the border and
+    badge while ``border_setting()`` returns True (re-read every second). The
+    instance is retired from the registry (and its session directory removed)
+    ONLY when the browser is truly gone -- detected by its CDP port no longer
+    listening.
 
     A dropped CDP connection is NOT taken as proof the browser closed: a host
     suspend/resume (or any transient network blip) severs the long-lived
@@ -480,19 +764,17 @@ async def run_supervisor(
     else:
         beat_task = None
 
-    # Build the marker script once; the title prefix is idempotent, so a
-    # reconnect re-injecting it on live tabs changes nothing.
-    source: str | None = None
-    if draw_border:
-        source = build_overlay_script(name=name)
+    # Build the marker scripts once; both are idempotent, so a reconnect
+    # re-injecting them on live tabs changes nothing.
+    scripts = MarkerScripts.for_instance(name) if draw_border else None
 
     try:
         await _supervise_forever(
             port=port,
             name=name,
             registry_path=registry_path,
-            draw_border=draw_border,
-            source=source,
+            scripts=scripts,
+            border=BorderSetting(border_setting),
             heartbeat=heartbeat,
             deregister=deregister,
         )
@@ -506,8 +788,8 @@ async def _supervise_forever(
     port: int,
     name: str,
     registry_path: str | None,
-    draw_border: bool,
-    source: str | None,
+    scripts: MarkerScripts | None,
+    border: BorderSetting,
     heartbeat: Heartbeat,
     deregister,
 ) -> None:
@@ -515,7 +797,7 @@ async def _supervise_forever(
     while True:
         try:
             await _supervise_connection(
-                port=port, draw_border=draw_border, source=source, heartbeat=heartbeat
+                port=port, scripts=scripts, border=border, heartbeat=heartbeat
             )
         except Exception:
             # A failed (re)connect or a mid-stream CDP error lands here; fall
@@ -556,9 +838,17 @@ def main() -> None:
     name = sys.argv[2]
     registry_path = sys.argv[3]
     draw_border = sys.argv[4] == "1"
+    # The setting's owner lives outside the vendored core; this entry point is
+    # the one place the supervisor is wired to it.
+    from browser_tools.user_settings import window_border_enabled
+
     try:
         asyncio.run(run_supervisor(
-            port=port, name=name, registry_path=registry_path, draw_border=draw_border,
+            port=port,
+            name=name,
+            registry_path=registry_path,
+            draw_border=draw_border,
+            border_setting=window_border_enabled,
         ))
     except KeyboardInterrupt:
         pass

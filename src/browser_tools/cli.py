@@ -27,7 +27,7 @@ import argparse
 import json
 import sys
 
-from . import curated, events, lifecycle, list_verbs, passthrough
+from . import curated, events, lifecycle, list_verbs, passthrough, user_settings
 from .lifecycle import LifecycleError
 from .passthrough import UsageError as PassthroughUsageError
 
@@ -48,6 +48,7 @@ _KNOWN_VERBS = {
     "stop",
     "cleanup",
     "guide",
+    "window-border",
     "help",
     "attach",
     "wait",
@@ -89,7 +90,10 @@ def build_parser() -> argparse.ArgumentParser:
     launch.add_argument(
         "--no-window-border",
         action="store_true",
-        help="Do not mark the window (no instance-name prefix on the tab title)",
+        help=(
+            "Do not mark this window at all (no tab-title prefix, no border). To keep "
+            "the title prefix and only hide the border, use: window-border off"
+        ),
     )
     launch.add_argument(
         "browser_args",
@@ -107,6 +111,19 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("cleanup", help="Remove stale registry entries and session dirs")
     sub.add_parser("guide", help="Print the bundled agent manual")
+
+    border = sub.add_parser(
+        "window-border",
+        help="Show, or persistently turn on/off, the border drawn in marked windows",
+        description=(
+            "The window marker draws a colored border and a corner badge over the page "
+            "of every window it marks. They cover the page's outer edge and top-left "
+            "corner. 'off' removes them from every running browser within a second and "
+            "keeps them off for later launches, until 'on'. The tab-title prefix is not "
+            "affected. With no argument, prints the current setting."
+        ),
+    )
+    border.add_argument("state", nargs="?", choices=["on", "off"], help="New setting")
 
     help_cmd = sub.add_parser(
         "help", help="Live CDP protocol help from a running instance, or static usage"
@@ -334,6 +351,18 @@ def _run(args: argparse.Namespace) -> int:
 
     if args.command == "guide":
         print(lifecycle.guide_text())
+        return EXIT_OK
+
+    if args.command == "window-border":
+        if args.state is not None:
+            user_settings.set_window_border(args.state == user_settings.ON)
+        enabled = user_settings.window_border_enabled()
+        _print_json(
+            {
+                "window_border": user_settings.ON if enabled else user_settings.OFF,
+                "settings_path": str(user_settings.settings_path()),
+            }
+        )
         return EXIT_OK
 
     if args.command == "help":

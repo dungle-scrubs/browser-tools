@@ -126,3 +126,130 @@ class TestFingerprintBecomesLaunchFlags:
                     user_data_dir=str(tmp_path / "udd"),
                 )
             )
+
+
+class TestHeadedLaunchLeavesFocusAlone:
+    """A headed launch must not take the user's focus.
+
+    Measured on macOS: Chrome started normally opens a window and becomes the
+    active app. Started with ``--no-startup-window`` it opens nothing, and a
+    window created over CDP with ``background`` set leaves focus where it was.
+    """
+
+    def _launch_headed(self, monkeypatch, tmp_path, captured, open_first_window):
+        _patch_launch_plumbing(monkeypatch, captured)
+        monkeypatch.setattr(launcher, "_open_first_window", open_first_window)
+
+        async def fake_move(*, pid):
+            return None
+
+        monkeypatch.setattr(launcher, "_move_to_launching_desktop", fake_move)
+        monkeypatch.setattr(
+            "browser_tools.core.supervisor.spawn_supervisor", lambda **kwargs: None
+        )
+        return asyncio.run(
+            launcher.launch_browser(
+                port_override=9335,
+                headless=False,
+                working_dir=str(tmp_path),
+                registry_path=str(tmp_path / "registry.json"),
+                user_data_dir=str(tmp_path / "udd"),
+            )
+        )
+
+    def test_headed_launch_starts_windowless_and_opens_a_background_window(
+        self, monkeypatch, tmp_path
+    ):
+        captured: dict = {}
+
+        async def fake_open(*, port):
+            captured["opened_on_port"] = port
+
+        self._launch_headed(monkeypatch, tmp_path, captured, fake_open)
+
+        assert "--no-startup-window" in captured["args"]
+        assert captured["opened_on_port"] == 9335
+
+    def test_headless_launch_is_unchanged(self, monkeypatch, tmp_path):
+        captured: dict = {}
+        _patch_launch_plumbing(monkeypatch, captured)
+
+        async def must_not_run(*, port):
+            raise AssertionError("headless launch opened a window")
+
+        monkeypatch.setattr(launcher, "_open_first_window", must_not_run)
+        asyncio.run(
+            launcher.launch_browser(
+                port_override=9336,
+                headless=True,
+                working_dir=str(tmp_path),
+                registry_path=str(tmp_path / "registry.json"),
+                user_data_dir=str(tmp_path / "udd"),
+            )
+        )
+        assert "--no-startup-window" not in captured["args"]
+
+    def test_a_cancelled_launch_kills_the_unregistered_browser(self, monkeypatch, tmp_path):
+        """Ctrl-C while the first window is opening cancels this task.
+        CancelledError is not an Exception, so a plain ``except Exception``
+        would skip the kill and leave Chrome running with no registry entry
+        and no supervisor."""
+        captured: dict = {}
+        killed: list[int] = []
+
+        class _KillableProcess(_FakeProcess):
+            def kill(self):
+                killed.append(self.pid)
+
+        async def cancelled_open(*, port):
+            raise asyncio.CancelledError()
+
+        _patch_launch_plumbing(monkeypatch, captured)
+        monkeypatch.setattr(
+            launcher.subprocess, "Popen", lambda args, **kwargs: _KillableProcess()
+        )
+        monkeypatch.setattr(launcher, "_open_first_window", cancelled_open)
+
+        with pytest.raises(asyncio.CancelledError):
+            asyncio.run(
+                launcher.launch_browser(
+                    port_override=9338,
+                    headless=False,
+                    working_dir=str(tmp_path),
+                    registry_path=str(tmp_path / "registry.json"),
+                    user_data_dir=str(tmp_path / "udd"),
+                )
+            )
+        assert killed == [424242]
+
+    def test_failed_first_window_kills_the_unregistered_browser(self, monkeypatch, tmp_path):
+        captured: dict = {}
+        killed: list[int] = []
+
+        class _KillableProcess(_FakeProcess):
+            def kill(self):
+                killed.append(self.pid)
+
+        async def failing_open(*, port):
+            raise ConnectionError("no browser")
+
+        _patch_launch_plumbing(monkeypatch, captured)
+        monkeypatch.setattr(
+            launcher.subprocess, "Popen", lambda args, **kwargs: _KillableProcess()
+        )
+        monkeypatch.setattr(launcher, "_open_first_window", failing_open)
+
+        with pytest.raises(RuntimeError, match="first window did not open"):
+            asyncio.run(
+                launcher.launch_browser(
+                    port_override=9337,
+                    headless=False,
+                    working_dir=str(tmp_path),
+                    registry_path=str(tmp_path / "registry.json"),
+                    user_data_dir=str(tmp_path / "udd"),
+                )
+            )
+        assert killed == [424242]
+        assert not (tmp_path / "registry.json").exists() or "9337" not in (
+            tmp_path / "registry.json"
+        ).read_text()
