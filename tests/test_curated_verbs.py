@@ -355,8 +355,11 @@ def fake_screenshot_transport(monkeypatch):
     def _install(shot_data="Zm9v", targets=None):
         fake_cls, calls = _make_fake_cdp_client_cls(shot_data=shot_data, targets=targets)
         monkeypatch.setattr("browser_tools.one_shot.CDPClient", fake_cls)
+        async def _fake_get_ws_url_async(**kw):
+            return "ws://fake/browser"
+
         monkeypatch.setattr(
-            "browser_tools.one_shot.get_ws_url", lambda **kw: "ws://fake/browser"
+            "browser_tools.one_shot.get_ws_url_async", _fake_get_ws_url_async
         )
         return calls
 

@@ -88,7 +88,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
-from .cdp_client import CDPClient, get_ws_url
+from .cdp_client import CDPClient, get_ws_url_async
 
 ISOLATED_WORLD = "__chrome_agent_marker__"
 
@@ -628,7 +628,7 @@ async def _supervise_connection(
     disconnected; raises if the connect itself fails. Caller decides whether a
     drop means the browser closed (retire) or was a transient blip (reconnect).
     """
-    browser_ws = get_ws_url(port=port, target_type="browser")
+    browser_ws = await get_ws_url_async(port=port, target_type="browser")
     cdp = CDPClient(ws_url=browser_ws)
     await cdp.connect()
     loop = asyncio.get_event_loop()

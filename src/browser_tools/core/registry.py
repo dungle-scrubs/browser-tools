@@ -441,8 +441,8 @@ def stop(
     if target_id is not None:
         # Close a specific tab via Target.closeTarget
         async def _close_target():
-            from .cdp_client import CDPClient, get_ws_url
-            browser_ws = get_ws_url(port=info.port, target_type="browser")
+            from .cdp_client import CDPClient, get_ws_url_async
+            browser_ws = await get_ws_url_async(port=info.port, target_type="browser")
             async with CDPClient(ws_url=browser_ws) as cdp:
                 result = await cdp.send(
                     method="Target.closeTarget",
@@ -499,9 +499,9 @@ def stop(
 
     # Close the entire browser via Browser.close
     async def _close_browser():
-        from .cdp_client import CDPClient, get_ws_url
+        from .cdp_client import CDPClient, get_ws_url_async
         try:
-            browser_ws = get_ws_url(port=info.port, target_type="browser")
+            browser_ws = await get_ws_url_async(port=info.port, target_type="browser")
             async with CDPClient(ws_url=browser_ws) as cdp:
                 await cdp.send(method="Browser.close")
         except Exception as exc:

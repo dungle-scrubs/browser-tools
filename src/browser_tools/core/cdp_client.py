@@ -222,3 +222,15 @@ def get_ws_url(port: int = 9222, target_type: str = "page") -> str:
             if ws_url:
                 return ws_url
     raise RuntimeError(f"No '{target_type}' target found on port {port}")
+
+
+async def get_ws_url_async(port: int = 9222, target_type: str = "page") -> str:
+    """Awaitable :func:`get_ws_url`, for callers on an event loop.
+
+    Discovery is stdlib urllib over HTTP: synchronous, and as slow as Chrome
+    is to answer. Called directly from a coroutine it parks the loop's only
+    thread, stalling every other coroutine and timer for the duration. This
+    runs it on a worker thread instead. Same arguments, same return, same
+    exceptions.
+    """
+    return await asyncio.to_thread(get_ws_url, port=port, target_type=target_type)

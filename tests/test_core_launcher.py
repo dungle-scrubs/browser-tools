@@ -59,10 +59,10 @@ def _patch_launch_plumbing(monkeypatch, captured):
         return _FakeProcess()
 
     monkeypatch.setattr(launcher.subprocess, "Popen", fake_popen)
-    monkeypatch.setattr(
-        launcher, "check_cdp_port",
-        lambda port: PortStatus(listening=True, browser_version="Chrome/999.0.0.0"),
-    )
+    async def fake_check_cdp_port_async(*, port):
+        return PortStatus(listening=True, browser_version="Chrome/999.0.0.0")
+
+    monkeypatch.setattr(launcher, "check_cdp_port_async", fake_check_cdp_port_async)
     monkeypatch.setattr(launcher, "cleanup_sessions", lambda registry_path=None: [])
 
 

@@ -23,7 +23,7 @@ import signal
 import sys
 import warnings
 
-from .cdp_client import CDPClient, get_ws_url
+from .cdp_client import CDPClient, get_ws_url_async
 from .errors import CDPError, NoPageError
 from .registry import (
     InstanceInfo,
@@ -195,7 +195,7 @@ async def run_attach(
     port = info.port
 
     # Phase 2: Connect to browser-level WebSocket
-    browser_ws_url = get_ws_url(port=port, target_type="browser")
+    browser_ws_url = await get_ws_url_async(port=port, target_type="browser")
     cdp = CDPClient(ws_url=browser_ws_url)
     await cdp.connect()
 
