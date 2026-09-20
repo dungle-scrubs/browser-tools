@@ -21,7 +21,9 @@ glossary rather than left to name code that does not exist.
   are constrained: the supervisor retires through the lifecycle layer and
   never removes a profile directory, and `cleanup` checks the resolved
   profile root as a path rather than trusting the registry's `profile`
-  field.
+  field. `profile delete NAME` is the only path that removes one, and it
+  refuses a name outside the instance-name character set, a resolved path
+  outside the root, and a profile a live instance holds.
 - **External Endpoint** - a browser this tool did not launch, driven per
   invocation with `--endpoint URL` and absent from the registry. Loopback
   only. The absence of a registry entry is the safety property: an external

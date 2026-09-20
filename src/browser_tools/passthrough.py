@@ -41,10 +41,11 @@ from .core import registry as core_registry
 from .core.registry import InstanceNotFoundError
 from .lifecycle import LifecycleError
 from .one_shot import cli_cdp_errors, one_shot_page_session
+from .usage import UsageError as BaseUsageError
 
 
-class UsageError(Exception):
-    """A malformed CLI invocation (maps to CLI exit code 2)."""
+class UsageError(BaseUsageError):
+    """A malformed raw-protocol or help invocation (CLI exit code 2)."""
 
 
 # ---------------------------------------------------------------------------

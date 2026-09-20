@@ -168,6 +168,9 @@ same directory is reused. To keep a session logged in:
   browser on the same directory.
 - Without `--profile`, a launch gets a fresh ephemeral directory and starts
   logged out.
+- `bt profile list` shows every profile with its path and its live holder, and
+  `bt profile delete NAME` removes one. Deleting a profile deletes its login
+  state; `cleanup` never removes a profile on age.
 - **Camoufox** persists login state only when you pass `--profile`; without it,
   every launch starts logged out.
 

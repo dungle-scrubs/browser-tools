@@ -46,6 +46,7 @@ from __future__ import annotations
 from urllib.parse import urlparse
 
 from . import process_utils
+from .usage import UsageError
 
 #: The only hosts an endpoint may name. ``localhost`` is deliberately absent:
 #: it resolves to either of these and sometimes to neither, and the remedy is
@@ -62,7 +63,7 @@ _TUNNEL_REMEDY = (
 )
 
 
-class EndpointUsageError(Exception):
+class EndpointUsageError(UsageError):
     """A malformed or refused ``--endpoint`` invocation (CLI exit code 2)."""
 
 
