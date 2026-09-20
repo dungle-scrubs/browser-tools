@@ -35,7 +35,6 @@ from browser_tools import (
     tool_registry,
 )
 from browser_tools.automation_backend import AutomationBackend, CamoufoxBackend, ChromeBackend
-from browser_tools.browser_session import SessionDispatchContext, dispatch_session_tool
 from browser_tools.mcp_daemon import DispatchContext, dispatch_tool
 from browser_tools.mcp_response import extract_text_items
 
@@ -389,97 +388,6 @@ class TestSessionToolNames:
         assert isinstance(browser_session.SESSION_TOOLS, set)
 
 
-class TestCamoufoxExclusiveDispatch:
-    """Four Camoufox-exclusive tool names are dispatched via inline branches.
-
-    Must go red if a name is renamed or the error message for the
-    missing-session case changes.
-    """
-
-    def _ctx(self, camoufox_ref: list[Any] | None = None) -> SessionDispatchContext:
-        return SessionDispatchContext(
-            controller_ref=[FakeController()],
-            camoufox_ref=camoufox_ref if camoufox_ref is not None else [None],
-            live_profile_conflict=[None],
-        )
-
-    def test_wait_for_human_without_session_errors(self) -> None:
-        ctx = self._ctx([None])
-        controller = FakeController()
-        resp = dispatch_session_tool(ctx, controller, "wait_for_human", {})
-        _assert_error_envelope(resp)
-        text = "".join(extract_text_items(resp))
-        assert "wait_for_human" in text
-        assert "launch_camoufox" in text
-
-    def test_get_cookies_without_session_errors(self) -> None:
-        ctx = self._ctx([None])
-        controller = FakeController()
-        resp = dispatch_session_tool(ctx, controller, "get_cookies", {})
-        _assert_error_envelope(resp)
-        text = "".join(extract_text_items(resp))
-        assert "get_cookies" in text
-        assert "launch_camoufox" in text
-
-    def test_wait_for_human_with_session_routes_to_camoufox(self) -> None:
-        camoufox = FakeCamoufox({"result": {"resolved": True}})
-        ctx = SessionDispatchContext(
-            controller_ref=[FakeController()],
-            camoufox_ref=[camoufox],
-            live_profile_conflict=[None],
-        )
-        controller = FakeController()
-        resp = dispatch_session_tool(ctx, controller, "wait_for_human", {"timeout": 5})
-        # CamoufoxBackend wraps result via _wrap_result -> text_response
-        _assert_bare_envelope(resp)
-        assert camoufox.calls[0][0] == "wait_for_human"
-
-    def test_get_cookies_with_session_routes_to_camoufox(self) -> None:
-        camoufox = FakeCamoufox({"result": {"cookies": []}})
-        ctx = SessionDispatchContext(
-            controller_ref=[FakeController()],
-            camoufox_ref=[camoufox],
-            live_profile_conflict=[None],
-        )
-        controller = FakeController()
-        resp = dispatch_session_tool(ctx, controller, "get_cookies", {})
-        _assert_bare_envelope(resp)
-        assert camoufox.calls[0][0] == "get_cookies"
-
-    def test_launch_camoufox_dispatch_exists(self) -> None:
-        # Verify the branch exists by inspecting source
-        src = inspect.getsource(dispatch_session_tool)
-        assert 'tool == "launch_camoufox"' in src
-
-    def test_close_camoufox_dispatch_exists(self) -> None:
-        src = inspect.getsource(dispatch_session_tool)
-        assert 'tool == "close_camoufox"' in src
-
-    def test_launch_camoufox_success_shape(self) -> None:
-        fake_session = MagicMock()
-        fake_session.call_tool.return_value = {"result": {"fingerprint": "abc"}}
-        with patch("browser_tools.camoufox_session.CamoufoxSession", return_value=fake_session):
-            resp = browser_session._handle_launch_camoufox([None], {})
-        _assert_success_envelope(resp)
-        assert "Camoufox" in "".join(extract_text_items(resp))
-
-    def test_launch_camoufox_already_running_shape(self) -> None:
-        resp = browser_session._handle_launch_camoufox([MagicMock()], {})
-        _assert_success_envelope(resp)
-        assert "already running" in "".join(extract_text_items(resp)).lower()
-
-    def test_close_camoufox_no_session_shape(self) -> None:
-        resp = browser_session._handle_close_camoufox([None])
-        _assert_success_envelope(resp)
-
-    def test_close_camoufox_with_session_shape(self) -> None:
-        fake_session = MagicMock()
-        fake_session.call_tool.return_value = {"status": "closed"}
-        resp = browser_session._handle_close_camoufox([fake_session])
-        _assert_success_envelope(resp)
-        assert fake_session.call_tool.called
-
-
 class TestCamoufoxToolMap:
     """CAMOUFOX_TOOL_MAP literal, including None for wait_for."""
 
@@ -593,12 +501,6 @@ class TestSessionHandlerArgShapes:
 
     def test_handle_browser_session_status_keys(self) -> None:
         assert _args_get_keys(browser_session.handle_browser_session_status) == set()
-
-    def test_handle_launch_camoufox_keys(self) -> None:
-        assert _args_get_keys(browser_session._handle_launch_camoufox) == set()
-
-    def test_handle_close_camoufox_keys(self) -> None:
-        assert _args_get_keys(browser_session._handle_close_camoufox) == set()
 
     # Smoke: each handler accepts a representative args dict without raising
     def test_handle_delete_profile_smoke(self) -> None:
@@ -781,19 +683,6 @@ class TestSessionResponseEnvelope:
         ):
             resp = browser_session.handle_use_browser_session([None], {"mode": "clear"})
         self._check_envelope(resp)
-
-    def test_launch_camoufox_success(self) -> None:
-        fake = MagicMock()
-        fake.call_tool.return_value = {"result": {"fingerprint": "fp"}}
-        with patch("browser_tools.camoufox_session.CamoufoxSession", return_value=fake):
-            resp = browser_session._handle_launch_camoufox([None], {})
-        self._check_envelope(resp)
-
-    def test_close_camoufox_success(self) -> None:
-        fake = MagicMock()
-        resp = browser_session._handle_close_camoufox([fake])
-        self._check_envelope(resp)
-
 
 # ---------------------------------------------------------------------------
 # mcp_response builders

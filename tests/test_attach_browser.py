@@ -14,7 +14,6 @@ from typing import Any
 import pytest
 
 from browser_tools.browser_session import (
-    _format_live_profile_conflict_error,
     choose_live_profile_fallback,
     handle_attach_browser,
     handle_browser_session_status,
@@ -746,30 +745,3 @@ class TestLiveProfileFallback:
         assert controller.headless is True
         assert controller.isolated is True
 
-    def test_conflict_error_lists_each_live_profile(self) -> None:
-        """The conflict error response should name every live profile + endpoint."""
-        live = [
-            {
-                "profile": "google-auth",
-                "endpoint": "http://127.0.0.1:52768",
-                "current_url": "https://example.com/",
-                "tab_count": 2,
-            },
-            {
-                "profile": "dev",
-                "endpoint": "http://127.0.0.1:63819",
-                "current_url": None,
-                "tab_count": 1,
-            },
-        ]
-
-        response = _format_live_profile_conflict_error(live)
-        text = response["result"]["content"][0]["text"]
-
-        assert response["result"]["isError"] is True
-        assert "google-auth" in text
-        assert "dev" in text
-        assert "http://127.0.0.1:52768" in text
-        assert "http://127.0.0.1:63819" in text
-        assert "use_browser_session" in text
-        assert "attach_browser" in text
