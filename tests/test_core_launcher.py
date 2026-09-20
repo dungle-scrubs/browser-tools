@@ -144,8 +144,11 @@ class TestHeadedLaunchLeavesFocusAlone:
             return None
 
         monkeypatch.setattr(launcher, "_move_to_launching_desktop", fake_move)
+        # launch_browser reads the returned process's pid to record the
+        # supervisor on the registry entry, so the double must carry one.
         monkeypatch.setattr(
-            "browser_tools.core.supervisor.spawn_supervisor", lambda **kwargs: None
+            "browser_tools.core.supervisor.spawn_supervisor",
+            lambda **kwargs: _FakeProcess(),
         )
         return asyncio.run(
             launcher.launch_browser(

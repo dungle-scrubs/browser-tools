@@ -14,6 +14,11 @@
 # Page.addScriptToEvaluateOnNewDocument runs in every iframe as well, and only
 # the top document is the window. The badge fades while the pointer is near it.
 #
+# The supervisor is also spawned into its own session and records why it
+# exited (#65): it claimed to be detached but shared the launching shell's
+# session, so closing that terminal took it while the browser lived on, and it
+# wrote nothing on the way out, so an exit left no trace.
+#
 # The attach path is also adapted (see "Never hold a document paused" in the
 # module docstring): targets are found by discovery instead of auto-attach and
 # only page targets are attached to, every attached session is resumed before
@@ -78,15 +83,19 @@ paused document. Three rules keep the supervisor out of that state:
 """
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import os
+import signal
 import subprocess
 import sys
 import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
 
 from .cdp_client import CDPClient, get_ws_url_async
 
@@ -116,6 +125,64 @@ _WATCHDOG_POLL_SECONDS = 1.0
 _FREEZE_OVERSHOOT_SECONDS = 5.0
 # Exit code for "the event loop stalled"; distinct from a clean retire (0).
 EXIT_EVENT_LOOP_STALLED = 3
+
+# The supervisor is spawned with its output to DEVNULL, so nothing it printed
+# survived it. One appended line per exit is what makes "why is there no
+# supervisor?" answerable after the fact. Capped, because the file outlives
+# every instance that writes to it.
+_EXIT_LOG_MAX_BYTES = 256 * 1024
+
+
+#: Set by :func:`main` so the watchdog thread, which has no arguments of its
+#: own, can name the instance it is abandoning. Empty when nothing spawned us
+#: through the entry point (a test driving the loop directly).
+_EXIT_CONTEXT: dict[str, object] = {}
+
+
+def supervisor_exit_log_path(registry_path: str) -> Path:
+    """Where supervisor exits are recorded, next to the registry they retire from."""
+    return Path(registry_path).parent / "supervisor-exits.log"
+
+
+def log_supervisor_exit(*, reason: str, name: str, port: int, registry_path: str) -> None:
+    """Append one line recording why this supervisor is leaving.
+
+    Best-effort in every sense: a supervisor that cannot write its epitaph
+    still exits, and the caller is usually already on its way out.
+
+    Args:
+        reason: Short phrase, e.g. "browser closed" or "event loop stalled".
+        name: Instance name this supervisor was supervising.
+        port: That instance's debugging port.
+        registry_path: The registry this supervisor was spawned against.
+    """
+    line = (
+        f"{datetime.now(timezone.utc).isoformat()}\t{name}\tport={port}"
+        f"\tpid={os.getpid()}\t{reason}\n"
+    )
+    try:
+        path = supervisor_exit_log_path(registry_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(line)
+        if path.stat().st_size > _EXIT_LOG_MAX_BYTES:
+            _trim_exit_log(path)
+    except Exception:
+        pass
+
+
+def _trim_exit_log(path: Path) -> None:
+    """Drop the oldest half of the log, keeping whole lines.
+
+    The newest entries are the ones worth reading, and a rotation scheme would
+    be more machinery than one line per browser close deserves.
+    """
+    try:
+        kept = path.read_text(encoding="utf-8").splitlines(keepends=True)
+        half = len(kept) // 2
+        path.write_text("".join(kept[half:]), encoding="utf-8")
+    except Exception:
+        pass
 
 
 # How close (CSS px) the pointer must come to the corner badge for it to fade
@@ -482,7 +549,13 @@ def _exit_stalled() -> None:
     it is the thing that stalled, so the only reliable action left is dropping
     the process -- which closes the CDP socket, which makes Chrome release
     every session this client held.
+
+    The log line is written first, from this watchdog thread. stderr goes to
+    DEVNULL for a spawned supervisor, so the print below reaches nobody; the
+    log is the only record that survives.
     """
+    if _EXIT_CONTEXT:
+        log_supervisor_exit(reason="event loop stalled", **_EXIT_CONTEXT)
     print(
         "supervisor: event loop stalled, exiting so the browser is released",
         file=sys.stderr,
@@ -807,6 +880,13 @@ async def _supervise_forever(
         if await _browser_gone(port):
             # Browser really closed -> retire from the registry and exit.
             deregister(instance_name=name, registry_path=registry_path)
+            if registry_path is not None:
+                log_supervisor_exit(
+                    reason="browser closed",
+                    name=name,
+                    port=port,
+                    registry_path=registry_path,
+                )
             return
 
         # Transient drop -- the browser is still alive. Reconnect and resume
@@ -818,7 +898,14 @@ async def _supervise_forever(
 def spawn_supervisor(
     *, port: int, name: str, registry_path: str, draw_border: bool
 ) -> subprocess.Popen:
-    """Spawn the detached per-instance supervisor process for a launched browser."""
+    """Spawn the detached per-instance supervisor process for a launched browser.
+
+    ``start_new_session`` is what makes "detached" true. Without it the
+    supervisor stays in the launching shell's session and process group, so
+    closing that terminal SIGHUPs it while the browser -- launched with a new
+    session of its own -- lives on. That leaves a live instance nothing marks
+    and nothing ever retires (#65).
+    """
     return subprocess.Popen(
         [
             sys.executable, "-m", "browser_tools.core.supervisor",
@@ -826,7 +913,32 @@ def spawn_supervisor(
         ],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+        start_new_session=True,
     )
+
+
+def _log_on_signal(*signals: signal.Signals) -> None:
+    """Record the signal that ends this supervisor, then die from it normally.
+
+    A default-disposition SIGTERM (a logout, a reboot, a pkill) kills the
+    process without unwinding anything, so the try/except around
+    ``asyncio.run`` never sees it. That is the most likely way a supervisor
+    dies in the field, and it was the one leaving no trace. The handler logs,
+    restores the default disposition, and re-raises, so the exit status still
+    says what killed it.
+    """
+
+    def handler(signum: int, _frame: object) -> None:
+        if _EXIT_CONTEXT:
+            log_supervisor_exit(
+                reason=f"signal {signal.Signals(signum).name}", **_EXIT_CONTEXT
+            )
+        signal.signal(signum, signal.SIG_DFL)
+        os.kill(os.getpid(), signum)
+
+    for sig in signals:
+        with contextlib.suppress(ValueError, OSError):
+            signal.signal(sig, handler)
 
 
 def main() -> None:
@@ -842,6 +954,8 @@ def main() -> None:
     # the one place the supervisor is wired to it.
     from browser_tools.user_settings import window_border_enabled
 
+    _EXIT_CONTEXT.update(name=name, port=port, registry_path=registry_path)
+    _log_on_signal(signal.SIGTERM, signal.SIGHUP, signal.SIGINT)
     try:
         asyncio.run(run_supervisor(
             port=port,
@@ -851,7 +965,19 @@ def main() -> None:
             border_setting=window_border_enabled,
         ))
     except KeyboardInterrupt:
-        pass
+        log_supervisor_exit(
+            reason="interrupted", name=name, port=port, registry_path=registry_path
+        )
+    except BaseException as exc:
+        # Every other way out, including a signal that raises. An unlogged exit
+        # is the thing #65 could not explain.
+        log_supervisor_exit(
+            reason=f"{type(exc).__name__}: {exc}",
+            name=name,
+            port=port,
+            registry_path=registry_path,
+        )
+        raise
 
 
 if __name__ == "__main__":
