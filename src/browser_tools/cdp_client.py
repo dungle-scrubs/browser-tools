@@ -274,15 +274,41 @@ def resolve_page_ws_url(browser_url: str, target_spec: str | None = None) -> str
         TargetNotFoundError: ``target_spec`` matched no page.
         AmbiguousTargetError: ``target_spec`` matched more than one page.
     """
-    from .core.attach import resolve_target
+    pages = list_page_targets(browser_url)
+    if not pages:
+        return None
+    if target_spec is None:
+        return pages[0].get("webSocketDebuggerUrl")
 
+    target_id = _resolve_among(pages, target_spec)
+    for page in pages:
+        if page["targetId"] == target_id:
+            return page.get("webSocketDebuggerUrl")
+    return None
+
+
+def list_page_targets(browser_url: str) -> list[dict[str, Any]]:
+    """List the browser's page targets in the normative order.
+
+    Sorted by target ID, the deterministic order every ``--target`` consumer
+    shares. Chrome's own ``/json/list`` order is roughly most-recently-used, so
+    without the sort two callers could disagree about which page is "the first
+    one".
+
+    Args:
+        browser_url: Base URL of the remote debugging endpoint.
+
+    Returns:
+        The page targets, each carrying ``targetId``; empty when the endpoint
+        cannot be read or holds no page.
+    """
     try:
         request = urllib.request.Request(f"{browser_url}/json/list")
         with urllib.request.urlopen(request, timeout=5) as response:
             tabs = json.loads(response.read())
     except (urllib.error.URLError, OSError, json.JSONDecodeError):
         logger.debug("Failed to list targets from %s", browser_url, exc_info=True)
-        return None
+        return []
 
     # /json/list spells the target ID "id"; Target.getTargets spells it
     # "targetId". resolve_target reads the latter, so carry it across.
@@ -290,20 +316,45 @@ def resolve_page_ws_url(browser_url: str, target_spec: str | None = None) -> str
         {**tab, "targetId": tab.get("id", "")} for tab in tabs if tab.get("type") == "page"
     ]
     pages.sort(key=lambda page: page["targetId"])
-    if not pages:
-        return None
-    if target_spec is None:
-        return pages[0].get("webSocketDebuggerUrl")
+    return pages
 
-    target_id = resolve_target(
+
+def _resolve_among(pages: list[dict[str, Any]], target_spec: str) -> str:
+    """Apply the one ``--target`` reading: all-digits is an index, else a prefix."""
+    from .core.attach import resolve_target
+
+    return resolve_target(
         page_targets=pages,
         target_spec=target_spec,
         target_by="index" if target_spec.isdigit() else "id",
     )
-    for page in pages:
-        if page["targetId"] == target_id:
-            return page.get("webSocketDebuggerUrl")
-    return None
+
+
+def resolve_page_target_id(browser_url: str, target_spec: str) -> str | None:
+    """Resolve ``target_spec`` to a complete page target ID.
+
+    The same selector :func:`resolve_page_ws_url` uses, returning the target ID
+    rather than a WebSocket URL, for callers that address a page by ID -- such
+    as ``stop --target``, which passes it to ``Target.closeTarget``. One
+    resolution path means ``--target 1`` cannot name different pages to
+    different verbs.
+
+    Args:
+        browser_url: Base URL of the remote debugging endpoint.
+        target_spec: A 1-based index into the sorted page targets, or a target
+            ID prefix. Read as an index only when every character is a digit.
+
+    Returns:
+        The complete target ID, or None when the endpoint holds no page target.
+
+    Raises:
+        TargetNotFoundError: ``target_spec`` matched no page.
+        AmbiguousTargetError: ``target_spec`` matched more than one page.
+    """
+    pages = list_page_targets(browser_url)
+    if not pages:
+        return None
+    return _resolve_among(pages, target_spec)
 
 
 async def resolve_page_ws_url_async(
