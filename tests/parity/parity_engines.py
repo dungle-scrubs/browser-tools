@@ -451,9 +451,9 @@ class NodeMcpSession:
         with NodeMcpSession() as node:
             engine = NodeEngine(node)
 
-    It drives the real Node engine over the repo's :class:`McpBroker` -- the same
-    JSON-RPC-over-stdio broker the production daemon uses -- so the parity gate
-    compares native against chrome-devtools-mcp itself, not a stand-in.
+    It drives the real Node engine over the suite's own :class:`McpBroker`
+    (``tests/parity/node_broker.py``), so the parity gate compares native
+    against chrome-devtools-mcp itself, not a stand-in.
     """
 
     _INIT_TIMEOUT = 120.0
@@ -463,9 +463,11 @@ class NodeMcpSession:
         self._headless = headless
         self._channel = channel
         self._broker: Any = None
+        self._page_scoped: frozenset[str] = frozenset()
+        self._page_id: int | None = None
 
     def __enter__(self) -> NodeMcpSession:
-        from browser_tools.mcp_broker import McpBroker
+        from node_broker import McpBroker
 
         cmd = ["npx", "-y", "chrome-devtools-mcp@latest", "--isolated", "--channel", self._channel]
         if self._headless:
@@ -483,18 +485,64 @@ class NodeMcpSession:
         )
         if "error" in init:
             raise RuntimeError(f"chrome-devtools-mcp initialize failed: {init['error']}")
+        self._page_scoped = self._discover_page_scoped_tools()
+        self._page_id = self._selected_page_id()
         return self
+
+    def _discover_page_scoped_tools(self) -> frozenset[str]:
+        """Name the tools whose schema declares ``pageId``.
+
+        chrome-devtools-mcp is pinned to ``@latest``, and it made ``pageId``
+        required on every page-scoped tool. Reading the advertised schema keeps
+        the harness following that server rather than a frozen copy of it, so a
+        later argument change surfaces as a failure naming the tool.
+        """
+        listing = self._broker.request("tools/list", {}, timeout=self._INIT_TIMEOUT)
+        if "error" in listing:
+            raise RuntimeError(f"chrome-devtools-mcp tools/list failed: {listing['error']}")
+        return frozenset(
+            tool["name"]
+            for tool in listing["result"]["tools"]
+            if "pageId" in tool.get("inputSchema", {}).get("properties", {})
+        )
+
+    def _selected_page_id(self) -> int:
+        """Read the selected page's id from ``list_pages``.
+
+        ``list_pages`` reports ``N: <url> [selected]``. It is the one page tool
+        that takes no ``pageId``, so it is safe to call before one is known.
+        """
+        text = _node_response_text(self._call("list_pages", {}))
+        match = re.search(r"^\s*(\d+):.*\[selected\]", text, re.MULTILINE)
+        if match is None:
+            raise RuntimeError(f"chrome-devtools-mcp list_pages named no selected page: {text!r}")
+        return int(match.group(1))
 
     def __exit__(self, *exc: object) -> None:
         if self._broker is not None:
             self._broker.terminate()
 
     def _call(self, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        """Call one MCP tool, targeting this session's page, and fail loudly.
+
+        A tool-level failure comes back as an ordinary result carrying
+        ``isError`` rather than a JSON-RPC ``error``, so checking only the
+        envelope let a rejected call return its error text as data. That is how
+        a required-argument change upstream reached the corpus capture as a
+        string and surfaced as an unrelated ``ValueError``.
+        """
+        payload = dict(arguments)
+        if tool in self._page_scoped and "pageId" not in payload and self._page_id is not None:
+            payload["pageId"] = self._page_id
         response = self._broker.request(
-            "tools/call", {"name": tool, "arguments": arguments}, timeout=self._CALL_TIMEOUT
+            "tools/call", {"name": tool, "arguments": payload}, timeout=self._CALL_TIMEOUT
         )
         if "error" in response:
             raise RuntimeError(f"chrome-devtools-mcp {tool} failed: {response['error']}")
+        if response.get("result", {}).get("isError"):
+            raise RuntimeError(
+                f"chrome-devtools-mcp {tool} failed: {_node_response_text(response)}"
+            )
         return response
 
     def navigate(self, url: str) -> None:

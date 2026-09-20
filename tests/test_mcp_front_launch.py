@@ -19,8 +19,7 @@ import pytest
 if TYPE_CHECKING:
     from pathlib import Path
 
-from browser_tools.process_utils import build_browser_command
-from browser_tools.session_layout import INITIAL_PAGE_URL
+from browser_tools.persistent_browser import INITIAL_PAGE_URL, build_browser_command
 
 
 def _command(tmp_path: Path, *, headless: bool) -> list[str]:
@@ -53,7 +52,7 @@ class TestHeadedCommandOpensNoWindow:
 class TestFirstWindowOpensInTheBackground:
     def test_the_create_call_is_a_background_new_window(self, monkeypatch) -> None:
         """The window must be its own, and must not be activated."""
-        from browser_tools import process_utils
+        from browser_tools import persistent_browser
 
         sent: list[tuple[str, dict[str, Any]]] = []
 
@@ -71,12 +70,12 @@ class TestFirstWindowOpensInTheBackground:
                 sent.append((method, params))
                 return {}
 
-        monkeypatch.setattr(process_utils, "_first_window_cdp_client", FakeCDP)
+        monkeypatch.setattr(persistent_browser, "_first_window_cdp_client", FakeCDP)
         monkeypatch.setattr(
-            process_utils, "_browser_ws_url", lambda _url: "ws://fake/browser"
+            persistent_browser, "_browser_ws_url", lambda _url: "ws://fake/browser"
         )
 
-        process_utils.open_first_window("http://127.0.0.1:9333")
+        persistent_browser.open_first_window("http://127.0.0.1:9333")
 
         assert sent == [
             (

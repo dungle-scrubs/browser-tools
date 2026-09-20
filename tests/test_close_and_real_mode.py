@@ -15,11 +15,12 @@ import pytest
 from browser_tools.persistent_browser import (
     BrowserState,
     PersistentChromeController,
+    build_browser_command,
     close_active_session,
     is_owned_profile_dir,
     reap_orphaned_sessions,
 )
-from browser_tools.process_utils import build_browser_command, resolve_system_profile_dir
+from browser_tools.process_utils import resolve_system_profile_dir
 
 if TYPE_CHECKING:
     from pathlib import Path

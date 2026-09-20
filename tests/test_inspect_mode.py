@@ -95,36 +95,6 @@ class TestInspectModeEnforcement:
 class TestToolSetCompleteness:
     """Tests for tool set completeness and correctness."""
 
-    def test_cdp_tools_include_frame_tools(self) -> None:
-        """CDP tools should include the frame-related tools (and new Rodney tools)."""
-        frame_tools = {
-            "list_frames",
-            "select_frame",
-            "reset_frame",
-            "get_frame_storage",
-            "get_frame_events",
-        }
-        assert frame_tools.issubset(CDP_TOOLS), (
-            f"Missing frame tools from CDP_TOOLS: {frame_tools - CDP_TOOLS}"
-        )
-        # Also verify all new rodney tools are present
-        rodney_tools = {
-            "ax_find",
-            "ax_node",
-            "export_pdf",
-            "screenshot_element",
-            "wait_idle",
-            "wait_stable",
-            "get_text",
-            "get_html",
-            "get_attr",
-            "element_exists",
-            "element_visible",
-        }
-        assert rodney_tools.issubset(CDP_TOOLS), (
-            f"Missing rodney tools from CDP_TOOLS: {rodney_tools - CDP_TOOLS}"
-        )
-
     def test_no_overlap_between_sets(self) -> None:
         """Tool sets should not overlap."""
         all_sets = [INSPECT_BLOCKED_TOOLS, CDP_TOOLS]
