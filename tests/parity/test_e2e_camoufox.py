@@ -23,7 +23,7 @@ pytestmark = pytest.mark.skipif(not CAMOUFOX_AVAILABLE, reason="camoufox not ins
 @pytest.fixture(scope="module")
 def e2e_session():
     """Create a real CamoufoxSession with a live browser for the test module."""
-    from browser_tools.camoufox_session import CamoufoxSession
+    from camoufox_session import CamoufoxSession
 
     session = CamoufoxSession()
     result = session.call_tool("launch_browser", {"headless": True})

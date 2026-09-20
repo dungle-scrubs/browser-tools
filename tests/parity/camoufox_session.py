@@ -1,8 +1,16 @@
 #!/usr/bin/env python3
-"""Camoufox anti-detect browser session for tool-proxy.
+"""Camoufox browser session, the parity suite's ARIA baseline driver.
 
 Launches a Camoufox (custom Firefox) browser with C++ fingerprint injection
-and exposes automation tools for navigating bot-protected sites.
+and exposes automation tools over a ``call_tool`` interface.
+
+This is a test oracle, not a product surface. It drives
+:class:`AriaSnapshotEngine`, the rung the native engine is compared against on
+their shared dimensions. Nothing in the product calls it: ``launch --engine
+camoufox`` goes through ``lifecycle`` into ``camoufox_runner``, which never
+touches this module. It moved here with the MCP front deletion (#92), for the
+same reason the Node broker did (#91) -- a production module must not stay
+alive only to serve a test.
 """
 
 from __future__ import annotations
@@ -14,7 +22,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from .extras import require_camoufox
+from browser_tools.extras import require_camoufox
 
 try:
     from camoufox.sync_api import Camoufox

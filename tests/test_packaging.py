@@ -2,9 +2,13 @@
 dependency sits behind the extra RFC-01 assigns it (Question 4).
 
 These assertions read ``pyproject.toml`` directly (the source of truth for the
-dependency sets) and exercise the missing-extra guards in :mod:`browser_tools.
-extras`, ``camoufox_runner``, and ``camoufox_session``. They need no network
-and no optional dependency installed.
+dependency sets) and exercise the missing-extra guard in :mod:`browser_tools.
+extras` and ``camoufox_runner``. They need no network and no optional
+dependency installed.
+
+The last class pins what Phase 5 changed about the shipped package (#92): the
+front's keyword and its two non-Python assets leave, the interstitial script
+stays, and all three entry points survive.
 """
 
 from __future__ import annotations
@@ -150,15 +154,56 @@ class TestCamoufoxEntryPointGuards:
         assert rc == 3
         assert "pip install 'browser-tools[camoufox]'" in capsys.readouterr().err
 
-    def test_session_launch_raises_the_install_line_without_the_extra(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        from browser_tools import camoufox_session
 
-        # Simulate the extra being absent: the module-level import fell back to
-        # None, which the launch guard turns into a MissingExtraError.
-        monkeypatch.setattr(camoufox_session, "Camoufox", None)
-        session = camoufox_session.CamoufoxSession()
-        with pytest.raises(MissingExtraError) as excinfo:
-            session._tool_launch_browser({})
-        assert str(excinfo.value).endswith("pip install 'browser-tools[camoufox]'")
+class TestPhase5Packaging:
+    """What the MCP front deletion changed about the shipped package (#92)."""
+
+    def test_the_mcp_keyword_is_gone(self) -> None:
+        assert "mcp" not in _metadata()["project"]["keywords"]
+
+    def test_package_data_keeps_js_and_drops_the_front_assets(self) -> None:
+        """The Node session template and the attach script went with the front."""
+        artifacts = _metadata()["tool"]["hatch"]["build"]["targets"]["wheel"]["artifacts"]
+        assert artifacts == ["src/browser_tools/*.js"], (
+            "detect_interstitial.js is still shipped; *.mjs and *.sh are not"
+        )
+
+    def test_all_three_entry_points_survive(self) -> None:
+        assert _metadata()["project"]["scripts"] == {
+            "browser-tools": "browser_tools.cli:main",
+            "bt": "browser_tools.cli:main",
+            "browser-tools-profiler": "browser_tools.profiler:main",
+        }
+
+    def test_the_websockets_floor_is_unchanged(self) -> None:
+        assert _metadata()["project"]["dependencies"] == ["websockets>=16.0"]
+
+    def test_no_deleted_module_is_left_in_the_tree(self) -> None:
+        """A stale file would ship even with no importer left to name it."""
+        pkg = _PYPROJECT.parent / "src" / "browser_tools"
+        gone = [
+            "automation_backend.py",
+            "browser_session.py",
+            "browser_state.py",
+            "camoufox_session.py",
+            "chrome_config.py",
+            "chrome_utils.py",
+            "core/session.py",
+            "daemon_client.py",
+            "daemon_supervisor.py",
+            "live_chrome.py",
+            "mcp_broker.py",
+            "mcp_daemon.py",
+            "mcp_session.py",
+            "page_selection.py",
+            "persistent_browser.py",
+            "persistent-session-template.mjs",
+            "profile_catalog.py",
+            "project_identity.py",
+            "attach_chrome.sh",
+            "session_layout.py",
+            "session_reaper.py",
+            "session_store.py",
+        ]
+        left = [name for name in gone if (pkg / name).exists()]
+        assert left == [], f"deleted modules still on disk: {left}"

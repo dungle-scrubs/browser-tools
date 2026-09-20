@@ -49,7 +49,7 @@ def capture_baseline() -> dict[str, object]:
         RuntimeError: if the two consecutive runs disagree (a flaky corpus is
             not a valid baseline).
     """
-    from browser_tools.camoufox_session import CamoufoxSession
+    from camoufox_session import CamoufoxSession
 
     session = CamoufoxSession()
     launched = session.call_tool("launch_browser", {"headless": True})

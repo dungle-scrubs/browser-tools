@@ -13,7 +13,6 @@ keywords = [
     "camoufox",
     "playwright",
     "web-scraping",
-    "mcp",
 ]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -81,8 +80,6 @@ build-backend = "hatchling.build"
 packages = ["src/browser_tools"]
 artifacts = [
     "src/browser_tools/*.js",
-    "src/browser_tools/*.mjs",
-    "src/browser_tools/*.sh",
 ]
 
 [tool.hatch.build.targets.sdist]
