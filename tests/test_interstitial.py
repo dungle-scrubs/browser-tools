@@ -101,6 +101,29 @@ class TestDeduplicate:
         deduped = _deduplicate(results)
         assert len(deduped) == 2
 
+    def test_challenge_signal_beats_presence_signal(self) -> None:
+        """Within one type, a challenge signal outranks a vendor-presence signal.
+
+        The DataDome cookie check runs before the challenge-iframe check in the
+        script, and both carry 'high', so ranking by confidence alone kept the
+        cookie and discarded the evidence that the page is actually a challenge.
+        """
+        results = [
+            {"type": "datadome", "confidence": "high", "signal": "cookie"},
+            {"type": "datadome", "confidence": "high", "signal": "challenge_iframe"},
+        ]
+
+        deduped = _deduplicate(results)
+
+        assert len(deduped) == 1
+        assert deduped[0]["signal"] == "challenge_iframe"
+
+    def test_presence_signal_kept_when_alone(self) -> None:
+        """With no challenge signal for a type, the presence signal survives."""
+        results = [{"type": "datadome", "confidence": "high", "signal": "cookie"}]
+
+        assert _deduplicate(results) == results
+
     def test_empty_list(self) -> None:
         """Empty input returns empty output."""
         assert _deduplicate([]) == []
@@ -400,6 +423,100 @@ class TestDetectWithRetry:
         assert result["auto_retried"] is True
         assert result["retries_used"] == 1
 
+    @pytest.mark.asyncio
+    async def test_persistent_non_retryable_reported_once(self) -> None:
+        """A non-retryable detection that persists must be reported exactly once.
+
+        The exhausted-retries path used to append the first pass's
+        non-retryable list to the last pass's detections, so a detection
+        present in both was reported twice.
+        """
+        mixed = [
+            {"type": "cloudflare_challenge", "confidence": "high", "signal": "title_pattern"},
+            {"type": "auth_wall", "confidence": "medium", "signal": "title_and_form"},
+        ]
+        detect_once = AsyncMock(return_value=mixed)
+
+        with patch("browser_tools.interstitial.INTERSTITIAL_RETRY_DELAY_SECONDS", 0.01):
+            result = await detect_with_retry(detect_once)
+
+        auth_walls = [d for d in result["detections"] if d["type"] == "auth_wall"]
+        assert len(auth_walls) == 1, f"auth_wall reported {len(auth_walls)} times"
+
+
+    @pytest.mark.asyncio
+    async def test_presence_only_is_not_an_interstitial(self) -> None:
+        """Vendor cookies on an ordinary page must not report a challenge.
+
+        DataDome sets its cookie on every page it fronts, so gating on
+        "detection returned anything" told the caller it was blocked on every
+        page of a protected site it was logged into.
+        """
+        presence = [
+            {"type": "datadome", "confidence": "high", "signal": "cookie"},
+            {"type": "perimeterx", "confidence": "medium", "signal": "script_src"},
+        ]
+        detect_once = AsyncMock(return_value=presence)
+
+        result = await detect_with_retry(detect_once)
+
+        assert result["detections"] == []
+        assert result["auto_retried"] is False
+        assert [d["type"] for d in result["presence"]] == ["datadome", "perimeterx"]
+        detect_once.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_challenge_signal_alongside_presence_is_reported(self) -> None:
+        """A challenge signal still reports, with presence kept separate."""
+        detections = [
+            {"type": "perimeterx", "confidence": "medium", "signal": "script_src"},
+            {"type": "captcha", "confidence": "medium", "signal": "css_selector"},
+        ]
+        detect_once = AsyncMock(return_value=detections)
+
+        result = await detect_with_retry(detect_once)
+
+        assert [d["type"] for d in result["detections"]] == ["captcha"]
+        assert [d["type"] for d in result["presence"]] == ["perimeterx"]
+
+    @pytest.mark.asyncio
+    async def test_presence_key_present_on_every_path(self) -> None:
+        """Callers can read result['presence'] without a guard."""
+        detect_once = AsyncMock(return_value=[])
+
+        result = await detect_with_retry(detect_once)
+
+        assert result["presence"] == []
+
+
+    @pytest.mark.asyncio
+    async def test_no_wait_skips_retries(self) -> None:
+        """max_retries=0 reports at once instead of waiting nine seconds."""
+        cloudflare = [
+            {"type": "cloudflare_challenge", "confidence": "high", "signal": "title_pattern"}
+        ]
+        detect_once = AsyncMock(return_value=cloudflare)
+
+        result = await detect_with_retry(detect_once, max_retries=0)
+
+        assert result["detections"] == cloudflare
+        assert result["auto_retried"] is False
+        assert result["retries_used"] == 0
+        detect_once.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_max_retries_is_honoured(self) -> None:
+        """A caller-supplied budget bounds the retries, not the module default."""
+        cloudflare = [
+            {"type": "cloudflare_challenge", "confidence": "high", "signal": "title_pattern"}
+        ]
+        detect_once = AsyncMock(return_value=cloudflare)
+
+        result = await detect_with_retry(detect_once, max_retries=1, delay=0.01)
+
+        assert result["retries_used"] == 1
+        assert detect_once.call_count == 2
+
 
 class TestStealthRemoved:
     """RFC-01 "Anti-detection": stealth.js and its injection path are deleted.
@@ -466,3 +583,67 @@ class TestStealthDaemonWiring:
             assert t not in INTERSTITIAL_AUTO_RETRY_TYPES, (
                 f"{t} should not be auto-retried — requires human interaction"
             )
+
+
+class TestCloudflareBlockPage:
+    """The Cloudflare block page is a different outcome from the JS challenge.
+
+    "Just a moment" is the self-clearing JS challenge. "Attention Required"
+    is the block page: it does not clear, so retrying it only burns the
+    caller's wall clock.
+    """
+
+    def test_script_emits_a_distinct_block_type(self) -> None:
+        """The detection script should not fold the block page into the challenge."""
+        script = get_detection_script()
+        assert "cloudflare_block" in script
+
+    def test_block_page_is_not_auto_retried(self) -> None:
+        """The block page must stay out of the auto-retry set."""
+        from browser_tools.interstitial import INTERSTITIAL_AUTO_RETRY_TYPES
+
+        assert "cloudflare_block" not in INTERSTITIAL_AUTO_RETRY_TYPES
+
+    @pytest.mark.asyncio
+    async def test_block_page_is_reported_without_retrying(self) -> None:
+        """A block page should be reported after the initial detect, with no retry."""
+        block = [
+            {
+                "type": "cloudflare_block",
+                "confidence": "high",
+                "signal": "title_pattern",
+                "details": "Attention Required!",
+            }
+        ]
+        detect_once = AsyncMock(return_value=block)
+
+        result = await detect_with_retry(detect_once)
+
+        assert result["detections"] == block
+        assert result["auto_retried"] is False
+        assert detect_once.call_count == 1
+
+
+class TestCookieAccessIsGuarded:
+    """``document.cookie`` throws on documents that disallow cookie access.
+
+    A ``data:`` URL, a sandboxed iframe, and some opaque origins raise
+    SecurityError on the getter. The script reads cookies for five vendors,
+    so an unguarded read aborts the whole pass and browser-tools reports no
+    detections at all, for every vendor, on those pages.
+    """
+
+    def test_cookies_are_read_once_through_a_guard(self) -> None:
+        """The script should read document.cookie once, inside a try/catch."""
+        script = get_detection_script()
+        assert script.count("document.cookie") == 1, (
+            "document.cookie must be read once into a guarded local, not at "
+            "each vendor check"
+        )
+
+    def test_the_cookie_read_is_wrapped_in_try_catch(self) -> None:
+        """The single read must sit inside a try block."""
+        script = get_detection_script()
+        head, _, tail = script.partition("document.cookie")
+        assert "try {" in head[-200:], "document.cookie read is not inside a try block"
+        assert "catch" in tail[:200], "document.cookie read has no catch"

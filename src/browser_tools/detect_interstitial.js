@@ -3,6 +3,7 @@
  *
  * Multi-signal heuristic detection (D-003) that identifies:
  * - Cloudflare challenges (by title pattern + meta tags)
+ * - Cloudflare block pages (by title pattern; refused, not retryable)
  * - ngrok warnings (by content pattern)
  * - Auth walls / login pages
  * - Generic challenge pages
@@ -23,16 +24,38 @@
   const results = [];
   const title = document.title || '';
   const bodyText = (document.body && document.body.innerText) || '';
+  // The cookie getter throws SecurityError on documents that disallow
+  // cookie access: data: URLs, sandboxed iframes, some opaque origins.
+  // Read it once behind a guard, so one such document cannot abort the
+  // whole pass and report a clean page.
+  let cookies = '';
+  try {
+    cookies = document.cookie || '';
+  } catch (e) {
+    cookies = '';
+  }
   const metaTags = Array.from(document.querySelectorAll('meta'));
 
   // --- Cloudflare Challenge ---
-  // Title-based detection (most stable, highest confidence)
-  if (/just a moment/i.test(title) || /attention required/i.test(title)) {
+  // Title-based detection (most stable, highest confidence).
+  // "Just a moment" is the JS challenge: it clears itself, so it is retryable.
+  // "Attention Required" is the block page: the request was refused and no
+  // amount of waiting changes that, so it is a separate type and is not
+  // retried.
+  if (/just a moment/i.test(title)) {
     results.push({
       type: 'cloudflare_challenge',
       confidence: 'high',
       signal: 'title_pattern',
-      details: 'Page title matches Cloudflare challenge pattern: "' + title + '"'
+      details: 'Page title matches Cloudflare JS challenge pattern: "' + title + '"'
+    });
+  }
+  if (/attention required/i.test(title)) {
+    results.push({
+      type: 'cloudflare_block',
+      confidence: 'high',
+      signal: 'title_pattern',
+      details: 'Page title matches Cloudflare block page pattern: "' + title + '"'
     });
   }
   // Meta tag detection
@@ -129,7 +152,7 @@
 
   // --- DataDome ---
   // Cookie-based detection (most reliable)
-  if (document.cookie.indexOf('datadome') !== -1) {
+  if (cookies.indexOf('datadome') !== -1) {
     results.push({
       type: 'datadome',
       confidence: 'high',
@@ -157,7 +180,7 @@
   }
 
   // --- Akamai Bot Manager ---
-  if (document.cookie.indexOf('_abck') !== -1) {
+  if (cookies.indexOf('_abck') !== -1) {
     // _abck cookie alone isn't a challenge — it's the sensor cookie.
     // Only flag if combined with a short/empty page (likely blocked).
     var akamaiBodyLen = (document.body && document.body.innerText || '').length;
@@ -181,7 +204,7 @@
   }
 
   // --- PerimeterX / HUMAN ---
-  if (document.cookie.match(/_px[A-Za-z]/)) {
+  if (cookies.match(/_px[A-Za-z]/)) {
     results.push({
       type: 'perimeterx',
       confidence: 'medium',
@@ -208,7 +231,7 @@
   }
 
   // --- Imperva / Incapsula ---
-  if (document.cookie.match(/incap_ses_|visid_incap_/)) {
+  if (cookies.match(/incap_ses_|visid_incap_/)) {
     results.push({
       type: 'imperva',
       confidence: 'medium',
@@ -235,7 +258,7 @@
   }
 
   // --- AWS WAF ---
-  if (document.cookie.indexOf('aws-waf-token') !== -1) {
+  if (cookies.indexOf('aws-waf-token') !== -1) {
     results.push({
       type: 'aws_waf',
       confidence: 'high',

@@ -23,8 +23,8 @@ try:
         SCREENSHOT_PAINT_READY_TIMEOUT_MS,
     )
     from .interstitial import (
-        DETECT_TOTAL_TIMEOUT_SECONDS,
         detect_interstitials_async,
+        detect_total_timeout,
         detect_with_retry,
     )
     from .mcp_response import make_error, make_text
@@ -38,8 +38,8 @@ except ImportError:
         SCREENSHOT_PAINT_READY_TIMEOUT_MS,
     )
     from interstitial import (  # type: ignore[import-untyped,no-redef]
-        DETECT_TOTAL_TIMEOUT_SECONDS,
         detect_interstitials_async,
+        detect_total_timeout,
         detect_with_retry,
     )
     from mcp_response import (  # type: ignore[import-untyped,no-redef]
@@ -489,7 +489,9 @@ class CDPRuntime:
             logger.debug("_await_paint_ready_async failed", exc_info=True)
             return False
 
-    def run_post_navigation_detection(self) -> dict[str, Any] | None:
+    def run_post_navigation_detection(
+        self, max_retries: int | None = None
+    ) -> dict[str, Any] | None:
         """Run post-navigation interstitial detection (thread-safe).
 
         Delegates the detect-and-retry policy to :mod:`interstitial`; this
@@ -510,11 +512,11 @@ class CDPRuntime:
             return await detect_interstitials_async(self._cdp_client)
 
         async def _run() -> dict[str, Any]:
-            return await detect_with_retry(_detect_once)
+            return await detect_with_retry(_detect_once, max_retries=max_retries)
 
         future = asyncio.run_coroutine_threadsafe(_run(), self._loop)
         try:
-            return future.result(timeout=DETECT_TOTAL_TIMEOUT_SECONDS)
+            return future.result(timeout=detect_total_timeout(max_retries))
         except Exception:
             logger.debug("run_post_navigation_detection failed", exc_info=True)
             return None
@@ -583,9 +585,11 @@ class CDPHandler:
         """Block until Chrome has painted a stable frame (delegates to runtime)."""
         return self._rt.await_paint_ready(timeout_ms)
 
-    def run_post_navigation_detection(self) -> dict[str, Any] | None:
+    def run_post_navigation_detection(
+        self, max_retries: int | None = None
+    ) -> dict[str, Any] | None:
         """Run post-navigation interstitial detection (delegates to runtime)."""
-        return self._rt.run_post_navigation_detection()
+        return self._rt.run_post_navigation_detection(max_retries)
 
     # --- Runtime state, exposed to the handlers as a documented seam. These
     #     read through to the runtime so the handlers access the browser via a
