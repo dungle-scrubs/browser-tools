@@ -855,8 +855,43 @@ def _try_cdp_browser_close(port: int) -> None:
         asyncio.run(_close())
 
 
-def _close_tab(ext: ExtendedInstance, target: str) -> str:
-    """Close a single tab via CDP, leaving the browser and profile alive."""
+def _resolve_tab_target(ext: ExtendedInstance, target_spec: str) -> str:
+    """Resolve a ``--target`` spec to a complete page target ID.
+
+    ``--target SPEC`` has one meaning across the CLI: a 1-based index into the
+    page targets sorted by target ID, or a target ID prefix, read as an index
+    only when every character is a digit. ``stop`` used to hand its argument
+    straight to ``Target.closeTarget`` as a complete ID, so both other forms
+    failed silently. Resolution goes through the shared selector so two code
+    paths cannot disagree about which page ``--target 1`` names.
+
+    Raises:
+        LifecycleError: The spec matched no page, matched several, or the
+            browser reported no page target at all.
+    """
+    from .cdp_client import resolve_page_target_id
+    from .core.attach import AmbiguousTargetError, TargetNotFoundError
+
+    try:
+        target_id = resolve_page_target_id(f"http://127.0.0.1:{ext.port}", target_spec)
+    except (AmbiguousTargetError, TargetNotFoundError) as exc:
+        raise LifecycleError(str(exc)) from exc
+    if target_id is None:
+        raise LifecycleError(f"{ext.name} has no page target to close.")
+    return target_id
+
+
+def _close_tab(ext: ExtendedInstance, target_id: str) -> str:
+    """Close one tab via CDP, leaving the browser and profile alive.
+
+    ``target_id`` is a complete target ID, already resolved by
+    :func:`_resolve_tab_target`.
+
+    Raises:
+        LifecycleError: ``Target.closeTarget`` reported ``success: false``. A
+            close that did not happen is an operational failure, not a success
+            envelope carrying a failure sentence.
+    """
 
     async def _close() -> bool:
         from .core.cdp_client import CDPClient, get_ws_url_async
@@ -864,34 +899,26 @@ def _close_tab(ext: ExtendedInstance, target: str) -> str:
         browser_ws = await get_ws_url_async(port=ext.port, target_type="browser")
         async with CDPClient(ws_url=browser_ws) as cdp:
             result = await cdp.send(
-                method="Target.closeTarget", params={"targetId": target}
+                method="Target.closeTarget", params={"targetId": target_id}
             )
             return bool(result.get("success", False))
 
-    if asyncio.run(_close()):
-        return f"Closed tab {target[:8]} in {ext.name}"
-    return f"Failed to close tab {target[:8]} in {ext.name}"
+    if not asyncio.run(_close()):
+        raise LifecycleError(f"Failed to close tab {target_id[:8]} in {ext.name}")
+    return f"Closed tab {target_id[:8]} in {ext.name}"
 
 
 def _stop_managed(
     ext: ExtendedInstance,
-    target: str | None,
     registry_path: str | None,
 ) -> str:
     """Stop a Camoufox or profile-bound instance, preserving profile dirs.
 
     Profile-bound instances keep their user-data-dir across stop; unbound
     Camoufox instances have theirs reaped, mirroring the ephemeral-Chrome path.
+    Closing a single tab is not this function's job; ``stop`` handles that for
+    both engines before it reaches here.
     """
-    if target is not None:
-        if ext.engine != "chrome":
-            raise LifecycleError(
-                "Closing a single tab is only supported for the chrome engine."
-            )
-        if not instance_is_live(ext):
-            raise LifecycleError(f"{ext.name} is not live; cannot close a tab.")
-        return _close_tab(ext, target)
-
     alive = instance_is_live(ext)
     if alive:
         _terminate_verified(ext)
@@ -921,6 +948,12 @@ def stop(
     with verified ownership, session-dir cleanup). Camoufox and profile-bound
     instances take an engine-aware path that preserves a profile's user-data-dir.
 
+    ``target`` is a ``--target SPEC``: a 1-based index into the page targets
+    sorted by target ID, or a target ID prefix, read as an index only when every
+    character is a digit. A tab close takes one path for both engines and never
+    reaches the vendored ``stop``, which reads the argument as a complete target
+    ID and reports a refused close as a success.
+
     Corruption: on an unparseable registry (``unknown``) this refuses to signal
     anything (RFC-01).
     """
@@ -940,13 +973,26 @@ def stop(
             str(InstanceNotFoundError(name=instance, available=list(by_name)))
         )
 
+    # A tab close is one path for both engines, and it does not reach the
+    # vendored stop. That function has its own Target.closeTarget: it treats the
+    # argument as a complete target ID and returns a failure sentence on
+    # success: false. It is verbatim vendored, so the correction is here, at the
+    # call site, by not routing tab closes through it.
+    if target is not None:
+        if ext.engine != "chrome":
+            raise LifecycleError(
+                "Closing a single tab is only supported for the chrome engine."
+            )
+        if not instance_is_live(ext):
+            raise LifecycleError(f"{ext.name} is not live; cannot close a tab.")
+        return _close_tab(ext, _resolve_tab_target(ext, target))
+
     if ext.engine == "camoufox" or ext.profile is not None:
-        return _stop_managed(ext, target, registry_path)
+        return _stop_managed(ext, registry_path)
 
     try:
         return core_registry.stop(
             instance_name=instance,
-            target_id=target,
             registry_path=registry_path,
         )
     except InstanceNotFoundError as exc:
