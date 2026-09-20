@@ -44,12 +44,11 @@ a fresh ``take_snapshot`` first, over the same handler, so the UID a prior
 ``snapshot`` verb printed resolves against an identically-ordered tree of the
 unchanged page before the interaction dispatches.
 
-Cross-process state (frame selection carried from ``frames select`` into a
-later ``storage get``, and ``screencast start`` buffering read by a later
-``screencast stop``) does not survive between independent CLI processes, which
-each own a fresh handler. ``storage get --key`` selects its frame within the
-one invocation; ``screencast`` capture across two processes is a known limit of
-the one-shot CLI and is exercised only against the persistent MCP front.
+Cross-process state does not survive between independent CLI processes, which
+each own a fresh handler. Both verbs that needed it do their whole job inside
+one invocation instead: ``storage get --key`` selects its frame before reading,
+and ``screencast --dir DIR`` starts the capture, waits out its bound, and
+writes the frames over one handler.
 """
 
 from __future__ import annotations
@@ -82,6 +81,14 @@ from .screenshot_utils import (
 
 #: How long a one-shot handler waits for its CDP connection before giving up.
 HANDLER_CONNECT_TIMEOUT_SECONDS = 10.0
+
+#: ``screencast`` defaults. One bounded capture per invocation (RFC-01 v6):
+#: it ends at whichever comes first, the duration or the frame cap.
+DEFAULT_SCREENCAST_DURATION_SECONDS = 5.0
+DEFAULT_SCREENCAST_MAX_FRAMES = 600
+
+#: How often the capture loop checks whether the frame buffer has filled.
+SCREENCAST_POLL_SECONDS = 0.05
 
 #: ``wait-idle`` / ``wait-stable`` defaults (mirror the MCP tool defaults in
 #: ``cdp_handler._handle_wait_idle`` / ``_handle_wait_stable``).
@@ -435,41 +442,74 @@ def storage_get(
 # ---------------------------------------------------------------------------
 
 
-def screencast_start(
-    *,
-    instance: str | None,
-    fmt: str = "jpeg",
-    max_frames: int = 600,
-    registry_path: str | None = None,
-    endpoint: str | None = None,
-) -> dict[str, Any]:
-    """Begin screencast capture (frozen ``screencast_start``).
-
-    Capture is stateful in the recorder the handler owns, so a one-shot
-    ``screencast start`` followed by an independent ``screencast stop`` process
-    cannot share buffered frames. The verb dispatches correctly; end-to-end
-    capture is meaningful only against the persistent MCP front.
-    """
-    port = _resolve_port(instance, registry_path, endpoint)
-    with _cdp_handler_session(port, external=endpoint is not None) as handler:
-        text = _tool_or_raise(
-            handler, "screencast_start", {"format": fmt, "max_frames": max_frames}
-        )
-    return {"result": text}
-
-
-def screencast_stop(
+def screencast(
     *,
     instance: str | None,
     out_dir: str,
+    duration: float = DEFAULT_SCREENCAST_DURATION_SECONDS,
+    fmt: str = "jpeg",
+    max_frames: int = DEFAULT_SCREENCAST_MAX_FRAMES,
     registry_path: str | None = None,
     endpoint: str | None = None,
 ) -> dict[str, Any]:
-    """Stop screencast capture and write frames (frozen ``screencast_stop``)."""
+    """Capture a bounded screencast and write its frames, in one invocation.
+
+    Starts ``Page.startScreencast``, buffers the painted frames, writes them to
+    ``out_dir`` with a ``frames.json`` manifest, and exits. Capture ends at
+    whichever bound comes first: ``duration`` seconds, or ``max_frames``
+    buffered frames.
+
+    One invocation is the whole verb because the frame buffer is process-local
+    (RFC-01 v6, "Screencast"). A ``screencast start`` in one CLI process
+    buffers into a recorder that a ``screencast stop`` in a second process
+    cannot reach, so the pair dispatched correctly and could never work. A
+    detached recorder process was considered and declined: it would add a
+    second long-lived process with its own lifetime, registry presence and
+    exit-logging rules to serve a case this already covers. Nothing here
+    outlives the invocation.
+
+    Args:
+        instance: Registered instance to capture from, omittable as everywhere.
+        out_dir: Directory to write the frames and manifest into.
+        duration: Seconds to capture for.
+        fmt: ``jpeg`` or ``png``.
+        max_frames: Buffer cap; reaching it ends the capture early.
+        registry_path: Registry override.
+        endpoint: Drive an external browser instead of a registered instance.
+
+    Raises:
+        UsageError: ``duration`` is not positive, or ``fmt`` is not jpeg/png.
+        LifecycleError: The capture could not start, or the frames could not
+            be written.
+    """
+    if duration <= 0:
+        raise UsageError("screencast --duration must be greater than 0 seconds")
+    if fmt not in ("jpeg", "png"):
+        raise UsageError("screencast --format must be 'jpeg' or 'png'")
+
     port = _resolve_port(instance, registry_path, endpoint)
     with _cdp_handler_session(port, external=endpoint is not None) as handler:
+        _tool_or_raise(
+            handler, "screencast_start", {"format": fmt, "max_frames": max_frames}
+        )
+        frames = _capture_for(handler, duration, max_frames)
         text = _tool_or_raise(handler, "screencast_stop", {"dir": out_dir})
-    return {"result": text}
+    return {"frames": frames, "dir": out_dir, "result": text}
+
+
+def _capture_for(handler: CDPHandler, duration: float, max_frames: int) -> int:
+    """Let the recorder buffer frames, and return how many it got.
+
+    Returns as soon as the buffer is full rather than waiting out ``duration``:
+    once ``max_frames`` is reached the recorder stops acking, so CDP flow
+    control pauses the stream and no further frame can arrive.
+    """
+    deadline = time.monotonic() + duration
+    while time.monotonic() < deadline:
+        if handler.screencast_frame_count >= max_frames:
+            break
+        time.sleep(SCREENCAST_POLL_SECONDS)
+    return handler.screencast_frame_count
 
 
 # ---------------------------------------------------------------------------

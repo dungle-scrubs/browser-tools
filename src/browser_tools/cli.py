@@ -160,6 +160,7 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="[INSTANCE] [Domain.method]",
         help="Optional instance name and/or a Domain or Domain.method query",
     )
+    help_cmd.set_defaults(instance=None)
     _add_endpoint(help_cmd)
 
     attach = sub.add_parser("attach", help="Stream subscribed CDP events as JSON lines")
@@ -171,6 +172,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     attach.add_argument("--target", metavar="SPEC", help="Select the page target (index or id)")
     attach.add_argument("--url", metavar="SUBSTRING", help="Select the page target by URL substring")
+    attach.set_defaults(instance=None)
     _add_endpoint(attach)
 
     wait = sub.add_parser("wait", help="Block until one matching CDP event fires")
@@ -295,22 +297,26 @@ def _add_curated_verbs(
 
     frames = sub.add_parser("frames", help="Inspect or select page frames")
     frames_sub = frames.add_subparsers(dest="frames_action", metavar="ACTION")
+    # A sub-action verb takes its instance ahead of the verb phrase
+    # (`bt web-01 frames select checkout`), never inside it: `frames select
+    # [INSTANCE] PATTERN` cannot be read with a single bare token. See
+    # `_split_leading_instance`.
     fl = frames_sub.add_parser("list", help="List frames")
-    fl.add_argument("instance", nargs="?", metavar="INSTANCE", help="Instance (omit if only one)")
+    fl.set_defaults(instance=None)
     _add_endpoint(fl)
     fs = frames_sub.add_parser("select", help="Select a frame by URL pattern")
     fs.add_argument("pattern", metavar="PATTERN", help="Frame URL substring/pattern")
-    fs.add_argument("instance", nargs="?", metavar="INSTANCE", help="Instance (omit if only one)")
+    fs.set_defaults(instance=None)
     _add_endpoint(fs)
     fr = frames_sub.add_parser("reset", help="Clear frame selection")
-    fr.add_argument("instance", nargs="?", metavar="INSTANCE", help="Instance (omit if only one)")
+    fr.set_defaults(instance=None)
     _add_endpoint(fr)
 
     storage = sub.add_parser("storage", help="Read a frame's storage")
     storage_sub = storage.add_subparsers(dest="storage_action", metavar="ACTION")
     sg = storage_sub.add_parser("get", help="Read the selected frame's storage")
-    sg.add_argument("instance", nargs="?", metavar="INSTANCE", help="Instance (omit if only one)")
     sg.add_argument("--key", metavar="K", help="Frame URL pattern to select before reading")
+    sg.set_defaults(instance=None)
     _add_endpoint(sg)
 
     screenshot = sub.add_parser("screenshot", help="Capture a page screenshot")
@@ -320,17 +326,28 @@ def _add_curated_verbs(
     screenshot.add_argument("--url", metavar="SUBSTRING", help="Select the page target by URL substring")
     _add_endpoint(screenshot)
 
-    screencast = sub.add_parser("screencast", help="Start or stop screencast capture")
-    screencast_sub = screencast.add_subparsers(dest="screencast_action", metavar="ACTION")
-    cast_start = screencast_sub.add_parser("start", help="Begin capture")
-    cast_start.add_argument("instance", nargs="?", metavar="INSTANCE", help="Instance (omit if only one)")
-    cast_start.add_argument("--format", dest="format", default="jpeg", metavar="FMT", help="jpeg or png (default: jpeg)")
-    cast_start.add_argument("--max-frames", type=int, default=600, metavar="N", help="Frame cap (default: 600)")
-    _add_endpoint(cast_start)
-    cast_stop = screencast_sub.add_parser("stop", help="Stop capture and write frames")
-    cast_stop.add_argument("instance", nargs="?", metavar="INSTANCE", help="Instance (omit if only one)")
-    cast_stop.add_argument("--dir", dest="dir", metavar="DIR", help="Directory to write frames into")
-    _add_endpoint(cast_stop)
+    screencast = sub.add_parser(
+        "screencast", help="Capture a bounded screencast and write its frames"
+    )
+    screencast.add_argument("--dir", dest="dir", metavar="DIR", help="Directory to write frames into")
+    screencast.add_argument(
+        "--duration", type=float, default=curated.DEFAULT_SCREENCAST_DURATION_SECONDS,
+        metavar="SECONDS", help="How long to capture for (default: 5)",
+    )
+    screencast.add_argument("--format", dest="format", default="jpeg", metavar="FMT", help="jpeg or png (default: jpeg)")
+    screencast.add_argument(
+        "--max-frames", type=int, default=curated.DEFAULT_SCREENCAST_MAX_FRAMES,
+        metavar="N", help="Frame cap; reaching it ends the capture (default: 600)",
+    )
+    # `screencast start` / `screencast stop` were one verb pair that could not
+    # work: the frame buffer is process-local, so the stop process never saw
+    # the start process's frames (#99). Catching the old spelling here is what
+    # turns "unrecognized arguments: start" into a message naming the new form.
+    screencast.add_argument(
+        "removed_action", nargs="?", metavar=argparse.SUPPRESS, help=argparse.SUPPRESS
+    )
+    screencast.set_defaults(instance=None)
+    _add_endpoint(screencast)
 
 
 def _run_profile(args: argparse.Namespace, registry_path: str | None) -> int:
@@ -343,6 +360,23 @@ def _run_profile(args: argparse.Namespace, registry_path: str | None) -> int:
         _print_json(lifecycle.profile_delete(args.name, registry_path=registry_path))
         return EXIT_OK
     raise PassthroughUsageError("profile takes one sub-action: list or delete NAME")
+
+
+def _one_instance(leading: str | None, inline: str | None) -> str | None:
+    """Reconcile a leading ``INSTANCE`` with one inside the verb's own args.
+
+    ``help`` and ``attach`` read their instance out of a free-form positional
+    list rather than a named argument, so the conflict ``main`` catches for
+    every other verb has to be caught here instead.
+
+    Raises:
+        UsageError: Both spellings were used.
+    """
+    if leading is not None and inline is not None:
+        raise PassthroughUsageError(
+            f"instance named twice: '{leading}' before the verb and '{inline}' after it"
+        )
+    return leading if leading is not None else inline
 
 
 def _print_json(payload: object) -> None:
@@ -441,6 +475,7 @@ def _run(args: argparse.Namespace) -> int:
 
     if args.command == "help":
         instance, query = passthrough.resolve_help_args(args.args, registry_path=registry_path)
+        instance = _one_instance(getattr(args, "instance", None), instance)
         passthrough.run_help(
             instance, query, registry_path=registry_path, endpoint=args.endpoint
         )
@@ -450,6 +485,7 @@ def _run(args: argparse.Namespace) -> int:
         if args.target is not None and args.url is not None:
             raise PassthroughUsageError("cannot specify both --target and --url")
         instance, subscriptions = events.resolve_attach_args(args.args)
+        instance = _one_instance(getattr(args, "instance", None), instance)
         events.run_attach(
             instance=instance,
             events=subscriptions,
@@ -645,7 +681,32 @@ def _run_curated(args: argparse.Namespace, registry_path: str | None) -> int:
         return EXIT_OK
 
     if args.command == "screencast":
-        return _run_screencast(args, registry_path)
+        if args.removed_action is not None:
+            raise PassthroughUsageError(
+                f"screencast takes no sub-action: '{args.removed_action}' is not one. "
+                "start and stop were replaced by a single bounded capture, because "
+                "the frame buffer is process-local and a stop in a second process "
+                "could never reach the first one's frames. Use: "
+                "bt screencast --dir DIR [--duration SECONDS] [--format FMT] "
+                "[--max-frames N]"
+            )
+        if not args.dir:
+            raise PassthroughUsageError(
+                "screencast requires --dir DIR. It captures and writes the frames "
+                "in one invocation; there is no separate start or stop."
+            )
+        _print_json(
+            curated.screencast(
+                instance=args.instance,
+                out_dir=args.dir,
+                duration=args.duration,
+                fmt=args.format,
+                max_frames=args.max_frames,
+                registry_path=registry_path,
+                endpoint=args.endpoint,
+            )
+        )
+        return EXIT_OK
 
     return EXIT_USAGE
 
@@ -682,35 +743,6 @@ def _run_frames(args: argparse.Namespace, registry_path: str | None) -> int:
         )
         return EXIT_OK
     raise PassthroughUsageError("frames takes one sub-action: list, select, or reset")
-
-
-def _run_screencast(args: argparse.Namespace, registry_path: str | None) -> int:
-    """Dispatch ``screencast start|stop``."""
-    action = getattr(args, "screencast_action", None)
-    if action == "start":
-        _print_json(
-            curated.screencast_start(
-                instance=args.instance,
-                fmt=args.format,
-                max_frames=args.max_frames,
-                registry_path=registry_path,
-                endpoint=args.endpoint,
-            )
-        )
-        return EXIT_OK
-    if action == "stop":
-        if not args.dir:
-            raise PassthroughUsageError("screencast stop requires --dir DIR")
-        _print_json(
-            curated.screencast_stop(
-                instance=args.instance,
-                out_dir=args.dir,
-                registry_path=registry_path,
-                endpoint=args.endpoint,
-            )
-        )
-        return EXIT_OK
-    raise PassthroughUsageError("screencast takes one sub-action: start or stop")
 
 
 def _run_passthrough(argv: list[str], registry_path: str | None) -> int:
@@ -773,6 +805,35 @@ def _refuse_endpoint_misuse(argv: list[str]) -> str | None:
     return None
 
 
+def _split_leading_instance(
+    argv: list[str], registry_path: str | None
+) -> tuple[list[str], str | None]:
+    """Pull a leading ``INSTANCE`` token off a verb phrase.
+
+    Every verb that drives a browser accepts the instance ahead of the verb, so
+    ``bt guide`` carries no grammar exception for the sub-action verbs (#99).
+    The token is disambiguated by registry lookup, the same rule the raw
+    protocol line already uses (RFC-01, "Instance names"):
+
+        bt frames select checkout          # 'frames' is not a registry name
+        bt web-01 frames select checkout   # 'web-01' is
+
+    Only a token the registry knows *and* that is followed by a known verb is
+    taken, so a bare ``bt web-01 Page.navigate '{...}'`` still routes to the
+    raw protocol line.
+
+    Returns:
+        ``(remaining_argv, instance_or_None)``.
+    """
+    if (
+        len(argv) >= 2
+        and argv[1] in _KNOWN_VERBS
+        and lifecycle.instance_is_registered(argv[0], registry_path=registry_path)
+    ):
+        return argv[1:], argv[0]
+    return argv, None
+
+
 def main(argv: list[str] | None = None) -> int:
     """Entry point for both the ``browser-tools`` and ``bt`` console scripts."""
     raw_argv = sys.argv[1:] if argv is None else argv
@@ -786,14 +847,18 @@ def main(argv: list[str] | None = None) -> int:
     # `bt --endpoint URL Page.navigate '{...}'` reads the same as the flag at
     # the end. _run_passthrough still gets the full argv and pulls the flag
     # itself, because the raw-protocol line never reaches argparse.
-    probe = passthrough.strip_endpoint_flag(raw_argv)[0]
+    probe, endpoint = passthrough.strip_endpoint_flag(raw_argv)
+    leading_instance: str | None = None
     if (
         probe
         and probe[0] not in _KNOWN_VERBS
         and probe[0] not in ("-h", "--help")
     ):
         registry_path = lifecycle.registry_path_from_env()
-        if passthrough.is_passthrough_head(probe[0], registry_path=registry_path):
+        probe, leading_instance = _split_leading_instance(probe, registry_path)
+        if leading_instance is None and passthrough.is_passthrough_head(
+            probe[0], registry_path=registry_path
+        ):
             try:
                 return _run_passthrough(raw_argv, registry_path=registry_path)
             except LifecycleError as exc:
@@ -802,11 +867,26 @@ def main(argv: list[str] | None = None) -> int:
             except UsageError as exc:
                 print(f"error: {exc}", file=sys.stderr)
                 return EXIT_USAGE
-        # Neither a known instance nor Domain.method-shaped: fall through to
-        # argparse, which rejects it as an unknown verb (unchanged).
+        # Neither a leading instance nor a known instance nor Domain.method-
+        # shaped: fall through to argparse, which rejects it as an unknown verb.
 
     parser = build_parser()
-    args = parser.parse_args(argv)
+    if leading_instance is not None:
+        # Re-append the endpoint flag the probe removed. It belongs to the
+        # verb's own parser, so it goes last; only `launch` has a REMAINDER
+        # that could swallow it, and `launch` refuses --endpoint above.
+        rest = [*probe, "--endpoint", endpoint] if endpoint is not None else probe
+        args = parser.parse_args(rest)
+        if getattr(args, "instance", None) is not None:
+            print(
+                f"error: instance named twice: '{leading_instance}' before the verb "
+                f"and '{args.instance}' after it",
+                file=sys.stderr,
+            )
+            return EXIT_USAGE
+        args.instance = leading_instance
+    else:
+        args = parser.parse_args(argv)
 
     if args.command is None:
         parser.print_help(sys.stderr)
