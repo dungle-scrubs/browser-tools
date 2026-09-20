@@ -54,6 +54,8 @@ async def one_shot_page_session(
     port: int,
     target_spec: str | None,
     target_by: str | None,
+    *,
+    external: bool = False,
 ) -> AsyncGenerator[tuple[CDPClient, str]]:
     """Connect, resolve a page target, attach, yield the session, detach.
 
@@ -67,11 +69,18 @@ async def one_shot_page_session(
 
     Raises ``NoPageError`` when the browser has no page targets at all (see
     the module docstring for why this is the one no-page spelling now).
+
+    ``external`` says the port came from ``--endpoint`` rather than the
+    registry. A failed connection then also reports who holds the port and what
+    profile directory they hold, because there is no registry entry to compare
+    against and no ``bt status`` row to look the browser up in (#97).
     """
     try:
         browser_ws_url = await get_ws_url_async(port=port, target_type="browser")
     except ConnectionError as exc:
-        raise ConnectionError(connection_failure_message(port=port, cause=exc.__cause__)) from exc
+        raise ConnectionError(
+            connection_failure_message(port=port, cause=exc.__cause__, external=external)
+        ) from exc
     async with CDPClient(ws_url=browser_ws_url) as cdp:
         targets_result = await cdp.send(method="Target.getTargets")
         target_infos: list[dict[str, Any]] = targets_result.get("targetInfos", [])
@@ -107,7 +116,9 @@ async def one_shot_page_session(
                 )
 
 
-def connection_failure_message(*, port: int, cause: BaseException | None) -> str:
+def connection_failure_message(
+    *, port: int, cause: BaseException | None, external: bool = False
+) -> str:
     """Spell out why the DevTools HTTP endpoint on ``port`` did not answer.
 
     The vendored ``core.cdp_client.get_ws_url`` raises one ``ConnectionError``
@@ -126,12 +137,22 @@ def connection_failure_message(*, port: int, cause: BaseException | None) -> str
     core text and program name stay untouched in ``core/``.
     """
     if _is_timeout(cause):
-        return (
+        message = (
             f"Browser on port {port} is bound but did not answer the DevTools HTTP "
             f"endpoint before the timeout (busy or hung browser UI thread). "
             f"Check it with: bt status"
         )
-    return f"No browser listening on port {port}. Start one with: bt launch"
+    else:
+        message = f"No browser listening on port {port}. Start one with: bt launch"
+    if not external:
+        return message
+    from .endpoint import describe_endpoint
+
+    return (
+        f"--endpoint on port {port} did not answer. "
+        f"Start the browser with --remote-debugging-port={port}.\n"
+        f"{describe_endpoint(port)}"
+    )
 
 
 def _is_timeout(exc: BaseException | None) -> bool:

@@ -13,6 +13,8 @@ Browser automation, debugging, and anti-detect browsing CLI. Provides:
   interaction (`snapshot`, `click --uid`, `fill --uid`), in Python over CDP
 - **Named browser instances** — Long-lived Chrome with a registry and named
   profiles that keep a login across restarts
+- **External browsers** — `--endpoint http://127.0.0.1:9222` drives a browser
+  you already have open and logged in, writing nothing to the registry
 - **Frame-aware tools** — Iframe/CDP frame tree management, execution context
   resolution, and storage inspection
 - **Interstitial detection** — Multi-signal heuristic detection for Cloudflare,
@@ -62,6 +64,21 @@ Omit `INSTANCE` while exactly one instance is running; with several, every verb
 names the candidates rather than guessing. `bt guide` prints the full manual,
 and `bt help Domain.method` reads the protocol schema from the running browser.
 
+To drive a browser you started yourself, pass its debugging port instead of an
+instance name:
+
+```bash
+# Chrome started with --remote-debugging-port=9222, already logged in.
+bt snapshot --endpoint http://127.0.0.1:9222
+bt click --uid 0BDAEF756714-14 --endpoint http://127.0.0.1:9222
+```
+
+Nothing is written to the registry, so `status` does not list it and `stop` and
+`cleanup` cannot reach it -- which is what keeps them away from your real Chrome
+profile directory. Only `127.0.0.1` and `::1` are accepted; forward a remote
+browser with `ssh -L 9222:127.0.0.1:9222 <host>`. `Browser.close` and
+`Browser.crash` are refused over `--endpoint`.
+
 ### Development setup
 
 ```bash
@@ -104,6 +121,7 @@ cli.py                       CLI entry point (argparse, verb dispatch, exit code
         |       +-- camoufox_runner.py   Camoufox host process (`launch --engine camoufox`)
         |       +-- process_utils.py     Chrome process and port utilities
         |
+        +-- endpoint.py              `--endpoint URL`: loopback check, refusals
         +-- passthrough.py           Raw `Domain.method` send + the focus guard
         +-- curated.py               The curated verbs over one short-lived CDP handler
         +-- one_shot.py              Connect, resolve a page target, attach, detach

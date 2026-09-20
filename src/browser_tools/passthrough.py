@@ -34,6 +34,7 @@ import asyncio
 import json
 from typing import Any
 
+from . import endpoint as browser_endpoint
 from . import lifecycle
 from .core import protocol as core_protocol
 from .core import registry as core_registry
@@ -125,13 +126,40 @@ def resolve_help_args(
     return None, head
 
 
-def extract_target_flags(argv: list[str]) -> tuple[list[str], str | None, str | None]:
-    """Pull ``--target SPEC`` / ``--url SUBSTRING`` out of a passthrough argv.
+def strip_endpoint_flag(argv: list[str]) -> tuple[list[str], str | None]:
+    """Pull ``--endpoint URL`` out of an argv, wherever it sits.
+
+    The raw-protocol line bypasses argparse, so nothing else would find the
+    flag there. The CLI front also calls this before deciding whether a leading
+    token is a verb, so ``bt --endpoint URL Page.navigate '{...}'`` reads the
+    same as ``bt Page.navigate '{...}' --endpoint URL``.
+
+    Returns ``(remaining_args, endpoint_or_None)``.
+    """
+    remaining: list[str] = []
+    endpoint: str | None = None
+    i = 0
+    while i < len(argv):
+        if argv[i] == "--endpoint" and i + 1 < len(argv):
+            endpoint = argv[i + 1]
+            i += 2
+        else:
+            remaining.append(argv[i])
+            i += 1
+    return remaining, endpoint
+
+
+def extract_target_flags(
+    argv: list[str],
+) -> tuple[list[str], str | None, str | None, str | None]:
+    """Pull ``--target`` / ``--url`` / ``--endpoint`` out of a passthrough argv.
 
     They may appear anywhere in the invocation. Returns
-    ``(remaining_args, target, url)``. Raises ``UsageError`` if both are
-    given -- they select the same slot and cannot both be honored.
+    ``(remaining_args, target, url, endpoint)``. Raises ``UsageError`` if both
+    ``--target`` and ``--url`` are given -- they select the same slot and
+    cannot both be honored.
     """
+    argv, endpoint = strip_endpoint_flag(argv)
     remaining: list[str] = []
     target: str | None = None
     url: str | None = None
@@ -148,7 +176,7 @@ def extract_target_flags(argv: list[str]) -> tuple[list[str], str | None, str | 
             i += 1
     if target is not None and url is not None:
         raise UsageError("cannot specify both --target and --url")
-    return remaining, target, url
+    return remaining, target, url, endpoint
 
 
 # ---------------------------------------------------------------------------
@@ -249,20 +277,25 @@ def send(
     target: str | None = None,
     url: str | None = None,
     registry_path: str | None = None,
+    endpoint: str | None = None,
 ) -> dict[str, Any]:
     """Send one raw CDP ``Domain.method`` call and return its JSON result.
 
     ``instance`` omitted resolves via ``lifecycle.resolve_single_instance``
     (fails naming the candidates unless exactly one instance is registered).
-    ``params_json`` must parse to a JSON object; a parse failure or a
-    non-object payload is a ``UsageError`` (CLI exit 2). CDP-level and
-    target-resolution failures become ``LifecycleError`` (CLI exit 1), via
+    ``endpoint`` drives an external browser instead, and then no registry entry
+    is read or written. ``params_json`` must parse to a JSON object; a parse
+    failure or a non-object payload is a ``UsageError`` (CLI exit 2). CDP-level
+    and target-resolution failures become ``LifecycleError`` (CLI exit 1), via
     ``@cli_cdp_errors``.
-    """
-    if instance is None:
-        instance = lifecycle.resolve_single_instance(registry_path=registry_path)
 
-    info = core_registry.lookup(instance_name=instance, registry_path=registry_path)
+    Over an external endpoint ``Browser.close`` and ``Browser.crash`` are
+    refused: they would end every window and tab of a browser this tool does
+    not own. Everything else passes, ``Target.closeTarget`` included.
+    """
+    if endpoint is not None:
+        browser_endpoint.refuse_browser_lifetime_method(method)
+    port = lifecycle.resolve_cdp_port(instance, registry_path, endpoint)
 
     params: dict[str, Any] | None = None
     if params_json is not None:
@@ -285,7 +318,9 @@ def send(
         target_by = "url"
 
     async def _send() -> dict[str, Any]:
-        async with one_shot_page_session(info.port, spec, target_by) as (cdp, session_id):
+        async with one_shot_page_session(
+            port, spec, target_by, external=endpoint is not None
+        ) as (cdp, session_id):
             if method.startswith(_INPUT_DELIVERY_PREFIXES):
                 await _refuse_input_to_hidden_tab(cdp, session_id)
             return await cdp.send(method=method, params=params, session_id=session_id)
@@ -327,8 +362,12 @@ Launch a browser first: bt launch
 """
 
 
-def _resolve_help_port(instance: str | None, registry_path: str | None) -> int | None:
+def _resolve_help_port(
+    instance: str | None, registry_path: str | None, endpoint: str | None = None
+) -> int | None:
     """Resolve the port to query for live help, or None for static usage."""
+    if endpoint is not None:
+        return browser_endpoint.resolve_endpoint_port(endpoint)
     if instance is not None:
         try:
             info = core_registry.lookup(instance_name=instance, registry_path=registry_path)
@@ -351,13 +390,14 @@ def run_help(
     instance: str | None,
     query: str | None,
     registry_path: str | None = None,
+    endpoint: str | None = None,
 ) -> None:
     """Print live-schema help from a running instance, else static usage.
 
     Raises ``UsageError`` for an unresolvable ``Domain``/``Domain.method``
     query against a schema that was successfully fetched.
     """
-    port = _resolve_help_port(instance, registry_path)
+    port = _resolve_help_port(instance, registry_path, endpoint)
     if port is None:
         print(STATIC_HELP, end="")
         return
