@@ -11,14 +11,26 @@ The path is additive. The frozen MCP ``click`` / ``fill`` tools keep their
 name, argument, and response shape; this backend is built beside the Node
 path, and the authoritative flip plus the full parity gate are ticket #41.
 
-Reuse of #39
-------------
-UID -> backend-node resolution is not reimplemented here. An interaction
-resolves a UID through :class:`~browser_tools.native_snapshot.NativeSnapshotReader`
--- the same reader, the same current-snapshot-only stability contract -- and
-reads :attr:`~browser_tools.native_snapshot.AxUidNode.backend_node_id`. A UID
-from a superseded snapshot, or one naming a node with no DOM backing, is
-rejected before any CDP call is dispatched.
+Resolution without a snapshot
+-----------------------------
+A UID is ``"<docToken>-<backendNodeId>"``, so it carries everything an
+interaction needs: the document it belongs to, and the DOM node it names. An
+interaction reads the live document token from ``Page.getFrameTree`` and
+compares it. Matching means the UID belongs to the document on screen; not
+matching means the page navigated, and the UID is refused with the remedy.
+
+No snapshot is taken and none is needed. ``click`` and ``fill`` used to take
+one internally, which is what made the old staleness check unable to fire: the
+fresh snapshot was always "current", so a UID minted against a different tree
+resolved against it by ordinal and named whatever node now sat at that
+position. Dropping the internal snapshot and carrying the backend node in the
+UID are one change, not two -- without the second, a one-shot process would
+have no current snapshot and every UID would fail to resolve.
+
+The document check runs before any interaction traffic. The element check runs
+first inside the protocol: ``DOM.describeNode`` confirms the backend node is an
+Element, because focusing or clicking a text node is how the old scheme's
+wrong-target failures surfaced when they surfaced at all.
 
 Transport independence (sans-IO)
 --------------------------------
@@ -69,10 +81,13 @@ from collections.abc import Awaitable, Callable, Generator
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
+from .native_snapshot import parse_uid, read_doc_token, read_doc_token_sync
+
 if TYPE_CHECKING:
-    from .native_snapshot import AxUidNode, NativeSnapshotReader
+    from .native_snapshot import NativeSnapshotReader
 
 # CDP methods this interaction path uses.
+DOM_DESCRIBE_NODE = "DOM.describeNode"
 DOM_SCROLL_INTO_VIEW = "DOM.scrollIntoViewIfNeeded"
 DOM_GET_BOX_MODEL = "DOM.getBoxModel"
 DOM_FOCUS = "DOM.focus"
@@ -114,10 +129,9 @@ function(value) {
 class UidResolutionError(Exception):
     """A UID could not be resolved to an actionable backend DOM node.
 
-    Raised before any CDP call is dispatched, for a UID that does not resolve
-    in the current snapshot (stale, unknown, or superseded by a newer snapshot
-    or a navigation) or that resolves to an accessibility node with no
-    ``backendDOMNodeId`` (nothing in the DOM to interact with).
+    Raised before any interaction call is dispatched, for a UID minted against
+    a different document (the page navigated), one that names no DOM node, or
+    one whose node is not an Element.
     """
 
     def __init__(self, uid: str, reason: str) -> None:
@@ -175,16 +189,35 @@ def _box_centre(box_model: dict[str, Any]) -> tuple[float, float]:
     return (sum(xs) / 4.0, sum(ys) / 4.0)
 
 
-def click_steps(node: AxUidNode) -> Generator[CdpCall, dict[str, Any], InteractionResult]:
-    """Sans-IO protocol for a native click on a resolved node.
+#: DOM ``nodeType`` for an element. A UID naming anything else -- a text node
+#: most often -- is refused rather than focused or clicked.
+ELEMENT_NODE_TYPE = 1
+
+
+def _require_element(
+    uid: str, backend: int, methods: list[str]
+) -> Generator[CdpCall, dict[str, Any]]:
+    """Confirm the backend node is an Element before acting on it."""
+    methods.append(DOM_DESCRIBE_NODE)
+    described = yield CdpCall(DOM_DESCRIBE_NODE, {"backendNodeId": backend})
+    node_type = described.get("node", {}).get("nodeType")
+    if node_type != ELEMENT_NODE_TYPE:
+        raise UidResolutionError(
+            uid,
+            f"names a DOM node that is not an element (nodeType {node_type}); "
+            "take a new snapshot and use the element's own uid",
+        )
+
+
+def click_steps(uid: str, backend: int) -> Generator[CdpCall, dict[str, Any], InteractionResult]:
+    """Sans-IO protocol for a native click on ``backend``.
 
     Yields the CDP calls a driver must dispatch and consumes each result;
-    returns the :class:`InteractionResult`. The node MUST have a backend node
-    (the resolver guarantees this).
+    returns the :class:`InteractionResult`.
     """
-    backend = node.backend_node_id
-    assert backend is not None  # guaranteed by the resolver
     methods: list[str] = []
+
+    yield from _require_element(uid, backend, methods)
 
     methods.append(DOM_SCROLL_INTO_VIEW)
     yield CdpCall(DOM_SCROLL_INTO_VIEW, {"backendNodeId": backend})
@@ -203,7 +236,7 @@ def click_steps(node: AxUidNode) -> Generator[CdpCall, dict[str, Any], Interacti
 
     return InteractionResult(
         action="click",
-        uid=node.uid,
+        uid=uid,
         backend_node_id=backend,
         methods=tuple(methods),
         point=(x, y),
@@ -211,12 +244,12 @@ def click_steps(node: AxUidNode) -> Generator[CdpCall, dict[str, Any], Interacti
 
 
 def fill_steps(
-    node: AxUidNode, text: str
+    uid: str, backend: int, text: str
 ) -> Generator[CdpCall, dict[str, Any], InteractionResult]:
-    """Sans-IO protocol for a native fill on a resolved node."""
-    backend = node.backend_node_id
-    assert backend is not None  # guaranteed by the resolver
+    """Sans-IO protocol for a native fill on ``backend``."""
     methods: list[str] = []
+
+    yield from _require_element(uid, backend, methods)
 
     methods.append(DOM_SCROLL_INTO_VIEW)
     yield CdpCall(DOM_SCROLL_INTO_VIEW, {"backendNodeId": backend})
@@ -244,7 +277,7 @@ def fill_steps(
 
     return InteractionResult(
         action="fill",
-        uid=node.uid,
+        uid=uid,
         backend_node_id=backend,
         methods=tuple(methods),
         text=text,
@@ -282,52 +315,71 @@ async def drive_async(
 
 @dataclass
 class NativeInteractor:
-    """Resolve UIDs through #39's reader and dispatch native interactions.
+    """Dispatch native interactions for UIDs minted by #39's reader.
 
     One interactor pairs with one :class:`NativeSnapshotReader` (one page /
-    session). Resolution reuses the reader's current-snapshot-only contract, so
-    an interaction is refused for exactly the UIDs ``snapshot`` would no longer
-    resolve.
+    session), but it does not read the reader's snapshot to resolve a UID. A
+    UID carries its document token and its backend DOM node, so resolution is a
+    comparison against the live document plus a parse -- which is what lets
+    ``click`` and ``fill`` act without taking a snapshot of their own.
+
+    The reader is kept for the snapshot path and for diagnostics.
     """
 
     reader: NativeSnapshotReader
     _last_methods: tuple[str, ...] = field(default=(), repr=False)
 
-    def resolve(self, uid: str) -> AxUidNode:
-        """Resolve a UID to an actionable node, or raise :class:`UidResolutionError`."""
-        node = self.reader.resolve_uid(uid)
-        if node is None:
-            if self.reader.current is None:
-                reason = "no current snapshot (take a snapshot first)"
-            else:
-                reason = "not in the current snapshot (stale after a newer snapshot or navigation)"
-            raise UidResolutionError(uid, reason)
-        if node.backend_node_id is None:
-            raise UidResolutionError(uid, "node has no backend DOM node to interact with")
-        return node
+    def _backend_for(self, uid: str, live_token: str) -> int:
+        """Check ``uid`` against the live document and return its backend node.
+
+        Raises:
+            UidResolutionError: The UID belongs to a previous document, or
+                names no DOM node.
+        """
+        doc_token, backend = parse_uid(uid)
+        if doc_token != live_token:
+            raise UidResolutionError(
+                uid,
+                "minted against a previous document (the page navigated since); "
+                "take a new snapshot",
+            )
+        if backend is None:
+            raise UidResolutionError(uid, "names a node with no backend DOM node")
+        return backend
+
+    def resolve(self, send: SyncSend, uid: str) -> int:
+        """Backend DOM node ``uid`` names, checked against the live document."""
+        return self._backend_for(uid, read_doc_token_sync(send))
+
+    async def resolve_async(self, send: AsyncSend, uid: str) -> int:
+        """Awaitable :meth:`resolve`."""
+        return self._backend_for(uid, await read_doc_token(send))
 
     # -- synchronous drivers (parity harness, tests) ----------------------- #
 
     def click(self, send: SyncSend, uid: str) -> InteractionResult:
         """Resolve ``uid`` and dispatch a native click over a sync transport."""
-        return drive_sync(click_steps(self.resolve(uid)), send)
+        return drive_sync(click_steps(uid, self.resolve(send, uid)), send)
 
     def fill(self, send: SyncSend, uid: str, text: str) -> InteractionResult:
         """Resolve ``uid`` and dispatch a native fill over a sync transport."""
-        return drive_sync(fill_steps(self.resolve(uid), text), send)
+        return drive_sync(fill_steps(uid, self.resolve(send, uid), text), send)
 
-    # -- asynchronous drivers (real CDPClient; wired in #41) --------------- #
+    # -- asynchronous drivers (the real CDPClient) ------------------------- #
 
     async def click_async(self, send: AsyncSend, uid: str) -> InteractionResult:
         """Resolve ``uid`` and dispatch a native click over an async transport."""
-        return await drive_async(click_steps(self.resolve(uid)), send)
+        backend = await self.resolve_async(send, uid)
+        return await drive_async(click_steps(uid, backend), send)
 
     async def fill_async(self, send: AsyncSend, uid: str, text: str) -> InteractionResult:
         """Resolve ``uid`` and dispatch a native fill over an async transport."""
-        return await drive_async(fill_steps(self.resolve(uid), text), send)
+        backend = await self.resolve_async(send, uid)
+        return await drive_async(fill_steps(uid, backend, text), send)
 
 
 __all__ = [
+    "ELEMENT_NODE_TYPE",
     "CdpCall",
     "InteractionResult",
     "NativeInteractor",

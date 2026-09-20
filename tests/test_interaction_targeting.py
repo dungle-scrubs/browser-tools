@@ -119,10 +119,7 @@ class TestFocusGuard:
 
         curated.click(instance=None, uid="1-5", registry_path=registry_path)
 
-        assert [name for name, _ in fake_handler.instances[0].native_calls] == [
-            "take_snapshot",
-            "click",
-        ]
+        assert [name for name, _ in fake_handler.instances[0].native_calls] == ["click"]
 
     def test_an_unreadable_visibility_does_not_block(self, registry_path, fake_handler):
         """If the state cannot be read, act rather than refuse a working page."""

@@ -235,13 +235,15 @@ def click(
 ) -> dict[str, Any]:
     """Native UID click (frozen ``click``), over the #40 interaction path.
 
-    Takes a fresh snapshot first so the UID resolves against the current,
-    identically-ordered tree of the (unchanged) page in this one-shot process.
+    Takes no snapshot. A UID carries the document it was minted against and the
+    backend DOM node it names, so the interaction checks the document and acts.
+    The internal snapshot this used to take is exactly what made the staleness
+    check unable to fire: it was always "current", so a UID from a different
+    tree resolved against it by ordinal and named whatever now sat there.
     """
     port = _resolve_port(instance, registry_path)
     with _cdp_handler_session(port, target) as handler:
         _refuse_input_to_hidden_tab(handler)
-        _native_or_raise(handler, "take_snapshot", {})
         text = _native_or_raise(handler, "click", {"uid": uid})
     return {"uid": uid, "result": text}
 
@@ -254,11 +256,13 @@ def fill(
     target: str | None = None,
     registry_path: str | None = None,
 ) -> dict[str, Any]:
-    """Native UID fill (frozen ``fill``), over the #40 interaction path."""
+    """Native UID fill (frozen ``fill``), over the #40 interaction path.
+
+    Takes no snapshot, for the reason :func:`click` gives.
+    """
     port = _resolve_port(instance, registry_path)
     with _cdp_handler_session(port, target) as handler:
         _refuse_input_to_hidden_tab(handler)
-        _native_or_raise(handler, "take_snapshot", {})
         result = _native_or_raise(handler, "fill", {"uid": uid, "value": text})
     return {"uid": uid, "text": text, "result": result}
 
