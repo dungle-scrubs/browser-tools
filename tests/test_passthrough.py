@@ -216,13 +216,13 @@ class TestDisambiguation:
 
 class TestTargetFlagExtraction:
     def test_no_flags(self):
-        remaining, target, url = passthrough.extract_target_flags(["Page.navigate", "{}"])
+        remaining, target, url, _ = passthrough.extract_target_flags(["Page.navigate", "{}"])
         assert remaining == ["Page.navigate", "{}"]
         assert target is None
         assert url is None
 
     def test_target_extracted_from_anywhere(self):
-        remaining, target, url = passthrough.extract_target_flags(
+        remaining, target, url, _ = passthrough.extract_target_flags(
             ["--target", "abc123", "Page.navigate", "{}"]
         )
         assert remaining == ["Page.navigate", "{}"]
@@ -230,7 +230,7 @@ class TestTargetFlagExtraction:
         assert url is None
 
     def test_url_extracted(self):
-        remaining, target, url = passthrough.extract_target_flags(
+        remaining, target, url, _ = passthrough.extract_target_flags(
             ["Page.navigate", "--url", "example.com"]
         )
         assert remaining == ["Page.navigate"]

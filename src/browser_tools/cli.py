@@ -28,6 +28,7 @@ import json
 import sys
 
 from . import curated, events, lifecycle, list_verbs, passthrough, user_settings
+from .endpoint import EndpointUsageError
 from .lifecycle import LifecycleError
 from .passthrough import UsageError as PassthroughUsageError
 
@@ -65,6 +66,31 @@ _KNOWN_VERBS = {
     "screenshot",
     "screencast",
 }
+
+
+#: The two exit-2 errors. ``endpoint.EndpointUsageError`` cannot subclass
+#: ``passthrough.UsageError`` -- ``passthrough`` imports ``endpoint``, so the
+#: dependency runs the other way -- and the CLI is the one place that has to
+#: know both spellings mean the same exit code.
+USAGE_ERRORS = (PassthroughUsageError, EndpointUsageError)
+
+
+#: Verbs that MUST NOT accept ``--endpoint`` (#97). They read or write the
+#: registry, or launch a browser, and an external browser has no entry there.
+#: Keeping them flagless is what stops ``stop`` and ``cleanup`` from ever
+#: seeing the user's real profile directory.
+REGISTRY_VERBS = frozenset({"launch", "status", "stop", "cleanup", "guide", "profile"})
+
+ENDPOINT_HELP = (
+    "Drive an external browser at URL (loopback only, e.g. http://127.0.0.1:9222) "
+    "instead of a registered instance"
+)
+
+
+def _add_endpoint(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+    """Give one browser-driving verb the ``--endpoint URL`` flag."""
+    parser.add_argument("--endpoint", metavar="URL", help=ENDPOINT_HELP)
+    return parser
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -134,6 +160,7 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="[INSTANCE] [Domain.method]",
         help="Optional instance name and/or a Domain or Domain.method query",
     )
+    _add_endpoint(help_cmd)
 
     attach = sub.add_parser("attach", help="Stream subscribed CDP events as JSON lines")
     attach.add_argument(
@@ -144,6 +171,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     attach.add_argument("--target", metavar="SPEC", help="Select the page target (index or id)")
     attach.add_argument("--url", metavar="SUBSTRING", help="Select the page target by URL substring")
+    _add_endpoint(attach)
 
     wait = sub.add_parser("wait", help="Block until one matching CDP event fires")
     wait.add_argument("instance", nargs="?", metavar="INSTANCE", help="Instance (omit if only one)")
@@ -158,6 +186,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     wait.add_argument("--target", metavar="SPEC", help="Select the page target (index or id)")
     wait.add_argument("--url", metavar="SUBSTRING", help="Select the page target by URL substring")
+    _add_endpoint(wait)
 
     console_list = sub.add_parser(
         "console-list", help="Collect console messages over a short attach window"
@@ -172,6 +201,7 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="SECONDS",
         help="Collection window in seconds (default: 2.0)",
     )
+    _add_endpoint(console_list)
 
     network_list = sub.add_parser(
         "network-list", help="Collect network requests/responses over a short attach window"
@@ -186,6 +216,7 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="SECONDS",
         help="Collection window in seconds (default: 2.0)",
     )
+    _add_endpoint(network_list)
 
     _add_curated_verbs(sub)
 
@@ -207,17 +238,20 @@ def _add_curated_verbs(
     snapshot = sub.add_parser("snapshot", help="Native UID accessibility tree")
     snapshot.add_argument("instance", nargs="?", metavar="INSTANCE", help="Instance (omit if only one)")
     snapshot.add_argument("--target", metavar="SPEC", help="Select the page target (1-based index or id)")
+    _add_endpoint(snapshot)
 
     click = sub.add_parser("click", help="Native UID click")
     click.add_argument("instance", nargs="?", metavar="INSTANCE", help="Instance (omit if only one)")
     click.add_argument("--uid", metavar="N", help="UID from a prior snapshot")
     click.add_argument("--target", metavar="SPEC", help="Select the page target (1-based index or id)")
+    _add_endpoint(click)
 
     fill = sub.add_parser("fill", help="Native UID fill")
     fill.add_argument("instance", nargs="?", metavar="INSTANCE", help="Instance (omit if only one)")
     fill.add_argument("--uid", metavar="N", help="UID from a prior snapshot")
     fill.add_argument("--text", metavar="T", help="Text to fill")
     fill.add_argument("--target", metavar="SPEC", help="Select the page target (1-based index or id)")
+    _add_endpoint(fill)
 
     wait_idle = sub.add_parser("wait-idle", help="Wait for network idle")
     wait_idle.add_argument("instance", nargs="?", metavar="INSTANCE", help="Instance (omit if only one)")
@@ -229,6 +263,7 @@ def _add_curated_verbs(
         "--idle-ms", type=int, default=curated.DEFAULT_IDLE_MS, metavar="MS",
         help="Quiet window in ms (default: 500)",
     )
+    _add_endpoint(wait_idle)
 
     wait_stable = sub.add_parser("wait-stable", help="Wait for DOM quiescence")
     wait_stable.add_argument("instance", nargs="?", metavar="INSTANCE", help="Instance (omit if only one)")
@@ -240,9 +275,11 @@ def _add_curated_verbs(
         "--stable-ms", type=int, default=curated.DEFAULT_STABLE_MS, metavar="MS",
         help="Quiescence window in ms (default: 300)",
     )
+    _add_endpoint(wait_stable)
 
     detect = sub.add_parser("detect", help="Run interstitial detection against the current page")
     detect.add_argument("instance", nargs="?", metavar="INSTANCE", help="Instance (omit if only one)")
+    _add_endpoint(detect)
     detect_wait = detect.add_mutually_exclusive_group()
     detect_wait.add_argument(
         "--wait",
@@ -260,23 +297,28 @@ def _add_curated_verbs(
     frames_sub = frames.add_subparsers(dest="frames_action", metavar="ACTION")
     fl = frames_sub.add_parser("list", help="List frames")
     fl.add_argument("instance", nargs="?", metavar="INSTANCE", help="Instance (omit if only one)")
+    _add_endpoint(fl)
     fs = frames_sub.add_parser("select", help="Select a frame by URL pattern")
     fs.add_argument("pattern", metavar="PATTERN", help="Frame URL substring/pattern")
     fs.add_argument("instance", nargs="?", metavar="INSTANCE", help="Instance (omit if only one)")
+    _add_endpoint(fs)
     fr = frames_sub.add_parser("reset", help="Clear frame selection")
     fr.add_argument("instance", nargs="?", metavar="INSTANCE", help="Instance (omit if only one)")
+    _add_endpoint(fr)
 
     storage = sub.add_parser("storage", help="Read a frame's storage")
     storage_sub = storage.add_subparsers(dest="storage_action", metavar="ACTION")
     sg = storage_sub.add_parser("get", help="Read the selected frame's storage")
     sg.add_argument("instance", nargs="?", metavar="INSTANCE", help="Instance (omit if only one)")
     sg.add_argument("--key", metavar="K", help="Frame URL pattern to select before reading")
+    _add_endpoint(sg)
 
     screenshot = sub.add_parser("screenshot", help="Capture a page screenshot")
     screenshot.add_argument("instance", nargs="?", metavar="INSTANCE", help="Instance (omit if only one)")
     screenshot.add_argument("--path", metavar="FILE", help="Write the PNG to a file instead of stdout")
     screenshot.add_argument("--target", metavar="SPEC", help="Select the page target (index or id)")
     screenshot.add_argument("--url", metavar="SUBSTRING", help="Select the page target by URL substring")
+    _add_endpoint(screenshot)
 
     screencast = sub.add_parser("screencast", help="Start or stop screencast capture")
     screencast_sub = screencast.add_subparsers(dest="screencast_action", metavar="ACTION")
@@ -284,9 +326,11 @@ def _add_curated_verbs(
     cast_start.add_argument("instance", nargs="?", metavar="INSTANCE", help="Instance (omit if only one)")
     cast_start.add_argument("--format", dest="format", default="jpeg", metavar="FMT", help="jpeg or png (default: jpeg)")
     cast_start.add_argument("--max-frames", type=int, default=600, metavar="N", help="Frame cap (default: 600)")
+    _add_endpoint(cast_start)
     cast_stop = screencast_sub.add_parser("stop", help="Stop capture and write frames")
     cast_stop.add_argument("instance", nargs="?", metavar="INSTANCE", help="Instance (omit if only one)")
     cast_stop.add_argument("--dir", dest="dir", metavar="DIR", help="Directory to write frames into")
+    _add_endpoint(cast_stop)
 
 
 def _print_json(payload: object) -> None:
@@ -382,7 +426,9 @@ def _run(args: argparse.Namespace) -> int:
 
     if args.command == "help":
         instance, query = passthrough.resolve_help_args(args.args, registry_path=registry_path)
-        passthrough.run_help(instance, query, registry_path=registry_path)
+        passthrough.run_help(
+            instance, query, registry_path=registry_path, endpoint=args.endpoint
+        )
         return EXIT_OK
 
     if args.command == "attach":
@@ -395,6 +441,7 @@ def _run(args: argparse.Namespace) -> int:
             target=args.target,
             url=args.url,
             registry_path=registry_path,
+            endpoint=args.endpoint,
         )
         return EXIT_OK
 
@@ -409,6 +456,7 @@ def _run(args: argparse.Namespace) -> int:
             target=args.target,
             url=args.url,
             registry_path=registry_path,
+            endpoint=args.endpoint,
         )
         _print_json(event)
         return EXIT_OK
@@ -422,6 +470,7 @@ def _run(args: argparse.Namespace) -> int:
             url=args.url,
             duration=args.duration,
             registry_path=registry_path,
+            endpoint=args.endpoint,
         )
         _print_json(messages)
         return EXIT_OK
@@ -435,6 +484,7 @@ def _run(args: argparse.Namespace) -> int:
             url=args.url,
             duration=args.duration,
             registry_path=registry_path,
+            endpoint=args.endpoint,
         )
         _print_json(requests)
         return EXIT_OK
@@ -474,7 +524,10 @@ def _run_curated(args: argparse.Namespace, registry_path: str | None) -> int:
     if args.command == "snapshot":
         _print_json(
             curated.snapshot(
-                instance=args.instance, target=args.target, registry_path=registry_path
+                instance=args.instance,
+                target=args.target,
+                registry_path=registry_path,
+                endpoint=args.endpoint,
             )
         )
         return EXIT_OK
@@ -488,6 +541,7 @@ def _run_curated(args: argparse.Namespace, registry_path: str | None) -> int:
                 uid=args.uid,
                 target=args.target,
                 registry_path=registry_path,
+                endpoint=args.endpoint,
             )
         )
         return EXIT_OK
@@ -504,6 +558,7 @@ def _run_curated(args: argparse.Namespace, registry_path: str | None) -> int:
                 text=args.text,
                 target=args.target,
                 registry_path=registry_path,
+                endpoint=args.endpoint,
             )
         )
         return EXIT_OK
@@ -515,6 +570,7 @@ def _run_curated(args: argparse.Namespace, registry_path: str | None) -> int:
                 timeout_ms=args.timeout_ms,
                 idle_ms=args.idle_ms,
                 registry_path=registry_path,
+                endpoint=args.endpoint,
             )
         )
         return EXIT_OK
@@ -526,6 +582,7 @@ def _run_curated(args: argparse.Namespace, registry_path: str | None) -> int:
                 timeout_ms=args.timeout_ms,
                 stable_ms=args.stable_ms,
                 registry_path=registry_path,
+                endpoint=args.endpoint,
             )
         )
         return EXIT_OK
@@ -536,6 +593,7 @@ def _run_curated(args: argparse.Namespace, registry_path: str | None) -> int:
             curated.detect(
                 instance=args.instance,
                 registry_path=registry_path,
+                endpoint=args.endpoint,
                 wait_seconds=wait_seconds,
             )
         )
@@ -549,7 +607,12 @@ def _run_curated(args: argparse.Namespace, registry_path: str | None) -> int:
         if action != "get":
             raise PassthroughUsageError("storage takes one sub-action: get")
         _print_json(
-            curated.storage_get(instance=args.instance, key=args.key, registry_path=registry_path)
+            curated.storage_get(
+                instance=args.instance,
+                key=args.key,
+                registry_path=registry_path,
+                endpoint=args.endpoint,
+            )
         )
         return EXIT_OK
 
@@ -561,6 +624,7 @@ def _run_curated(args: argparse.Namespace, registry_path: str | None) -> int:
                 target=args.target,
                 url=args.url,
                 registry_path=registry_path,
+                endpoint=args.endpoint,
             )
         )
         return EXIT_OK
@@ -575,17 +639,32 @@ def _run_frames(args: argparse.Namespace, registry_path: str | None) -> int:
     """Dispatch ``frames list|select|reset``."""
     action = getattr(args, "frames_action", None)
     if action == "list":
-        _print_json(curated.frames_list(instance=args.instance, registry_path=registry_path))
+        _print_json(
+            curated.frames_list(
+                instance=args.instance,
+                registry_path=registry_path,
+                endpoint=args.endpoint,
+            )
+        )
         return EXIT_OK
     if action == "select":
         _print_json(
             curated.frames_select(
-                instance=args.instance, pattern=args.pattern, registry_path=registry_path
+                instance=args.instance,
+                pattern=args.pattern,
+                registry_path=registry_path,
+                endpoint=args.endpoint,
             )
         )
         return EXIT_OK
     if action == "reset":
-        _print_json(curated.frames_reset(instance=args.instance, registry_path=registry_path))
+        _print_json(
+            curated.frames_reset(
+                instance=args.instance,
+                registry_path=registry_path,
+                endpoint=args.endpoint,
+            )
+        )
         return EXIT_OK
     raise PassthroughUsageError("frames takes one sub-action: list, select, or reset")
 
@@ -600,6 +679,7 @@ def _run_screencast(args: argparse.Namespace, registry_path: str | None) -> int:
                 fmt=args.format,
                 max_frames=args.max_frames,
                 registry_path=registry_path,
+                endpoint=args.endpoint,
             )
         )
         return EXIT_OK
@@ -608,7 +688,10 @@ def _run_screencast(args: argparse.Namespace, registry_path: str | None) -> int:
             raise PassthroughUsageError("screencast stop requires --dir DIR")
         _print_json(
             curated.screencast_stop(
-                instance=args.instance, out_dir=args.dir, registry_path=registry_path
+                instance=args.instance,
+                out_dir=args.dir,
+                registry_path=registry_path,
+                endpoint=args.endpoint,
             )
         )
         return EXIT_OK
@@ -623,7 +706,7 @@ def _run_passthrough(argv: list[str], registry_path: str | None) -> int:
     Raises ``LifecycleError``/``PassthroughUsageError``; the caller maps
     those to exit codes 1/2.
     """
-    remaining, target, url = passthrough.extract_target_flags(argv)
+    remaining, target, url, endpoint = passthrough.extract_target_flags(argv)
     instance, method, params_json = passthrough.resolve_passthrough_args(
         remaining, registry_path=registry_path
     )
@@ -634,28 +717,74 @@ def _run_passthrough(argv: list[str], registry_path: str | None) -> int:
         target=target,
         url=url,
         registry_path=registry_path,
+        endpoint=endpoint,
     )
     _print_json(result)
     return EXIT_OK
+
+
+def _refuse_endpoint_misuse(argv: list[str]) -> str | None:
+    """Reject ``--endpoint`` where it cannot mean anything, or return None.
+
+    Two cases argparse would otherwise report as a bare "unrecognized
+    arguments", which says nothing about why:
+
+    - A registry verb (:data:`REGISTRY_VERBS`). ``status`` reports the
+      registry, and an external browser is not in it; ``stop`` and ``cleanup``
+      act on registry entries, which is exactly what the external path does not
+      create.
+    - ``--profile``. A profile is a launch-time identity, and driving an
+      external browser launches nothing.
+    """
+    probe, endpoint = passthrough.strip_endpoint_flag(argv)
+    if endpoint is None:
+        return None
+    if "--profile" in probe:
+        return (
+            "--endpoint and --profile cannot be combined. A profile is a "
+            "launch-time identity and --endpoint launches nothing; the "
+            "external browser already has whatever profile it was started "
+            "with. Launch a profile with: bt launch --profile NAME"
+        )
+    verb = next((token for token in probe if not token.startswith("-")), None)
+    if verb in REGISTRY_VERBS:
+        return (
+            f"{verb} does not take --endpoint. It reads or writes the registry, "
+            "and an external browser has no registry entry -- that absence is "
+            "what keeps stop and cleanup away from the browser's real profile "
+            "directory. Drive the browser with a verb that acts on a page, for "
+            "example: bt snapshot --endpoint URL"
+        )
+    return None
 
 
 def main(argv: list[str] | None = None) -> int:
     """Entry point for both the ``browser-tools`` and ``bt`` console scripts."""
     raw_argv = sys.argv[1:] if argv is None else argv
 
+    refusal = _refuse_endpoint_misuse(raw_argv)
+    if refusal is not None:
+        print(f"error: {refusal}", file=sys.stderr)
+        return EXIT_USAGE
+
+    # The head test runs on an argv with --endpoint removed, so
+    # `bt --endpoint URL Page.navigate '{...}'` reads the same as the flag at
+    # the end. _run_passthrough still gets the full argv and pulls the flag
+    # itself, because the raw-protocol line never reaches argparse.
+    probe = passthrough.strip_endpoint_flag(raw_argv)[0]
     if (
-        raw_argv
-        and raw_argv[0] not in _KNOWN_VERBS
-        and raw_argv[0] not in ("-h", "--help")
+        probe
+        and probe[0] not in _KNOWN_VERBS
+        and probe[0] not in ("-h", "--help")
     ):
         registry_path = lifecycle.registry_path_from_env()
-        if passthrough.is_passthrough_head(raw_argv[0], registry_path=registry_path):
+        if passthrough.is_passthrough_head(probe[0], registry_path=registry_path):
             try:
                 return _run_passthrough(raw_argv, registry_path=registry_path)
             except LifecycleError as exc:
                 print(f"error: {exc}", file=sys.stderr)
                 return EXIT_OPERATIONAL
-            except PassthroughUsageError as exc:
+            except USAGE_ERRORS as exc:
                 print(f"error: {exc}", file=sys.stderr)
                 return EXIT_USAGE
         # Neither a known instance nor Domain.method-shaped: fall through to
@@ -673,7 +802,7 @@ def main(argv: list[str] | None = None) -> int:
     except LifecycleError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_OPERATIONAL
-    except PassthroughUsageError as exc:
+    except USAGE_ERRORS as exc:
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_USAGE
 

@@ -44,7 +44,6 @@ if TYPE_CHECKING:
     from .core.cdp_client import CDPClient
 
 from . import lifecycle
-from .core import registry as core_registry
 from .core.errors import CDPError
 from .events import _target_slot  # pyright: ignore[reportPrivateUsage]
 from .one_shot import cli_cdp_errors, one_shot_page_session
@@ -125,6 +124,7 @@ def _run_collection(
     target: str | None,
     url: str | None,
     registry_path: str | None,
+    endpoint: str | None = None,
 ) -> list[dict[str, Any]]:
     """Shared resolve-instance-and-collect path for both list verbs.
 
@@ -132,15 +132,14 @@ def _run_collection(
     ... implemented as thin wrappers over a short attach session") and
     delegates to ``collect_on_session`` over it.
     """
-    if instance is None:
-        instance = lifecycle.resolve_single_instance(registry_path=registry_path)
-
-    info = core_registry.lookup(instance_name=instance, registry_path=registry_path)
+    port = lifecycle.resolve_cdp_port(instance, registry_path, endpoint)
 
     spec, target_by = _target_slot(target, url)
 
     async def _collect() -> list[dict[str, Any]]:
-        async with one_shot_page_session(info.port, spec, target_by) as (cdp, session_id):
+        async with one_shot_page_session(
+            port, spec, target_by, external=endpoint is not None
+        ) as (cdp, session_id):
             return await collect_on_session(cdp, session_id, events, duration)
 
     return asyncio.run(_collect())
@@ -186,6 +185,7 @@ def console_list(
     url: str | None = None,
     duration: float = DEFAULT_LIST_WINDOW_SECONDS,
     registry_path: str | None = None,
+    endpoint: str | None = None,
 ) -> list[dict[str, Any]]:
     """Collect console messages over a short attach window and render them.
 
@@ -200,6 +200,7 @@ def console_list(
         target=target,
         url=url,
         registry_path=registry_path,
+        endpoint=endpoint,
     )
     return [_render_console_entry(item) for item in raw]
 
@@ -262,6 +263,7 @@ def network_list(
     url: str | None = None,
     duration: float = DEFAULT_LIST_WINDOW_SECONDS,
     registry_path: str | None = None,
+    endpoint: str | None = None,
 ) -> list[dict[str, Any]]:
     """Collect network request/response events over a short attach window.
 
@@ -276,5 +278,6 @@ def network_list(
         target=target,
         url=url,
         registry_path=registry_path,
+        endpoint=endpoint,
     )
     return _render_network_entries(raw)

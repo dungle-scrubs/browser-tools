@@ -55,6 +55,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from . import endpoint as endpoint_module
 from .core import instance_status as core_status
 from .core import launcher as core_launcher
 from .core import registry as core_registry
@@ -406,6 +407,36 @@ def resolve_single_instance(registry_path: str | None = None) -> str:
     raise LifecycleError(
         f"Multiple instances are running; name one explicitly. Available: {listing}"
     )
+
+
+def resolve_cdp_port(
+    instance: str | None,
+    registry_path: str | None = None,
+    endpoint: str | None = None,
+) -> int:
+    """Resolve the CDP port every browser-driving verb sends to.
+
+    One resolver, two sources. With ``endpoint`` set the port comes from that
+    URL and **the registry is never read or written**: an external browser has
+    no registry entry, and that absence is what keeps ``stop`` and ``cleanup``
+    away from the user's real profile directory (see ``endpoint``). Without it,
+    ``instance`` resolves through the registry exactly as before, omittable
+    when exactly one instance is registered.
+
+    Raises:
+        endpoint.EndpointUsageError: ``endpoint`` is malformed or not loopback
+            (CLI exit 2).
+        LifecycleError: The named instance is not registered (CLI exit 1).
+    """
+    if endpoint is not None:
+        return endpoint_module.resolve_endpoint_port(endpoint)
+    if instance is None:
+        instance = resolve_single_instance(registry_path=registry_path)
+    try:
+        info = core_registry.lookup(instance_name=instance, registry_path=registry_path)
+    except InstanceNotFoundError as exc:
+        raise LifecycleError(str(exc)) from exc
+    return info.port
 
 
 def looks_like_domain_method(token: str) -> bool:
@@ -1125,6 +1156,39 @@ RAW PROTOCOL
       that browser. Without one, print static usage. A bare leading token is
       resolved as an instance name if the registry knows it, else as a
       Domain.method.
+
+EXTERNAL BROWSERS
+
+  --endpoint URL
+      Drive a browser this tool did not launch: one the person already has
+      open and logged in. It goes on the browser-driving verbs, per
+      invocation, and nothing is written to the registry.
+
+        bt snapshot --endpoint http://127.0.0.1:9222
+        bt Page.navigate '{"url": "https://..."}' --endpoint http://127.0.0.1:9222
+
+      Start the browser yourself with --remote-debugging-port=PORT, then pass
+      that port. There is no instance name, so every invocation carries the
+      flag, and status does not list the browser -- status reports the
+      registry, and an external browser has no entry in it. That absence is
+      deliberate: stop and cleanup act on registry entries, and an external
+      browser's user-data-dir is the person's real Chrome profile directory.
+
+      launch, status, stop, cleanup, guide and profile reject --endpoint
+      (exit 2), as does --endpoint beside --profile: a profile is a
+      launch-time identity and --endpoint launches nothing.
+
+      Loopback only. 127.0.0.1 and ::1 are accepted and nothing else, not
+      even localhost. A CDP endpoint is unauthenticated full control of a
+      logged-in browser, so a remote one is a takeover channel. Reach a
+      browser on another machine by forwarding it:
+
+        ssh -L 9222:127.0.0.1:9222 <host>
+
+      Browser.close and Browser.crash are refused over --endpoint (exit 2):
+      they would end every window and tab the person had open. Everything
+      else passes, Target.closeTarget for a single tab included. The refusals
+      under NEVER TAKE THE SCREEN apply unchanged.
 
 OUTPUT AND EXIT CODES
 

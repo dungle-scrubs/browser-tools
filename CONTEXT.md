@@ -22,6 +22,12 @@ glossary rather than left to name code that does not exist.
   never removes a profile directory, and `cleanup` checks the resolved
   profile root as a path rather than trusting the registry's `profile`
   field.
+- **External Endpoint** - a browser this tool did not launch, driven per
+  invocation with `--endpoint URL` and absent from the registry. Loopback
+  only. The absence of a registry entry is the safety property: an external
+  browser's user-data-dir is the person's real profile directory, and the
+  registry is what `stop` and `cleanup` act on. `Browser.close` and
+  `Browser.crash` are refused over an endpoint; everything else passes.
 - **Interstitial** - an anti-bot challenge page (Cloudflare, DataDome,
   Akamai, PerimeterX, Imperva, AWS WAF). Detected by multi-signal
   heuristics after navigation; some types auto-retry.
