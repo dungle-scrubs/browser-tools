@@ -5,14 +5,14 @@ type: refactor
 status: Accepted
 author: Kevin Frilot
 date: 2026-08-21
-version: 3
+version: 4
 ---
 
 # RFC-01: Merge chrome-agent core into browser-tools
 
 ## Abstract
 
-browser-tools and chrome-agent solve overlapping problems with competing lifecycle layers. This RFC specifies a directional merge: chrome-agent's core (instance registry, liveness model, raw CDP passthrough, event attach) becomes the foundation, and browser-tools' curated toolset, profiles, interstitial detection, Camoufox routing, and profiling are rebuilt on top of it as ordinary CDP consumers. The Node dependency on chrome-devtools-mcp is removed, the always-on MCP daemon is demoted to an optional front, and the tool-proxy integration is retired in favor of a CLI-first surface taught by an agent skill. Every design decision in this RFC was settled in the reviewed and approved merge plan; this document renders those decisions as a normative specification. Version 2 answered review `draft-2026-08-21`; version 3 records the resolution of all five open questions (decided by the author, 2026-08-21) and moves the RFC to Accepted.
+browser-tools and chrome-agent solve overlapping problems with competing lifecycle layers. This RFC specifies a directional merge: chrome-agent's core (instance registry, liveness model, raw CDP passthrough, event attach) becomes the foundation, and browser-tools' curated toolset, profiles, interstitial detection, Camoufox routing, and profiling are rebuilt on top of it as ordinary CDP consumers. The Node dependency on chrome-devtools-mcp is removed, the always-on MCP daemon is demoted to an optional front, and the tool-proxy integration is retired in favor of a CLI-first surface taught by an agent skill. Every design decision in this RFC was settled in the reviewed and approved merge plan; this document renders those decisions as a normative specification. Version 2 answered review `draft-2026-08-21`; version 3 records the resolution of all five open questions (decided by the author, 2026-08-21) and moves the RFC to Accepted. Version 4 specifies the focus guard, the `window-border` verb and the settings file, and brings the verb surface back in line with the shipped CLI.
 
 ## Introduction
 
@@ -51,7 +51,7 @@ The key words MUST, MUST NOT, REQUIRED, SHALL, SHALL NOT, SHOULD, SHOULD NOT, RE
 - **MCP surface**: every tool a connected MCP client can call today: the tools listed or default-forwarded in `tool_registry.py`, plus the lifecycle and session tools routed in the session layer (`use_browser_session`, `attach_browser`, `close_browser`, `launch_camoufox` and peers; see `automation_backend.py:16-18` for the routing split).
 - **MCP front**: an optional MCP server exposing the MCP surface over the merged dispatch.
 - **Engine**: the browser implementation behind `launch`: Chrome/Chromium (default) or Camoufox (Firefox).
-- **Window marking**: the visual border and badge the supervisor injects into windows it launched, so a human can tell agent-controlled windows from their own (chrome-agent `supervisor.py` overlay; opt out with `--no-window-border`).
+- **Window marking**: what the supervisor injects into windows it launched so a human can tell agent-controlled windows from their own: a tab-title prefix that always runs, plus a border and badge that follow a persistent setting. Opt out per launch with `--no-window-border`. Specified in Window marking.
 - **Parity suite**: the test suite that runs the same pages through the native snapshot engine and the legacy Node engine and compares results under the operator defined in Testing Strategy.
 
 ## Current State
@@ -115,6 +115,7 @@ status [INSTANCE]
 stop [INSTANCE] [--target SPEC]
 cleanup
 guide
+window-border [on|off]        # no argument prints the current setting
 
 # raw protocol
 INSTANCE Domain.method '{...json params...}' [--target SPEC]   # INSTANCE omittable per the rule above
@@ -125,8 +126,10 @@ attach [INSTANCE] +Domain.event [+Domain.event ...] [--target SPEC] [--url SUBST
 wait [INSTANCE] --event Domain.event [--match SUBSTRING] [--timeout SECONDS]
 
 # curated tools (leading [INSTANCE] as above)
-snapshot | click --uid N | fill --uid N --text T
-wait-idle | wait-stable | detect
+snapshot [--target SPEC]
+click --uid N [--target SPEC] | fill --uid N --text T [--target SPEC]
+wait-idle | wait-stable
+detect [--wait SECONDS | --no-wait]
 console-list | network-list
 frames list | frames select N | frames reset | storage get --key K
 screenshot | screencast start|stop
@@ -134,13 +137,13 @@ screenshot | screencast start|stop
 
 Requirements:
 
-- **Flag provenance.** `--port`, `--fingerprint`, `--headless`, `--no-window-border`, and the `--` args passthrough are the vendored launch flags and survive unchanged. `--profile`, `--channel`, and `--engine` are policy-layer flags: the CLI front resolves them to launcher parameters (user data dir, binary path, engine) before calling the adapted launcher. `--target SPEC` and `--url SUBSTRING` are the vendored target-selection flags and apply to passthrough, `attach`, `wait`, and `stop`.
+- **Flag provenance.** `--port`, `--fingerprint`, `--headless`, `--no-window-border`, and the `--` args passthrough are the vendored launch flags and survive unchanged. `--profile`, `--channel`, and `--engine` are policy-layer flags: the CLI front resolves them to launcher parameters (user data dir, binary path, engine) before calling the adapted launcher. `--target SPEC` and `--url SUBSTRING` are the vendored target-selection flags. `--target SPEC` applies to passthrough, `attach`, `wait`, `stop`, `console-list`, `network-list`, `screenshot`, `snapshot`, `click`, and `fill`; `--url SUBSTRING` to passthrough, `attach`, and `wait`. Wherever it appears, `--target SPEC` MUST mean the same thing: a 1-based index into the page targets sorted by target ID, or a target ID prefix. The sort is normative, so the handler transport and the session transport MUST NOT disagree about which page `--target 1` names.
 - **Instance names.** The merged tool adopts upstream's derivation and collision rules normatively: name derived from the working directory (lowercase, hyphenate, strip to `[a-z0-9.-]`, fallback `chrome`), `-NN` suffix on collision, and a bare token is resolved as an instance name if the registry knows it, else as a `Domain.method`.
 - `help` with a running instance MUST read the protocol schema from that browser, not from a bundled copy. Without a running instance it MUST print static usage. `guide` prints the bundled agent manual.
 - **`wait` design.** `wait` is new code in the core layer (upstream ships the pattern as `scripts/cdp-wait.py`, not a verb). It MUST open an attach session, subscribe to the requested event, and only then begin examining events, so an event that fires between subscription and examination is buffered, not lost. `--match` is a substring test against the event's JSON serialization. `--timeout` defaults to 30 seconds; `--timeout 0` means no deadline. On match: the event JSON on stdout, exit 0. On deadline: a timeout error on stderr, exit 1, no partial output on stdout.
 - `attach` subscriptions MUST be isolated per session: two attached observers MUST NOT see each other's subscription set, and a retiring observer MUST NOT disturb the other's stream.
 - `console-list` and `network-list` are REQUIRED verbs, implemented as thin wrappers over a short attach session. Their output SHOULD remain compatible with today's output; incompatibilities MUST be listed in the changelog.
-- `detect` runs interstitial detection against the current page and reports what it found (the detection browser-tools runs automatically post-navigation and exposes as `inspect_blocked`/`inspect_warn`, surfaced as an explicit verb).
+- `detect` runs interstitial detection against the current page and reports what it found (the detection browser-tools runs automatically post-navigation and exposes as `inspect_blocked`/`inspect_warn`, surfaced as an explicit verb). Its retry budget is the caller's: `--wait SECONDS` bounds the wait for a self-clearing challenge and `--no-wait` reports the current state at once. `detect` MUST separate vendor presence from a challenge: a cookie or script tag proving a site uses a bot-protection vendor is present on every page of that site and MUST NOT by itself make a page an interstitial. Presence is reported alongside, never in place of, the blocked answer.
 - **CLI-to-MCP mapping.** The CLI names and the frozen MCP names are two spellings of one surface. The mapping is normative; the MCP names never change while the freeze holds:
 
 | CLI verb | Frozen MCP tool |
@@ -158,7 +161,7 @@ Requirements:
 ### Instance and profile model
 
 - Instances and profiles are orthogonal. An instance is a running process; a profile is a persistent identity. `launch --profile NAME` binds a profile to a new instance.
-- **Registry schema.** The merged registry entry extends the vendored schema. Vendored fields: `port`, `pid`, `browser_version`, `user_data_dir`, `launched`, `pid_start`. Added by Phase 1: `engine` (string, `"chrome"` or `"camoufox"`) and `profile` (string or null). An entry missing the added fields MUST be read as `engine="chrome"`, `profile=null`, so a registry written by the vendored code stays readable. The Phase 1 gate covers the extended schema.
+- **Registry schema.** The merged registry entry extends the vendored schema. Vendored fields: `port`, `pid`, `browser_version`, `user_data_dir`, `launched`, `pid_start`. Added by Phase 1: `engine` (string, `"chrome"` or `"camoufox"`) and `profile` (string or null). Added for the supervisor: `supervisor_pid` (integer or absent) and `supervisor_pid_start` (string or null). An entry missing any added field MUST be read as `engine="chrome"`, `profile=null`, and no recorded supervisor, so a registry written by the vendored code stays readable. Extended fields are written from the lifecycle layer through the registry's own atomic load/save helpers, because `core/registry.py` is a verbatim vendored module. The Phase 1 gate covers the extended schema.
 - **Liveness is engine-aware.** Chrome instances: process identity plus CDP port attribution (the vendored check, unchanged). Camoufox instances expose no Chrome debugging port; their liveness is process identity plus user-data-dir hold (`pid_holds_user_data_dir`, which the merged tool keeps for this purpose). PID reuse after reboot or namespace changes MUST NOT produce a false "alive" for either engine.
 - **Profile exclusivity.** A profile MUST be held by at most one live instance. `launch --profile NAME` while a live instance holds that profile MUST fail, exit 1, naming the holding instance; it MUST NOT launch a second browser on the same user data dir and MUST NOT steal the profile. Stale singleton locks left by a dead process are cleaned before this check (the existing `clean_stale_singleton_lock` behavior).
 - **Registry corruption is not retirement.** The merged tool adopts upstream's distinction normatively: an unparseable or unreadable registry file reads as status `unknown`; a parseable file that lacks the instance reads as `retired`. On `unknown`, `status` MUST report it as such, `stop` MUST refuse to signal anything, and `cleanup` MUST NOT delete registry entries or session directories - it MAY move the corrupt file aside with a warning. `cleanup` removes an entry only after the entry itself was read and its liveness check failed.
@@ -171,9 +174,37 @@ Requirements:
 - Chrome paths MAY use fingerprint profiles: launch flags only.
 - Camoufox remains the answer when the engine itself must change, behind `launch --engine camoufox`, and requires the `camoufox` extra.
 
+### Focus guard
+
+The tool drives a browser on a machine a person is using. Taking the screen interrupts them, so the merged tool MUST NOT raise a browser window over the user's work, and MUST NOT silently do nothing when it cannot act without doing so.
+
+- **Refused outright.** `Target.activateTarget` and `Page.bringToFront` raise a window by definition. The passthrough MUST refuse both with a usage error (exit 2) naming how to work in the background instead.
+- **Forced to the background.** `Target.createTarget` defaults to foreground in Chrome. The passthrough MUST set `background: true` when the caller omits it, and MUST refuse an explicit `background: false`.
+- **Not refused.** `Browser.setWindowBounds` moves or resizes a window without raising it, and is a legitimate way to place an agent window. It MUST remain available.
+- **Input to a background tab.** Chrome drops input sent to a tab that is not the selected tab of its window, without an error, so a caller that dispatches anyway reports a success that did not happen. Measured: a click into a background tab reached neither the top document nor a cross-origin iframe, while the same click into the selected tab of a window behind other windows landed every time. Any surface that delivers input MUST read `document.visibilityState` first and MUST fail with an error rather than dispatch into a hidden page. This covers the passthrough's `Input.*` delivery methods and the curated `click` and `fill`. An unreadable visibility state is unknown, not hidden, and MUST NOT block the call.
+  - The refusal MUST name the remedy, and the remedy MUST work: open the page in its own window (`Target.createTarget` with `newWindow`) and address it with `--target`, or navigate the current tab. This is why `--target SPEC` is REQUIRED on `snapshot`, `click`, and `fill`; without it the refusal would have no escape.
+  - Reads are not input. `snapshot`, `screenshot`, and the detection verbs MUST keep working against a background tab.
+- **Launch.** A headed launch MUST NOT take focus. Chrome started normally opens a window and becomes the active app, so the browser is started with `--no-startup-window` and no URL argument, and its first window is created over CDP with `newWindow` and `background` set once the DevTools endpoint answers. This applies to every launch path, the CLI front and the optional MCP front alike. Headless is exempt: it has no window.
+
 ### Window marking
 
-Windows launched by the tool carry the supervisor's visual border and badge so a human can tell agent-controlled windows from their own. Marking is on by default and disabled per launch with `--no-window-border`. The merged tool vendors this with the supervisor (adapted module); Phase 4's deliverable is wiring the flag through the merged CLI front and documenting it in the skill.
+Windows launched by the tool carry the supervisor's visual border and badge so a human can tell agent-controlled windows from their own.
+
+- **The tab title prefix always runs.** It is the marking that cannot be turned off, because an unmarked agent window is indistinguishable from the user's own.
+- **The border and badge follow a persistent setting.** They sit on the page's outer edge and its top-left corner, so a person who needs to see the UI underneath turns them off. The `window-border on|off` verb writes that setting, and `window-border` with no argument prints it. Every running supervisor MUST add or remove them on its open tabs within a second of the change, without a relaunch.
+- **`--no-window-border` is per launch** and suppresses marking for that instance only. It does not write the setting.
+- **A fingerprint profile suppresses the border.** The title prefix is page-observable, and bot-defended sites -- exactly where fingerprinting is used -- are where title-diffing detectors live.
+- **The setting is a file.** One JSON object at `$XDG_CONFIG_HOME/browser-tools/settings.json`, falling back to `~/.config/browser-tools/settings.json`. It is the only persistent user setting the tool has; an unreadable or unparseable file MUST read as the default rather than fail a launch.
+
+The merged tool vendors the marker with the supervisor (adapted module).
+
+### Supervisor
+
+One detached supervisor process per headed instance holds a browser-level CDP connection, marks the windows, and retires the instance from the registry when the browser closes. Headless instances get none: there is no window to mark, and their entries are reclaimed by cleanup.
+
+- **It MUST outlive the shell that launched the browser.** The browser is started in its own session; the supervisor MUST be too, or closing the launching terminal ends it while the browser lives on, leaving an instance nothing marks and nothing retires.
+- **It MUST record why it exited.** Its output goes nowhere, so an exit log next to the registry is the only trace that survives it. Every way out is covered: the clean retire, the watchdog stall, an unhandled exception, and a signal. A default-disposition signal kills the process without unwinding, so signals need an installed handler that logs, restores the default disposition, and re-raises. Logging is best-effort and MUST NOT keep a supervisor alive.
+- **Its absence MUST be visible.** `status` reports a per-instance `supervisor` field: `running`, `missing`, or null when none was ever recorded. The PID is recorded when the supervisor is spawned, not by the supervisor itself, so one that started and died reads as `missing` rather than as an instance that never had one. Identity is the `pid`/`pid_start` pair the browser's own liveness uses, so a recycled PID is not mistaken for it.
 
 ### Profiling
 
@@ -263,6 +294,17 @@ None open. All five questions raised in versions 1-2 were decided by the author 
 5. **Registry location: resolved (a).** Keep `/tmp` semantics; a cleared registry after reboot is self-consistent because no browser survives reboot. Persistent state belongs to profiles, not the registry.
 
 ## Changes in this revision
+
+**Version 4** (2026-09-20): the spec caught up with the shipped CLI. Two commits had changed the surface without touching this document (229a536, ce30ad8), and six bug fixes since then changed it further (#69, #31, #32, #62, #63, #65). Nothing here reverses a decision; it records contracts the code already holds and the tests already cite. One line per change:
+
+1. New **Focus guard** section: the refused methods, the forced-background `Target.createTarget`, `Browser.setWindowBounds` explicitly not refused (ce30ad8), the hidden-tab input refusal and its remedy, and the windowless headed launch on every launch path. Nothing in the repo recorded this as a spec; `tests/test_window_marking.py` cites "RFC-01 #48" for behavior the RFC did not describe.
+2. **Window marking** rewritten: the title prefix always runs, the border and badge follow a persistent setting, `window-border on|off` writes it, running supervisors apply it within a second, `--no-window-border` stays per launch, and a fingerprint profile suppresses the border.
+3. The settings file is specified: `$XDG_CONFIG_HOME/browser-tools/settings.json`, with the `~/.config` fallback and read-as-default on corruption.
+4. New **Supervisor** section: it must outlive the launching shell, must record why it exited, and its absence must be visible in `status` (#65).
+5. `window-border [on|off]` added to the normative verb list.
+6. `--target SPEC` added to `snapshot`, `click`, and `fill`, with its meaning pinned (1-based index into page targets sorted by target ID, or a target ID prefix) so the handler and session transports cannot disagree (#62).
+7. `detect` gains `--wait SECONDS` / `--no-wait`, and the presence-vs-challenge distinction is made normative (#69).
+8. Registry schema extended with `supervisor_pid` and `supervisor_pid_start`, and the rule that extended fields are written from the lifecycle layer is stated, since `core/registry.py` is verbatim.
 
 **Version 3** (2026-08-21): the five open questions were answered by the author through the Lucid review of this document, all taking the recorded recommendations; the Open Questions section now records the resolutions, the body cross-references were updated in place (namespace, binary names, extras, registry location, parity corpus), and the status moved Draft -> Accepted.
 
