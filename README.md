@@ -11,8 +11,8 @@ Browser automation, debugging, and anti-detect browsing CLI. Provides:
   browser, with protocol help read live from it
 - **Snapshot-based page automation** — Accessibility-tree snapshots and UID
   interaction (`snapshot`, `click --uid`, `fill --uid`), in Python over CDP
-- **Named browser instances** — Long-lived Chrome with a registry, named
-  profiles, and attach-to-running-browser support
+- **Named browser instances** — Long-lived Chrome with a registry and named
+  profiles that keep a login across restarts
 - **Frame-aware tools** — Iframe/CDP frame tree management, execution context
   resolution, and storage inspection
 - **Interstitial detection** — Multi-signal heuristic detection for Cloudflare,
@@ -84,10 +84,26 @@ dependency: the Node `chrome-devtools-mcp` path was removed in RFC-01.
 
 ## Architecture
 
+Five layers. Each upper layer consumes only the layer below it, and every
+curated tool calls the same CDP `send` path the raw passthrough uses -- so any
+method the installed browser supports works through `bt Domain.method` whether
+or not a verb exists for it.
+
+| Layer | Name | Contents |
+|---|---|---|
+| 4 | Front | CLI verbs (the only surface), `bt guide`, the agent skill that points at it |
+| 3 | Policy | Named profiles and the profile root, fingerprint profiles, engine routing |
+| 2 | Native toolset | Curated tools as plain CDP consumers; profiling; window marking |
+| 1 | Core (vendored) | Registry, liveness, launcher, supervisor, attach, passthrough, live-schema help |
+| 0 | Browser | Chrome/Chromium over CDP; Camoufox for anti-detect paths |
+
 ```
 cli.py                       CLI entry point (argparse, verb dispatch, exit codes)
         |
         +-- lifecycle.py             launch / status / stop / cleanup over the registry
+        |       +-- camoufox_runner.py   Camoufox host process (`launch --engine camoufox`)
+        |       +-- process_utils.py     Chrome process and port utilities
+        |
         +-- passthrough.py           Raw `Domain.method` send + the focus guard
         +-- curated.py               The curated verbs over one short-lived CDP handler
         +-- one_shot.py              Connect, resolve a page target, attach, detach
@@ -111,26 +127,31 @@ cli.py                       CLI entry point (argparse, verb dispatch, exit code
         |       +-- interstitial.py      Challenge detection and the retry policy
         |       +-- screencast.py        Screencast capture state machine
         |       +-- screenshot_utils.py  Blank-frame detection
+        |       +-- tool_registry.py     Single source of truth for CDP tool routing
+        |       +-- mcp_response.py      Response envelope builders
         |
-        +-- persistent_browser.py    Chrome lifecycle for the optional MCP front
-        |       +-- browser_state.py     Persisted state dataclasses
-        |       +-- session_layout.py    Single owner of on-disk paths
-        |       +-- session_store.py     Per-project session config
-        |       +-- profile_catalog.py   Named-profile catalog and live discovery
-        |       +-- live_chrome.py       Resolve the live Chrome behind a profile dir
-        |       +-- process_utils.py     Chrome process and port utilities
-        |
-        +-- mcp_daemon.py            Optional MCP front (dispatch_tool routes by registry flags)
-        |       +-- mcp_broker.py        JSON-RPC-over-stdio request multiplexer
-        |       +-- tool_registry.py     Single source of truth for tool routing flags
-        |       +-- mcp_response.py      Single owner of MCP response envelopes
-        |
-        +-- camoufox_session.py      Camoufox anti-detect wrapper (`launch --engine camoufox`)
         +-- profiler.py              Standalone CPU profiler (`browser-tools-profiler`)
 ```
 
-The CLI is the primary surface. The MCP front is optional and exists for
-harnesses that cannot run a CLI; no CLI verb needs it.
+The CLI is the only surface. The optional MCP front and the persistent-session
+stack behind it were deleted in RFC-01 Phase 5; there is no daemon, no broker,
+and no listening socket.
+
+## Keeping login state across calls
+
+Login state lives in a browser profile directory and survives only while the
+same directory is reused. To keep a session logged in:
+
+- **Use a named profile**: `bt launch --profile <name>`. Named profiles persist
+  across restarts and are unaffected by headed/headless switches, viewport, or
+  which directory you invoke from.
+- A profile is held by at most one live instance. Launching into a profile
+  another instance holds fails naming the holder rather than opening a second
+  browser on the same directory.
+- Without `--profile`, a launch gets a fresh ephemeral directory and starts
+  logged out.
+- **Camoufox** persists login state only when you pass `--profile`; without it,
+  every launch starts logged out.
 
 ## Development
 
@@ -139,50 +160,6 @@ uv sync
 uv run ruff check src/ tests/
 uv run pytest
 ```
-
-### Project Configuration
-
-Place a `.browser-tools.json` in your project root (searched upward from the
-project working directory):
-
-```json
-{
-  "preferredSession": {
-    "mode": "headed-auth",
-    "profile": "dev"
-  }
-}
-```
-
-This auto-selects a persistent headed browser session using the named profile.
-
-The config is read either as a flat object or wrapped in a `preferredSession`
-(or `preferred_session`) key. Recognized fields:
-
-| Field      | Meaning                                                             |
-| ---------- | ------------------------------------------------------------------- |
-| `mode`     | `headless`, `headed-auth` (aliases: `headed`, `auth`, `auth-headed`), or `headless-auth` |
-| `profile`  | Named profile that persists cookies/login across runs               |
-| `endpoint` | Existing Chrome remote-debugging endpoint to attach to (loopback)   |
-| `channel`  | `stable`, `canary` (default), `beta`, or `dev`                      |
-| `viewport` | Initial window size, e.g. `1280x720`                                |
-| `stealth`  | Accepted for MCP-surface compatibility; injects nothing (RFC-01)    |
-
-### Keeping login state across calls
-
-Auth/login state lives in a Chrome profile directory and survives only while
-the same directory is reused. To keep a session logged in:
-
-- **Use a named profile**: `bt launch --profile <name>`, or the config above.
-  Named profiles persist across restarts and are unaffected by
-  headed↔headless switches, viewport, or which directory you invoke from.
-- A profile is held by at most one live instance. Launching into a profile
-  another instance holds fails naming the holder rather than opening a second
-  browser on the same directory.
-- The **default** per-project session is keyed by project and Chrome channel;
-  it is not a stable place to keep a long-lived login.
-- **Camoufox** persists login state only when you pass `--profile`; without it,
-  every launch starts logged out.
 
 ## License
 

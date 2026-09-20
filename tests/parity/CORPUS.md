@@ -8,48 +8,24 @@ The gate compares two engines running the same frozen page corpus under one
 normative operator. This ticket (#38) delivers the corpus and the harness; the
 native engine plugs in during Phase 2 as the candidate.
 
-## 1. Survey of the existing e2e fixtures
+## 1. Why the corpus is authored fresh
 
 RFC-01 resolved the corpus question as "survey the current e2e fixtures first"
-(Open Question 3). The survey of what the current e2e and snapshot tests
-actually exercise:
+(Open Question 3). That survey ran before Phase 2 and found nothing reusable.
 
-- **`tests/test_e2e_camoufox.py`** - the only live-browser e2e suite. It
-  launches a real Camoufox browser and drives `CamoufoxSession.call_tool`. Its
-  pages/fixtures:
-  - `https://example.com` - the single navigation target, used for
-    `navigate`, `screenshot`, `snapshot`, `evaluate`, and `get_cookies`. A live
-    public site, not a local fixture.
-  - `snapshot` is asserted only shallowly: the returned tree is non-empty and
-    contains the string `"Example Domain"`. No structural assertion, no UID
-    interaction, no iframe or shadow DOM coverage.
-- **`tests/test_e2e_backend_seam.py`** - exercises the `AutomationBackend`
-  routing seam, not real pages.
-- **`ax_find` / `ax_node`** (`src/browser_tools/cdp_handler.py`) - the
-  Accessibility-domain read path that Phase 2 rebuilds on. In tests they are
-  driven only against **synthetic CDP responses** (`tests/test_new_tools.py`,
-  `tests/test_dispatch.py`), never against real pages. `ax_find` calls
-  `Accessibility.queryAXTree` and formats `(role, name, backendDOMNodeId)`;
-  `ax_node` resolves a selector to a backend DOM node and reads its partial AX
-  tree. This is the (role, name, value) + backend-node material the parity
-  operator compares.
-- **`snapshot` / `take_snapshot`** - the Node-engine snapshot the UID tools
-  depend on. `tool_registry.py` marks `click`/`hover`/`fill`/`fill_form`/
-  `drag`/`press_key`/`upload_file` as `interaction=True`, meaning the
-  controller takes a pre-snapshot so a UID resolves in the current session.
-  Tests drive `take_snapshot` only with **canned responses**
-  (`tests/test_persistent_browser.py`, `tests/test_page_selection.py`,
-  `tests/test_mcp_daemon.py`); none run a real page.
-- **`conftest.py`** - the one concrete snapshot sample in the repo is the
-  mocked `aria_snapshot` return `- heading "Example Domain" [level=1]`
-  (Playwright ARIA-snapshot YAML). This fixed the parser's target format.
+The whole of the repo's live-browser coverage was a single public page,
+`https://example.com`, asserted shallowly: the snapshot tree is non-empty and
+contains the string `"Example Domain"`. No structural assertion, no UID
+interaction, no iframe, no shadow DOM. Everything else -- the Accessibility
+read path behind `ax_find` / `ax_node`, and the snapshot the UID tools depend on
+-- was driven against synthetic CDP responses and canned payloads, never a real
+page. The one concrete snapshot sample in the tree was a mocked Playwright
+ARIA-snapshot line, which is what fixed the parser's target format.
 
-**Finding.** The existing e2e coverage is a single live public page
-(`example.com`) with a shallow snapshot assertion, and no structural cases at
-all. There is nothing local, reproducible, or structural to reuse directly, and
-nothing covering iframe or shadow DOM. So the corpus is authored fresh here as
-local static fixtures, which also removes the dependency on a live public site
-that the RFC's "reproducible offline" gate needs.
+**Finding.** Nothing local, reproducible, or structural to reuse, and nothing
+covering iframe or shadow DOM. So the corpus is authored fresh here as local
+static fixtures, which also removes the dependency on a live public site that
+the RFC's "reproducible offline" gate needs.
 
 ## 2. The frozen corpus
 
@@ -80,8 +56,11 @@ names as mandatory; both are present.
 - **`parity_engines.py`** - the `ParityEngine` protocol, the documented
   Playwright ARIA-snapshot parser (`parse_aria_snapshot`), and
   `AriaSnapshotEngine`, a working engine that drives any `call_tool` session
-  (this repo's `CamoufoxSession`). `capture_corpus` runs an engine over the
-  corpus.
+  (`camoufox_session.py`, beside these tests). `capture_corpus` runs an engine
+  over the corpus.
+- **`node_broker.py`** - the JSON-RPC-over-stdio multiplexer `NodeMcpSession`
+  drives the real `chrome-devtools-mcp` subprocess with. It lives here, not in
+  the package: it is a test oracle, and the product has no MCP surface.
 - **`run_baseline.py`** - the runnable entry point that launches a real browser
   and writes a baseline JSON (see below).
 
@@ -109,40 +88,51 @@ Exactly as RFC-01 fixes it:
 all three agree; each disagreement is a `ParityDiff` tagged with its dimension.
 `corpus_matches` is the gate predicate over a whole corpus.
 
-### How Phase 2 plugs in
+### The engines
 
-Phase 2 adds a `NativeSnapshotEngine` (and, for the reference baseline, a
-`NodeEngine` over chrome-devtools-mcp) implementing the `ParityEngine`
-protocol, captures the corpus through each, and calls `compare_corpus`. The
-gate passes when `corpus_matches` holds for two consecutive flake-free runs.
+Three implement `ParityEngine`:
 
-## 4. Baseline status (rung honesty)
+- `NativeSnapshotEngine` / `NativeInteractionEngine` - the candidate, this
+  repo's own CDP-native read and interaction path.
+- `NodeEngine` over a live `chrome-devtools-mcp` subprocess - the authoritative
+  baseline the Phase 2 gate compares against.
+- `AriaSnapshotEngine` over Camoufox - the earlier baseline rung, still compared
+  against native on their shared dimensions.
+
+The gate passes when `corpus_covers` holds for two consecutive flake-free runs.
+
+## 4. What runs, and what it proves
 
 The harness and operator are real, unit-tested code
 (`test_parity_operator.py`, `test_parity_engine.py`, `test_parity_corpus.py`):
 order-insensitivity holds, and a role/name/value, UID-target, or text
 difference is each caught. These run with no browser.
 
-`run_baseline.py` and `test_parity_baseline.py` (`@pytest.mark.parity`) capture
-against a **real** browser and **skip cleanly** when none is available, so the
-default suite stays green offline.
+The live rungs are marked `@pytest.mark.parity` and **skip cleanly** when their
+browser is unavailable, so the default suite stays green offline. Only a launch
+may skip: a failure inside a capture fails the gate rather than reporting as an
+unavailable engine. That distinction was not always made, and an upstream
+argument change in `chrome-devtools-mcp` once turned the authoritative gate off
+while the suite stayed green (#91).
 
-In this environment Camoufox was installed and launched, so a real baseline was
-captured from the live `AriaSnapshotEngine` path (real browser, real ARIA
-snapshot, real UID resolution, real settle of the dynamic page). What was **not**
-captured is the RFC's specific chrome-devtools-mcp **Node-engine** baseline:
-that engine is a separate Node subprocess and is not wired here. It is Phase 2's
-job to add that engine behind the same `ParityEngine` protocol and swap it into
-`run_baseline.py`. So: the harness is proven end-to-end against a live browser;
-the Node-vs-native comparison the gate ultimately runs is left as the pluggable
-engine slot.
+| Rung | File | Needs |
+|---|---|---|
+| ARIA baseline | `test_parity_baseline.py` | Camoufox (`camoufox fetch`) |
+| Native | `test_parity_native.py` | Playwright Chromium |
+| Native interaction | `test_parity_native_interaction.py` | Playwright Chromium |
+| **The gate: native vs Node** | `test_parity_gate.py` | Playwright Chromium **and** `npx` |
 
-Observation from the live capture worth carrying into Phase 2: `iframe.html`'s
-child-frame content does not appear in the `AriaSnapshotEngine` node set (the
-Playwright `aria_snapshot()` of `body` does not descend into the child frame's
-document). Whether an engine reaches across the frame boundary is exactly the
-kind of difference the parity operator exists to surface - the corpus keeps the
-iframe case so the gate can catch it.
+The gate requires native to **cover** the Node baseline: contain every
+`(role, name, value)` node it reports, resolve every UID identically, and
+extract identical text, while allowing native's additional nodes. The native
+engine reads the raw accessibility tree and legitimately reports more detail
+than the Node snapshot.
+
+One observation from the ARIA rung, kept because the corpus exists to surface
+exactly this: `iframe.html`'s child-frame content does not appear in the
+`AriaSnapshotEngine` node set, because Playwright's `aria_snapshot()` of `body`
+does not descend into the child frame's document. Native does cross that
+boundary, which is what `test_native_covers_iframe_child_frame` pins.
 
 ## Running
 
