@@ -645,6 +645,16 @@ class CDPHandler:
         return self._rt.screencast
 
     @property
+    def screencast_frame_count(self) -> int:
+        """How many screencast frames are buffered right now.
+
+        Public because a bounded ``bt screencast`` capture polls it to end as
+        soon as the frame cap is reached (#99). The recorder itself stays
+        private: nothing outside needs to drive it.
+        """
+        return self._rt.screencast.frame_count
+
+    @property
     def _loop(self) -> asyncio.AbstractEventLoop | None:
         return self._rt.loop
 

@@ -33,6 +33,11 @@ glossary rather than left to name code that does not exist.
 - **Interstitial** - an anti-bot challenge page (Cloudflare, DataDome,
   Akamai, PerimeterX, Imperva, AWS WAF). Detected by multi-signal
   heuristics after navigation; some types auto-retry.
+- **Bounded Capture** - the whole of `screencast`: one invocation starts the
+  capture, buffers frames, writes them to `--dir`, and exits. It ends at the
+  `--duration` or the `--max-frames` cap, whichever comes first. The frame
+  buffer is process-local, so nothing outlives the invocation and no verb pair
+  can span two processes.
 - **UID** - the handle a snapshot gives a node, used by `click` and `fill`
   to address it. Valid for the lifetime of the document that produced it.
 

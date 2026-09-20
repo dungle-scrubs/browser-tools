@@ -188,8 +188,7 @@ ENDPOINT_VERBS = [
     ["frames", "reset"],
     ["storage", "get"],
     ["screenshot"],
-    ["screencast", "start"],
-    ["screencast", "stop", "--dir", "/tmp/x"],
+    ["screencast", "--dir", "/tmp/x"],
 ]
 
 

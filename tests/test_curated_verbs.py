@@ -79,6 +79,9 @@ class FakeHandler:
     tool_responses: ClassVar[dict[str, dict]] = {}
     native_responses: ClassVar[dict[str, dict]] = {}
     detection: ClassVar[dict | None] = None
+    #: What ``screencast_frame_count`` reports; the capture loop ends at once
+    #: when it is already at or above the cap.
+    frames: ClassVar[int] = 0
     instances: ClassVar[list[FakeHandler]] = []
 
     def __init__(self, browser_url, mode="full", stealth=False, target_spec=None):
@@ -90,11 +93,17 @@ class FakeHandler:
         self.detection_runs = 0
         self.detection_budgets: list[int | None] = []
         self.stopped = False
+        #: Frames the bounded ``screencast`` capture will see buffered (#99).
+        self.frame_count = FakeHandler.frames
         FakeHandler.instances.append(self)
 
     @property
     def available(self) -> bool:
         return True
+
+    @property
+    def screencast_frame_count(self) -> int:
+        return self.frame_count
 
     def run(self) -> None:  # runs on a background thread; returns immediately
         return None
@@ -126,6 +135,7 @@ def fake_handler(monkeypatch):
     FakeHandler.tool_responses = {}
     FakeHandler.native_responses = {}
     FakeHandler.detection = None
+    FakeHandler.frames = 0
     monkeypatch.setattr(curated, "CDPHandler", FakeHandler)
     return FakeHandler
 
@@ -293,17 +303,61 @@ class TestHandlerToolDispatch:
         with pytest.raises(LifecycleError):
             curated.storage_get(instance=None, key=None, registry_path=registry_path)
 
-    def test_screencast_start_passes_opts(self, registry_path, fake_handler):
+    def test_screencast_starts_waits_and_stops_over_one_handler(
+        self, registry_path, fake_handler
+    ):
+        """One invocation, one handler: the frame buffer is process-local."""
         _seed(registry_path, {"only-01": _entry()})
-        curated.screencast_start(instance=None, fmt="png", max_frames=100, registry_path=registry_path)
+        FakeHandler.frames = 3
+        out = curated.screencast(
+            instance=None,
+            out_dir="/tmp/cast",
+            duration=5.0,
+            fmt="png",
+            max_frames=3,
+            registry_path=registry_path,
+        )
+        assert len(fake_handler.instances) == 1
         assert fake_handler.instances[0].tool_calls == [
-            ("screencast_start", {"format": "png", "max_frames": 100})
+            ("screencast_start", {"format": "png", "max_frames": 3}),
+            ("screencast_stop", {"dir": "/tmp/cast"}),
         ]
+        assert out["frames"] == 3
+        assert out["dir"] == "/tmp/cast"
 
-    def test_screencast_stop_passes_dir(self, registry_path, fake_handler):
+    def test_screencast_stops_early_when_the_frame_cap_is_reached(
+        self, registry_path, fake_handler
+    ):
+        """A full buffer pauses the stream, so waiting out --duration is dead time."""
+        import time
+
         _seed(registry_path, {"only-01": _entry()})
-        curated.screencast_stop(instance=None, out_dir="/tmp/cast", registry_path=registry_path)
-        assert fake_handler.instances[0].tool_calls == [("screencast_stop", {"dir": "/tmp/cast"})]
+        FakeHandler.frames = 10
+        started = time.monotonic()
+        curated.screencast(
+            instance=None, out_dir="/tmp/cast", duration=30.0, max_frames=10,
+            registry_path=registry_path,
+        )
+        assert time.monotonic() - started < 5.0
+
+    @pytest.mark.parametrize(
+        ("kwargs", "message"),
+        [
+            ({"duration": 0}, "--duration"),
+            ({"duration": -1}, "--duration"),
+            ({"fmt": "gif"}, "--format"),
+        ],
+    )
+    def test_screencast_bounds_are_validated_before_the_browser(
+        self, kwargs, message, registry_path, fake_handler
+    ):
+        _seed(registry_path, {"only-01": _entry()})
+        with pytest.raises(UsageError) as exc:
+            curated.screencast(
+                instance=None, out_dir="/tmp/cast", registry_path=registry_path, **kwargs
+            )
+        assert message in str(exc.value)
+        assert fake_handler.instances == []
 
 
 # ---------------------------------------------------------------------------
@@ -507,14 +561,14 @@ class TestCliFront:
         rc = cli.main(["storage"])
         assert rc == cli.EXIT_USAGE
 
-    def test_screencast_stop_requires_dir(self, capsys, fake_handler):
+    def test_screencast_requires_dir(self, capsys, fake_handler):
         _seed(self._registry_path, {"only-01": _entry()})
-        rc = cli.main(["screencast", "stop"])
+        rc = cli.main(["screencast"])
         assert rc == cli.EXIT_USAGE
 
-    def test_screencast_start_via_cli(self, capsys, fake_handler):
+    def test_screencast_via_cli(self, capsys, fake_handler):
         _seed(self._registry_path, {"only-01": _entry()})
-        rc = cli.main(["screencast", "start", "--format", "png"])
+        rc = cli.main(["screencast", "--dir", "/tmp/cast", "--duration", "0.05", "--format", "png"])
         assert rc == cli.EXIT_OK
         assert fake_handler.instances[0].tool_calls[0][0] == "screencast_start"
         assert fake_handler.instances[0].tool_calls[0][1]["format"] == "png"

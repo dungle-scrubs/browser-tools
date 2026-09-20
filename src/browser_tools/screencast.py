@@ -70,6 +70,16 @@ class ScreencastRecorder:
         return self._active
 
     @property
+    def frame_count(self) -> int:
+        """How many frames are buffered right now.
+
+        A bounded capture (``bt screencast --dir DIR``) polls this so it can
+        stop as soon as ``--max-frames`` is reached instead of waiting out the
+        whole ``--duration`` against a stream CDP flow control has paused.
+        """
+        return len(self._frames)
+
+    @property
     def pending_acks(self) -> int:
         """How many frame acks are in flight.
 

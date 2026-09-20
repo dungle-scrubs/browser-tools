@@ -517,6 +517,16 @@ def profile_delete(name: str, registry_path: str | None = None) -> dict[str, Any
     return {"deleted": name, "path": str(target)}
 
 
+def instance_is_registered(name: str, registry_path: str | None = None) -> bool:
+    """Whether the registry knows ``name`` as an instance.
+
+    The one test behind the bare-token rule (RFC-01 "Instance names"): a bare
+    leading token is an instance name when the registry knows it, else it is
+    the verb or a ``Domain.method``.
+    """
+    return any(inst.name == name for inst in read_instances(registry_path=registry_path))
+
+
 def resolve_single_instance(registry_path: str | None = None) -> str:
     """Resolve the implied instance when none was named on the command line.
 
@@ -1212,6 +1222,20 @@ directory. Liveness is engine-aware: Chrome is process identity plus CDP port
 attribution; Camoufox is process identity plus user-data-dir hold. Never PID
 existence alone.
 
+NAMING THE INSTANCE
+
+  Every verb that drives a browser takes the instance ahead of the verb:
+
+    bt web-01 snapshot
+    bt web-01 frames select checkout
+    bt web-01 Page.navigate '{"url": "https://..."}'
+
+  A bare leading token is an instance name when the registry knows it, and
+  the verb otherwise, so `bt frames select checkout` needs no escaping.
+  INSTANCE may be omitted when exactly one instance is registered; with
+  several, every verb names the candidates rather than guessing. Naming the
+  instance twice is a usage error.
+
 LIFECYCLE VERBS
 
   launch [--engine chrome|camoufox] [--profile NAME] [--channel NAME]
@@ -1259,6 +1283,45 @@ LIFECYCLE VERBS
 
   guide
       Print this manual.
+
+CURATED VERBS
+
+  snapshot [--target SPEC]
+      The accessibility tree with a UID per node, for click and fill.
+
+  click --uid UID [--target SPEC]
+  fill --uid UID --text T [--target SPEC]
+      Act on a node a snapshot named. A UID is valid for the document that
+      produced it; after the page navigates, take a new snapshot.
+
+  wait-idle [--timeout-ms MS] [--idle-ms MS]
+  wait-stable [--timeout-ms MS] [--stable-ms MS]
+      Wait for network idle, or for the DOM to stop changing.
+
+  detect [--wait SECONDS | --no-wait]
+      Run interstitial detection against the current page.
+
+  console-list [--target SPEC | --url SUBSTRING] [--duration SECONDS]
+  network-list [--target SPEC | --url SUBSTRING] [--duration SECONDS]
+      Collect console messages, or network requests and responses, over a
+      short attach window (default 2 seconds).
+
+  frames list | frames select PATTERN | frames reset
+      Inspect and select page frames. PATTERN is a frame URL substring.
+
+  storage get [--key K]
+      Read the selected frame's storage. --key is a frame URL pattern to
+      select before reading, not a cookie or local-storage key.
+
+  screenshot [--path FILE] [--target SPEC | --url SUBSTRING]
+      Capture a full-page PNG. Without --path, the base64 data URI.
+
+  screencast --dir DIR [--duration SECONDS] [--format FMT] [--max-frames N]
+      Capture a screencast and write its frames plus a frames.json manifest
+      to DIR, in one invocation. Capture ends at whichever comes first: the
+      duration (default 5 seconds) or the frame cap (default 600). There is
+      no separate start and stop: the frame buffer belongs to the process
+      that captured it.
 
   window-border [on|off]
       Show, or persistently set, whether marked windows draw the colored
