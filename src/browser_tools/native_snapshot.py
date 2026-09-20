@@ -21,28 +21,46 @@ testable against synthetic / recorded CDP responses with no live browser
 
 UID assignment and stability scheme
 -----------------------------------
-A UID is ``"<generation>-<ordinal>"``:
+A UID is ``"<docToken>-<backendNodeId>"``:
 
-- ``generation`` is a counter on the reader that increments on every snapshot
-  and on every recorded navigation. It stamps each UID with the snapshot it
-  belongs to, so a UID minted by an earlier snapshot is recognizably stale and
-  never silently resolves against a newer tree.
-- ``ordinal`` is the node's 1-based position in a depth-first walk of the tree
-  from the root through ``childIds``. The walk is deterministic, so the same
-  accessibility tree always yields the same ordinal for the same node: two
-  reads of one unchanged page assign matching ordinals (only the generation
-  prefix differs).
+- ``docToken`` names the *document* the UID was minted against. It is derived
+  from the page's CDP ``loaderId``, which changes on every navigation and is
+  readable at any time from ``Page.getFrameTree``. It is the staleness guard:
+  a UID whose token does not match the live document is refused.
+- ``backendNodeId`` is the accessibility node's ``backendDOMNodeId`` -- the DOM
+  node the UID names, which is also exactly what an interaction needs. Every
+  addressable node already carries one.
 
-The stability guarantee the RFC fixes -- *a UID returned by ``snapshot``
-resolves to the same node for subsequent ``click --uid`` / ``fill --uid`` calls
-until the next snapshot or navigation* -- is enforced by
-:class:`NativeSnapshotReader`:
+**A UID is valid for the lifetime of the document. Taking another snapshot
+invalidates nothing. Navigation is the only invalidation event.**
 
-- A snapshot (:class:`NativeSnapshot`) is immutable, so resolving a UID against
-  it always returns the same node for the snapshot's lifetime.
-- The reader resolves UIDs only against its *current* snapshot. Taking a new
-  snapshot, or recording a navigation, supersedes the current one; UIDs from
-  any superseded snapshot no longer resolve.
+That is a correction, not a preference. The scheme this replaced was
+``"<generation>-<ordinal>"``, where ``generation`` counted snapshots on the
+reader and ``ordinal`` was a node's position in a depth-first walk. Every CLI
+invocation builds a fresh reader whose counter starts at 1, and ``click`` and
+``fill`` each took their own snapshot before acting, so a caller's UID was
+resolved against a *different* tree carrying an identical ``1-`` prefix. An
+ordinal that shifted between the two trees silently named a different node:
+reproduced, ``1-3`` was a password textbox before a fill and a text node after
+it. When a shifted ordinal lands on another element, the value goes into the
+wrong field with no error at all.
+
+The pair was chosen on measurement rather than argument. One handler drove
+three tree reads with a fill between the second and third: the ordinal moved
+for the password field, while ``backendDOMNodeId`` held at 3, 4 and 9 for the
+three nodes across all three reads, including across the fill. A bare
+``backendNodeId`` was rejected because it carries no document provenance, which
+relocates the silent wrong-field failure into the next document.
+
+A node with no ``backendDOMNodeId`` -- in practice only AX-internal leaves such
+as ``InlineTextBox`` -- still needs a UID, because the tree walk and the
+rendered output reference every node. Those get ``"<docToken>-x<ordinal>"``,
+which cannot collide with a numeric backend id and is refused by the
+interaction path with "no backend DOM node". The same form is used if two
+accessibility nodes ever report the same ``backendDOMNodeId``: the first in
+document order keeps the addressable UID. Across the whole parity corpus --
+plain, form, iframe, shadow and dynamic pages -- no duplicate was observed and
+only ``InlineTextBox`` nodes lacked a backend id.
 """
 
 from __future__ import annotations
@@ -64,13 +82,70 @@ DOM_GET_FRAME_OWNER = "DOM.getFrameOwner"
 # Async CDP transport: ``send(method, params) -> result``.
 CdpSend = Callable[..., Awaitable[dict[str, Any]]]
 
+#: Characters of the ``loaderId`` a docToken carries. A loaderId is 32 hex
+#: characters; 12 of them is 48 bits, so two documents in one page's history
+#: colliding is not a practical concern, and the UID stays short enough to read
+#: and cheap enough to print once per node.
+DOC_TOKEN_CHARS = 12
+
+#: Prefix marking the ordinal fallback for a node with no backend DOM node.
+#: A leading non-digit is what keeps it out of the numeric backend-id space.
+NON_DOM_UID_PREFIX = "x"
+
+
+def doc_token_from_loader_id(loader_id: str) -> str:
+    """Derive a document token from a CDP ``loaderId``."""
+    return str(loader_id)[:DOC_TOKEN_CHARS].upper()
+
+
+def make_uid(doc_token: str, backend_node_id: int) -> str:
+    """Mint the UID naming ``backend_node_id`` within ``doc_token``'s document."""
+    return f"{doc_token}-{backend_node_id}"
+
+
+def parse_uid(uid: str) -> tuple[str, int | None]:
+    """Split a UID into its document token and backend node id.
+
+    Args:
+        uid: A UID as ``snapshot`` printed it.
+
+    Returns:
+        ``(doc_token, backend_node_id)``. The backend node id is ``None`` when
+        the UID names a node with no DOM backing (the ``x<ordinal>`` form) or
+        when the UID is not in the expected shape at all -- a caller that needs
+        to act refuses both the same way.
+    """
+    token, separator, rest = str(uid).partition("-")
+    if not separator:
+        return (token, None)
+    return (token, int(rest)) if rest.isdigit() else (token, None)
+
+
+async def read_doc_token(send: CdpSend) -> str:
+    """Read the live document's token from ``Page.getFrameTree``.
+
+    The main frame's ``loaderId`` changes on every navigation, which is what
+    makes it the document's identity. Cheap: one CDP call, no accessibility
+    tree.
+    """
+    result = await send(PAGE_GET_FRAME_TREE)
+    loader_id = result.get("frameTree", {}).get("frame", {}).get("loaderId", "")
+    return doc_token_from_loader_id(loader_id)
+
+
+def read_doc_token_sync(send: Callable[..., dict[str, Any]]) -> str:
+    """Synchronous :func:`read_doc_token`, for the sync interaction driver."""
+    result = send(PAGE_GET_FRAME_TREE)
+    loader_id = result.get("frameTree", {}).get("frame", {}).get("loaderId", "")
+    return doc_token_from_loader_id(loader_id)
+
 
 @dataclass(frozen=True)
 class AxUidNode:
     """One accessibility node with its snapshot-stable UID.
 
     Attributes:
-        uid: Stable identifier of the form ``"<generation>-<ordinal>"``, valid
+        uid: Stable identifier of the form ``"<docToken>-<backendNodeId>"``, valid
             for the lifetime of the snapshot that minted it.
         role: Computed ARIA role (``role.value`` from the AX node).
         name: Computed accessible name (``""`` when absent).
@@ -107,6 +182,23 @@ _CARRIED_PROPERTIES = frozenset(
 )
 
 
+#: Reserves a UID while the node's subtree is walked, so a descendant cannot be
+#: handed the same name. Always replaced by the real node before ``build``
+#: returns.
+_PLACEHOLDER = AxUidNode(
+    uid="",
+    role="",
+    name="",
+    value=None,
+    backend_node_id=None,
+    ax_node_id="",
+    parent_uid=None,
+    child_uids=(),
+    ignored=True,
+    properties={},
+)
+
+
 def _ax_string(field_value: Any) -> str | None:
     """Extract the ``.value`` string from an AX ``{type, value}`` field."""
     if not isinstance(field_value, dict):
@@ -138,6 +230,7 @@ class NativeSnapshot:
     """
 
     generation: int
+    doc_token: str
     root_uid: str | None
     nodes: tuple[AxUidNode, ...]
     _by_uid: dict[str, AxUidNode] = field(default_factory=dict, repr=False)
@@ -208,22 +301,27 @@ class NativeSnapshotReader:
         """The generation stamped on the most recent snapshot / navigation."""
         return self._generation
 
-    def build(self, ax_result: dict[str, Any]) -> NativeSnapshot:
+    def build(self, ax_result: dict[str, Any], *, doc_token: str) -> NativeSnapshot:
         """Build a snapshot from a raw ``Accessibility.getFullAXTree`` result.
 
-        Increments the generation, assigns UIDs in depth-first document order,
-        and installs the result as the current snapshot (superseding any prior
-        one). Pure with respect to CDP transport: callable with a recorded
+        Assigns each node a UID naming its backend DOM node within
+        ``doc_token``'s document, and installs the result as the current
+        snapshot. Pure with respect to CDP transport: callable with a recorded
         response dict in a unit test.
+
+        Building a second snapshot of the same document mints the same UIDs, so
+        nothing a caller already holds is invalidated. The generation counter is
+        kept as a diagnostic only; it is not part of a UID.
 
         Args:
             ax_result: The ``getFullAXTree`` result, ``{"nodes": [...]}``.
+            doc_token: The document token every UID is stamped with, from
+                :func:`read_doc_token`.
 
         Returns:
             The freshly built, current :class:`NativeSnapshot`.
         """
         self._generation += 1
-        generation = self._generation
         raw_nodes: list[dict[str, Any]] = list(ax_result.get("nodes", []) or [])
 
         by_ax_id: dict[str, dict[str, Any]] = {}
@@ -244,29 +342,45 @@ class NativeSnapshotReader:
         by_uid: dict[str, AxUidNode] = {}
         ordinal = 0
 
-        def make_uid() -> str:
+        def mint(backend: int | None) -> str:
+            """The node's UID: its backend DOM node, or an ordinal fallback.
+
+            A node with no backend DOM node, and a node whose backend id another
+            node already claimed, take ``x<ordinal>``. Both are unaddressable by
+            an interaction, which is correct: the first is not in the DOM, and
+            for the second the node earlier in document order owns the name.
+            """
             nonlocal ordinal
             ordinal += 1
-            return f"{generation}-{ordinal}"
+            if backend is not None:
+                candidate = make_uid(doc_token, backend)
+                if candidate not in by_uid:
+                    return candidate
+            return f"{doc_token}-{NON_DOM_UID_PREFIX}{ordinal}"
 
         def walk(ax_id: str, parent_uid: str | None) -> str | None:
             raw = by_ax_id.get(ax_id)
             if raw is None:
                 return None
-            uid = make_uid()
+            raw_backend = raw.get("backendDOMNodeId")
+            backend = int(raw_backend) if isinstance(raw_backend, int) else None
+            uid = mint(backend)
+            # Claim the UID before recursing: a descendant must not be handed
+            # the same name, and the node object is only built after its
+            # children (it carries their UIDs).
+            by_uid[uid] = _PLACEHOLDER
             order.append(uid)
             child_uids: list[str] = []
             for child_ax_id in raw.get("childIds", []) or []:
                 child_uid = walk(str(child_ax_id), uid)
                 if child_uid is not None:
                     child_uids.append(child_uid)
-            backend = raw.get("backendDOMNodeId")
             by_uid[uid] = AxUidNode(
                 uid=uid,
                 role=_ax_string(raw.get("role")) or "",
                 name=_ax_string(raw.get("name")) or "",
                 value=_ax_string(raw.get("value")),
-                backend_node_id=int(backend) if isinstance(backend, int) else None,
+                backend_node_id=backend,
                 ax_node_id=str(ax_id),
                 parent_uid=parent_uid,
                 child_uids=tuple(child_uids),
@@ -278,7 +392,8 @@ class NativeSnapshotReader:
         root_uid = walk(root_ax_id, None) if root_ax_id is not None else None
 
         snapshot = NativeSnapshot(
-            generation=generation,
+            generation=self._generation,
+            doc_token=doc_token,
             root_uid=root_uid,
             nodes=tuple(by_uid[uid] for uid in order),
             _by_uid=by_uid,
@@ -289,6 +404,9 @@ class NativeSnapshotReader:
     async def snapshot(self, send: CdpSend) -> NativeSnapshot:
         """Enable the Accessibility domain, read the full tree, build a snapshot.
 
+        Reads the live document token first, so every UID it mints is stamped
+        with the document the tree was read from.
+
         Args:
             send: Async CDP transport, ``send(method, params) -> result``
                 (a bound :meth:`~browser_tools.cdp_client.CDPClient.send`).
@@ -296,9 +414,10 @@ class NativeSnapshotReader:
         Returns:
             The freshly built, current :class:`NativeSnapshot`.
         """
+        doc_token = await read_doc_token(send)
         await send(AX_ENABLE)
         result = await send(AX_GET_FULL_TREE)
-        return self.build(result)
+        return self.build(result, doc_token=doc_token)
 
     async def snapshot_stitched(self, send: CdpSend) -> NativeSnapshot:
         """Read the full tree stitched across child frames, then build a snapshot.
@@ -314,13 +433,17 @@ class NativeSnapshotReader:
         Returns:
             The freshly built, current :class:`NativeSnapshot`.
         """
-        return self.build(await read_stitched_ax_tree(send))
+        doc_token = await read_doc_token(send)
+        return self.build(await read_stitched_ax_tree(send), doc_token=doc_token)
 
     def resolve_uid(self, uid: str) -> AxUidNode | None:
-        """Resolve a UID against the current snapshot only.
+        """Resolve a UID against the current snapshot.
 
-        Returns ``None`` when there is no current snapshot or when ``uid``
-        belongs to a superseded snapshot -- the stability contract in one place.
+        This is a *tree* lookup: it answers what a node's role, name and
+        children are, and it needs a snapshot in hand to answer. It is not the
+        staleness guard, and the interaction path does not go through it -- a
+        UID carries its own document token and backend node, so ``click`` and
+        ``fill`` resolve without any tree at all.
         """
         if self._current is None:
             return None
@@ -332,11 +455,14 @@ class NativeSnapshotReader:
         return node.backend_node_id if node is not None else None
 
     def note_navigation(self) -> None:
-        """Record a navigation: invalidate the current snapshot's UIDs.
+        """Drop the cached snapshot after a navigation.
 
-        A navigation replaces the document, so every outstanding UID is stale.
-        The generation is bumped so a snapshot taken after this navigation mints
-        UIDs distinct from the pre-navigation ones even at the same ordinal.
+        Invalidation is no longer this method's job, and does not depend on it
+        being called. A navigation changes the document's ``loaderId``, so every
+        outstanding UID carries a token that no longer matches and is refused on
+        its own evidence -- including in a fresh process that never saw the
+        navigation happen. This only releases a tree that now describes a
+        document that is gone.
         """
         self._current = None
         self._generation += 1

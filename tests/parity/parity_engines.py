@@ -255,6 +255,15 @@ class NativeSnapshotEngine:
         self._session = session
         self._reader = NativeSnapshotReader()
 
+    def _doc_token(self) -> str:
+        """The live document's token, which every UID this capture mints carries."""
+        from browser_tools.native_snapshot import doc_token_from_loader_id
+
+        frame_tree = self._session.cdp_send("Page.getFrameTree", {})
+        return doc_token_from_loader_id(
+            frame_tree.get("frameTree", {}).get("frame", {}).get("loaderId", "")
+        )
+
     def capture(self, page: CorpusPage) -> PageCapture:
         """Navigate to ``page`` and capture its native snapshot, UIDs, and text."""
         self._session.navigate(page.file_url())
@@ -266,7 +275,7 @@ class NativeSnapshotEngine:
         self._session.evaluate(_SETTLE_SCRIPT)
 
         ax_result = self._session.get_stitched_ax_tree()
-        snapshot = self._reader.build(ax_result)
+        snapshot = self._reader.build(ax_result, doc_token=self._doc_token())
         nodes = tuple(
             SnapshotNode(
                 role=node.role,
@@ -329,6 +338,15 @@ class NativeInteractionEngine:
         value = call.get("result", {}).get("value")
         return value if isinstance(value, dict) else None
 
+    def _doc_token(self) -> str:
+        """The live document's token, which every UID this capture mints carries."""
+        from browser_tools.native_snapshot import doc_token_from_loader_id
+
+        frame_tree = self._session.cdp_send("Page.getFrameTree", {})
+        return doc_token_from_loader_id(
+            frame_tree.get("frameTree", {}).get("frame", {}).get("loaderId", "")
+        )
+
     def capture(self, page: CorpusPage) -> PageCapture:
         """Navigate to ``page`` and capture its snapshot and native UID targets."""
         self._session.navigate(page.file_url())
@@ -336,7 +354,7 @@ class NativeInteractionEngine:
         self._session.evaluate(_SETTLE_SCRIPT)
 
         ax_result = self._session.get_stitched_ax_tree()
-        snapshot = self._reader.build(ax_result)
+        snapshot = self._reader.build(ax_result, doc_token=self._doc_token())
         nodes = tuple(
             SnapshotNode(
                 role=node.role,

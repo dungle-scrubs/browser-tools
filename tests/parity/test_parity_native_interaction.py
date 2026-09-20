@@ -35,7 +35,11 @@ from parity_corpus import corpus_page
 from parity_engines import AriaSnapshotEngine, NativeInteractionEngine, capture_corpus
 
 from browser_tools.native_interaction import NativeInteractor, UidResolutionError
-from browser_tools.native_snapshot import NativeSnapshot, NativeSnapshotReader
+from browser_tools.native_snapshot import (
+    NativeSnapshot,
+    NativeSnapshotReader,
+    doc_token_from_loader_id,
+)
 
 _AVAILABLE, _WHY = chromium_available()
 
@@ -100,13 +104,23 @@ def test_native_interaction_targets_are_flake_free(chromium_session):
     assert corpus_matches(results), f"native interaction not flake-free: {broken}"
 
 
+def _live_doc_token(session) -> str:
+    """The token every UID minted against the session's current page carries."""
+    frame_tree = session.cdp_send("Page.getFrameTree", {})
+    return doc_token_from_loader_id(
+        frame_tree.get("frameTree", {}).get("frame", {}).get("loaderId", "")
+    )
+
+
 def test_native_fill_and_click_on_form_page(chromium_session):
     """Drive the production NativeInteractor against the live form page."""
     form = corpus_page("form")
     reader = NativeSnapshotReader()
     chromium_session.navigate(form.file_url())
     reader.note_navigation()
-    snapshot = reader.build(chromium_session.get_full_ax_tree())
+    snapshot = reader.build(
+        chromium_session.get_full_ax_tree(), doc_token=_live_doc_token(chromium_session)
+    )
     interactor = NativeInteractor(reader)
     send = chromium_session.cdp_send
 
@@ -136,13 +150,41 @@ def test_native_fill_and_click_on_form_page(chromium_session):
     assert click_submit.point is not None  # a real viewport point was targeted
 
 
-def test_stale_uid_is_refused_against_live_session(chromium_session):
-    """A UID from a superseded snapshot resolves for neither engine (no CDP call)."""
+def test_a_second_snapshot_invalidates_nothing_against_a_live_session(chromium_session):
+    """Was the staleness test. A UID lives as long as its document (#96).
+
+    Two snapshots of one page, then an interaction with a UID from the first:
+    it must still act, because nothing about the document changed.
+    """
     form = corpus_page("form")
     reader = NativeSnapshotReader()
     chromium_session.navigate(form.file_url())
-    reader.note_navigation()
-    reader.build(chromium_session.get_full_ax_tree())
-    reader.build(chromium_session.get_full_ax_tree())  # supersede generation 1
-    with pytest.raises(UidResolutionError):
-        NativeInteractor(reader).click(chromium_session.cdp_send, "1-5")
+    token = _live_doc_token(chromium_session)
+    first = reader.build(chromium_session.get_full_ax_tree(), doc_token=token)
+    reader.build(chromium_session.get_full_ax_tree(), doc_token=token)
+
+    email_uid = _uid_for(first, "textbox", "Email")
+    result = NativeInteractor(reader).fill(
+        chromium_session.cdp_send, email_uid, "still@valid.example"
+    )
+
+    assert result.value_after == "still@valid.example"
+    assert (
+        chromium_session.evaluate("document.getElementById('email').value")
+        == "still@valid.example"
+    )
+
+
+def test_a_uid_from_the_previous_document_is_refused_against_a_live_session(chromium_session):
+    """Navigation is the one invalidation event, and the UID carries the proof."""
+    reader = NativeSnapshotReader()
+    chromium_session.navigate(corpus_page("form").file_url())
+    before = reader.build(
+        chromium_session.get_full_ax_tree(), doc_token=_live_doc_token(chromium_session)
+    )
+    stale_uid = _uid_for(before, "textbox", "Email")
+
+    chromium_session.navigate(corpus_page("plain").file_url())
+
+    with pytest.raises(UidResolutionError, match="previous document"):
+        NativeInteractor(reader).fill(chromium_session.cdp_send, stale_uid, "leaked")

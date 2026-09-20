@@ -169,6 +169,10 @@ _NATIVE_AX_TREE = {
 class FakeNativeCdpSession:
     """A native-engine session that returns canned CDP responses, no browser."""
 
+    #: A loaderId, as Chrome reports it. Every UID the engine mints for this
+    #: session carries the token derived from it (#96).
+    LOADER_ID = "FA4EL0ADE812ABCDEF0123456789ABCD"
+
     def __init__(self, ax_tree: dict[str, Any], uid_targets: dict[str, str], text: str) -> None:
         self._ax_tree = ax_tree
         self._uid_targets = uid_targets
@@ -177,6 +181,12 @@ class FakeNativeCdpSession:
 
     def navigate(self, url: str) -> None:
         self.calls.append(f"navigate:{url}")
+
+    def cdp_send(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        self.calls.append(f"cdp:{method}")
+        if method == "Page.getFrameTree":
+            return {"frameTree": {"frame": {"loaderId": self.LOADER_ID}}}
+        return {}
 
     def get_full_ax_tree(self) -> dict[str, Any]:
         self.calls.append("get_full_ax_tree")
@@ -225,9 +235,12 @@ def test_native_capture_carries_native_uid_and_backend_node():
     session = FakeNativeCdpSession(_NATIVE_AX_TREE, {}, "")
     capture = NativeSnapshotEngine(session).capture(corpus_page("form"))
     textbox = next(n for n in capture.nodes if n.role == "textbox")
-    # Native snapshot UIDs are "<generation>-<ordinal>"; the textbox is the
-    # third node in document order of the first snapshot after navigation.
-    assert textbox.uid == "2-3"
+    # A native UID is "<docToken>-<backendNodeId>" (#96): the document the node
+    # belongs to, and the DOM node itself. Not its position in the tree.
+    from browser_tools.native_snapshot import doc_token_from_loader_id
+
+    token = doc_token_from_loader_id(FakeNativeCdpSession.LOADER_ID)
+    assert textbox.uid == f"{token}-3"
     assert textbox.backend_node == "3"
 
 

@@ -184,20 +184,23 @@ class TestNativeDispatch:
         assert fake_handler.instances[0].native_calls == [("take_snapshot", {})]
         assert out == {"snapshot": "[uid=1-1] RootWebArea"}
 
-    def test_click_snapshots_first_then_clicks(self, registry_path, fake_handler):
+    def test_click_takes_no_snapshot_of_its_own(self, registry_path, fake_handler):
+        """The internal snapshot was what made the staleness check unable to
+        fire: it was always "current", so a uid from another tree resolved
+        against it by ordinal (#96)."""
         _seed(registry_path, {"only-01": _entry()})
-        curated.click(instance=None, uid="1-5", registry_path=registry_path)
+        curated.click(instance=None, uid="D0C0FFEE1234-50", registry_path=registry_path)
         assert fake_handler.instances[0].native_calls == [
-            ("take_snapshot", {}),
-            ("click", {"uid": "1-5"}),
+            ("click", {"uid": "D0C0FFEE1234-50"}),
         ]
 
-    def test_fill_snapshots_first_then_fills(self, registry_path, fake_handler):
+    def test_fill_takes_no_snapshot_of_its_own(self, registry_path, fake_handler):
         _seed(registry_path, {"only-01": _entry()})
-        curated.fill(instance=None, uid="1-5", text="hello", registry_path=registry_path)
+        curated.fill(
+            instance=None, uid="D0C0FFEE1234-40", text="hello", registry_path=registry_path
+        )
         assert fake_handler.instances[0].native_calls == [
-            ("take_snapshot", {}),
-            ("fill", {"uid": "1-5", "value": "hello"}),
+            ("fill", {"uid": "D0C0FFEE1234-40", "value": "hello"}),
         ]
 
     def test_native_tool_error_is_lifecycle_error(self, registry_path, fake_handler):

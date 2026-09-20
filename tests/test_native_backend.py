@@ -31,6 +31,8 @@ def _ax(node_id: str, role: str, name: str = "", *, children=None, backend=None)
     return raw
 
 
+LOADER_ID = "D0C0FFEE1234ABCDEF0123456789ABCD"
+
 _FORM_TREE = {
     "nodes": [
         _ax("1", "RootWebArea", "Form", children=["2"], backend=1),
@@ -50,7 +52,9 @@ class _FakeCdpClient:
         if method == "Accessibility.getFullAXTree":
             return _FORM_TREE
         if method == "Page.getFrameTree":
-            return {"frameTree": {"frame": {"id": "TOP"}}}
+            return {"frameTree": {"frame": {"id": "TOP", "loaderId": LOADER_ID}}}
+        if method == "DOM.describeNode":
+            return {"node": {"nodeType": 1}}
         if method == "DOM.getBoxModel":
             return {"model": {"content": [10, 10, 20, 10, 20, 20, 10, 20]}}
         if method == "DOM.resolveNode":
@@ -122,12 +126,13 @@ async def test_native_interaction_without_uid_is_an_error_envelope() -> None:
 
 
 @pytest.mark.asyncio
-async def test_native_stale_uid_is_refused_as_error_envelope() -> None:
+async def test_a_uid_from_another_document_is_refused_as_an_error_envelope() -> None:
     handler, _ = _handler_with_fake_client()
     await handler._dispatch_native("take_snapshot", {})
-    # A UID from a superseded generation resolves for no snapshot.
-    resp = await handler._dispatch_native("click", {"uid": "99-1"})
+    # A UID carrying another document's token is refused on its own evidence.
+    resp = await handler._dispatch_native("click", {"uid": "0THERDOC5678-1"})
     assert resp["result"].get("isError") is True
+    assert "previous document" in "".join(extract_text_items(resp))
 
 
 @pytest.mark.asyncio
