@@ -19,6 +19,15 @@
 # session, so closing that terminal took it while the browser lived on, and it
 # wrote nothing on the way out, so an exit left no trace.
 #
+# Retirement is also adapted (#94). Upstream retires the instance by calling
+# the vendored registry's ``deregister``, which removes the entry and then
+# deletes the recorded user-data dir without checking whether the instance is
+# profile-bound. In browser-tools a named profile IS a user-data dir, so that
+# destroyed a login every time a headed browser was closed normally. The
+# registry module is verbatim vendored and cannot carry the check, so the
+# supervisor retires through ``browser_tools.lifecycle.retire_instance``
+# instead, which preserves a bound profile and reaps an unbound session dir.
+#
 # The attach path is also adapted (see "Never hold a document paused" in the
 # module docstring): targets are found by discovery instead of auto-attach and
 # only page targets are attached to, every attached session is resumed before
@@ -828,7 +837,7 @@ async def run_supervisor(
     the browser doing nothing. ``watchdog=False`` runs without it, for tests
     that drive one pass of the loop directly.
     """
-    from .registry import deregister
+    from browser_tools.lifecycle import retire_instance
 
     heartbeat = Heartbeat()
     if watchdog:
@@ -849,7 +858,7 @@ async def run_supervisor(
             scripts=scripts,
             border=BorderSetting(border_setting),
             heartbeat=heartbeat,
-            deregister=deregister,
+            retire=retire_instance,
         )
     finally:
         if beat_task is not None:
@@ -864,7 +873,7 @@ async def _supervise_forever(
     scripts: MarkerScripts | None,
     border: BorderSetting,
     heartbeat: Heartbeat,
-    deregister,
+    retire,
 ) -> None:
     """Connect, supervise, and reconnect until the browser is gone."""
     while True:
@@ -879,7 +888,7 @@ async def _supervise_forever(
 
         if await _browser_gone(port):
             # Browser really closed -> retire from the registry and exit.
-            deregister(instance_name=name, registry_path=registry_path)
+            retire(instance_name=name, registry_path=registry_path)
             if registry_path is not None:
                 log_supervisor_exit(
                     reason="browser closed",
