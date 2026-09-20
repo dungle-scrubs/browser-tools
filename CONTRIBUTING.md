@@ -66,24 +66,32 @@ for backward compatibility.
 
 ## Architecture
 
-See `README.md` for the module dependency graph. Key principles:
+See `README.md` for the five layers and the module dependency graph, and
+`CONTEXT.md` for the canonical name of each concept. Key principles:
 
-1. `persistent_browser.py` is the hub — it imports from `process_utils`,
-   `browser_state`, `mcp_session`, `daemon_client`, and `chrome_config`.
-2. `cdp_handler.py` + `cdp_constants.py` implement all CDP-backed tools
-   and constants; only `mcp_daemon.py` imports from them.
-3. `browser_tools_session.py` is the CLI entry point — it imports from
-   `persistent_browser`, `chrome_utils`, and `chrome_config`.
-4. No circular imports — all imports form a DAG from CLI → controller →
-   daemon → CDP handler.
+1. `cli.py` is the only surface. It parses arguments, dispatches verbs and
+   owns exit codes; every verb reaches the browser through `lifecycle`,
+   `passthrough`, `curated`, `events` or `list_verbs`.
+2. `cdp_handler.py` + `cdp_constants.py` implement the CDP-backed tools and
+   their constants. `curated.py` builds one handler per invocation and tears
+   it down; nothing keeps a connection alive between calls.
+3. `lifecycle.py` owns profiles, the profile root, engine routing and every
+   registry call site. A defect inside a verbatim vendored module under
+   `core/` is corrected here, at the call site, never in place.
+4. An upper layer consumes only the layer below it, and there are no circular
+   imports.
 
 ## Testing
 
 - Unit tests: mocked CDP/Playwright/Chrome. Preferred for all new code.
-- Integration tests: `test_mcp_daemon.py` uses real subprocesses and
-  local sockets. `test_attach_browser.py` uses a local HTTP server.
-- E2E tests: `test_e2e_camoufox.py` requires `camoufox fetch`. Skip
-  these in CI with `pytest tests/ --ignore=tests/test_e2e_camoufox.py`.
+- Import-surface tests: `tests/test_cli_surface.py` runs fresh interpreters to
+  prove what the CLI, the profiler and the bare package do and do not load.
+- Parity tests: `tests/parity/` compares this repo's native engine against a
+  live `chrome-devtools-mcp` subprocess over a frozen local corpus. Marked
+  `parity`; they skip when their browser is unavailable. See
+  `tests/parity/CORPUS.md`.
+- E2E tests: `tests/parity/test_e2e_camoufox.py` requires `camoufox fetch`.
+  CI skips it with `--ignore=tests/parity/test_e2e_camoufox.py`.
 
 ## Commit Conventions
 

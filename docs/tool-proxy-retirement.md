@@ -1,10 +1,16 @@
 # tool-proxy retirement note (RFC-01 Phase 4)
 
 RFC-01 "Out of tool-proxy" retires the tool-proxy `browser-tools` app together
-with the global "route browser automation through tool-proxy" instruction. The
-optional MCP front stays available for harnesses that cannot run a CLI; agents
-that can run a CLI use `browser-tools` / `bt` (and the `browser-tools` agent
-skill) directly.
+with the global "route browser automation through tool-proxy" instruction.
+Agents use `browser-tools` / `bt` (and the `browser-tools` agent skill)
+directly.
+
+> **Superseded by Phase 5 (#92).** This note was written while an optional MCP
+> front still existed, and its replacement text below said so. That front and
+> the persistent-session stack behind it have since been deleted: the CLI is the
+> only surface, and there is no fallback for a harness that cannot run a CLI.
+> The two hand-off edits this note describes are unaffected, so the instructions
+> below stand except where they mention the front.
 
 **This note is a hand-off for a human. It changes nothing outside this
 repository.** Both targets below live in separate repositories and were
@@ -111,9 +117,12 @@ instruction is wanted in its place, use something like:
 ## Browser Automation
 
 Handle browser automation with the `browser-tools` CLI (`browser-tools` / `bt`)
-and its agent skill (`~/.agents/skills/browser-tools`). The optional MCP front
-remains only for harnesses that cannot run a CLI.
+and its agent skill (`~/.agents/skills/browser-tools`).
 ```
+
+The version of this replacement written for Phase 4 ended with "The optional MCP
+front remains only for harnesses that cannot run a CLI." Phase 5 deleted that
+front, so the line is dropped rather than carried forward.
 
 If no standing instruction is wanted, delete the section outright -- the skill's
 own description is enough for discovery.
