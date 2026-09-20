@@ -5,7 +5,7 @@ type: refactor
 status: Accepted
 author: Kevin Frilot
 date: 2026-08-21
-version: 4
+version: 5
 ---
 
 # RFC-01: Merge chrome-agent core into browser-tools
@@ -216,6 +216,7 @@ The CPU profiler keeps its own long-lived process and its `browser-tools-profile
 - **The frozen surface is the MCP surface as defined in Terminology**: the `tool_registry.py` tools (explicit and default-forwarded) and the session-layer lifecycle tools (`use_browser_session`, `attach_browser`, `close_browser`, `launch_camoufox` and peers). While the MCP front is running, every tool on that surface MUST keep its current name, argument shape, and response shape through the end of Phase 3. Breaking changes, if any, land in Phase 4 and MUST be listed in the changelog.
 - MCP contract tests (schema-level, covering names, argument shapes, and response shapes for the whole frozen surface) MUST exist from Phase 1 and run in every phase gate through Phase 3. This is what holds the freeze and the Phase 2 rebuild together: the native snapshot backend MUST pass the same contract tests the Node-backed tools pass today.
 - Screencast and the profiler own their long-lived processes; they MUST NOT depend on the MCP front.
+- **The session-layer lifecycle tools left the frozen surface in Phase 4.** They were served by one dispatcher, `browser_session.dispatch_session_tool`, reached only from `create_tool_proxy_handlers`, which the retired tool-proxy app called. Phase 4 retired that app and left the dispatcher with no production caller; it is now deleted. The shipped MCP front (`mcp_daemon`) never referenced `browser_session` and is unaffected, and the `tool_registry.py` tools -- the rest of the frozen surface -- are unchanged. Camoufox did not leave with it: `launch --engine camoufox` is the live path and is specified above. Anything that wants these tools back specifies them against a front that exists first.
 
 ### Native snapshot
 
@@ -294,6 +295,8 @@ None open. All five questions raised in versions 1-2 were decided by the author 
 5. **Registry location: resolved (a).** Keep `/tmp` semantics; a cleared registry after reboot is self-consistent because no browser survives reboot. Persistent state belongs to profiles, not the registry.
 
 ## Changes in this revision
+
+**Version 5** (2026-09-20): the session-layer lifecycle tools are recorded as having left the frozen MCP surface in Phase 4 (#68). Their only dispatcher had no production caller once the tool-proxy app was retired, and deleting it is the change this revision records. The `tool_registry.py` tools are unchanged, the shipped MCP front never reached the deleted path, and `launch --engine camoufox` keeps Camoufox. `browser_session.py` keeps the session resolver, which `session_store` reaches.
 
 **Version 4** (2026-09-20): the spec caught up with the shipped CLI. Two commits had changed the surface without touching this document (229a536, ce30ad8), and six bug fixes since then changed it further (#69, #31, #32, #62, #63, #65). Nothing here reverses a decision; it records contracts the code already holds and the tests already cite. One line per change:
 

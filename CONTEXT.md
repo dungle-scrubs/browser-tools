@@ -36,32 +36,20 @@ and code should use these terms, not ad-hoc synonyms.
   update-from-response, param normalize, URL re-resolution. (Candidate B.)
 - **Tool Dispatch** - routing policy over `tool_registry`: inspect-gate,
   CDP/local/forward routing, screenshot paint-gate, post-navigation detection
-  trigger. Data lives in the registry; policy lives here. (Candidate C.) The
-  session-adapter layer has its own counterpart (Session Tool Dispatch below).
+  trigger. Data lives in the registry; policy lives here. (Candidate C.)
 - **LiveChrome** - owns the resolution of the live Chrome backing a
   user-data-dir: read the SingletonLock PID, confirm it is alive, confirm it
   holds the directory (PID-recycle guard), find its debug port, confirm
   DevTools answers. Returns one structured result consumed by
   `PersistentChromeController`, `profile_catalog`, and `handle_attach_browser`.
   The implementation module is `live_chrome`.
-- **Session Tool Dispatch** - the session-adapter counterpart of Tool Dispatch:
-  routes a tool to the Camoufox or Chrome backend, the session-management
-  tools, or the live-profile-conflict gate, then applies the two Chrome
-  cross-cutting policies (single-tab reuse via `SINGLE_TAB_TOOLS`, headless
-  to headed auth-wall promotion via `NAVIGATION_TOOLS`) straight from
-  `tool_registry` flags rather than inline branches. The implementation is
-  `dispatch_session_tool` + `SessionDispatchContext` in `browser_session`,
-  exposed as a seam so the routing order is testable through one interface with
-  fakes - the session-adapter sibling of the Daemon's `DispatchContext`.
-  `create_tool_proxy_handlers` returns a `call_tool` closure that delegates to
-  it.
 - **Session Resolver** - owns the Active-Session resolution priority (explicit
   override > project preference > recent external attach > default selection:
   this project's own live session, else a sole live named profile, else a fresh
-  headless Chrome), returning `(controller, source, conflict)`. A single owner
-  consumed by both `create_session` (bootstrap) and `browser_session_status`
-  (diagnostics) so the two report the same choice instead of re-deriving the
-  priority independently. The implementation is `resolve_session_controller` +
+  headless Chrome), returning `(controller, source, conflict)`. A single owner,
+  so `browser_session_status` (diagnostics) reports the same choice instead of
+  re-deriving the priority independently. This is the live part of
+  `browser_session`; `session_store` reaches it. The implementation is `resolve_session_controller` +
   `SessionResolution` in `browser_session`; `select_default_controller` and
   `choose_live_profile_fallback` remain its tested building blocks.
 - **CDPRuntime** - the deep half of the CDP layer: owns the background thread,
