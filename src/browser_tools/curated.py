@@ -57,6 +57,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import math
 import threading
 import time
 from pathlib import Path
@@ -69,7 +70,7 @@ from . import lifecycle
 from .cdp_handler import CDPHandler
 from .core import registry as core_registry
 from .core.registry import InstanceNotFoundError
-from .interstitial import format_interstitials
+from .interstitial import INTERSTITIAL_RETRY_DELAY_SECONDS, format_interstitials
 from .lifecycle import LifecycleError
 from .mcp_response import extract_text_items
 from .one_shot import cli_cdp_errors, one_shot_page_session
@@ -258,16 +259,24 @@ def wait_stable(
 # ---------------------------------------------------------------------------
 
 
-def detect(*, instance: str | None, registry_path: str | None = None) -> dict[str, Any]:
+def detect(
+    *,
+    instance: str | None,
+    registry_path: str | None = None,
+    wait_seconds: float | None = None,
+) -> dict[str, Any]:
     """Run interstitial detection against the current page (``inspect_blocked``/``inspect_warn``).
 
     Drives the exact challenge-response policy in ``interstitial.py`` through
     ``CDPHandler.run_post_navigation_detection`` -- the same detect-and-retry
     the daemon runs automatically post-navigation, surfaced here as a verb.
     """
+    max_retries = None
+    if wait_seconds is not None:
+        max_retries = max(0, math.ceil(wait_seconds / INTERSTITIAL_RETRY_DELAY_SECONDS))
     port = _resolve_port(instance, registry_path)
     with _cdp_handler_session(port) as handler:
-        result = handler.run_post_navigation_detection()
+        result = handler.run_post_navigation_detection(max_retries)
     if result is None:
         raise LifecycleError("interstitial detection unavailable (no CDP session)")
     detections = result.get("detections", [])
@@ -278,6 +287,9 @@ def detect(*, instance: str | None, registry_path: str | None = None) -> dict[st
     )
     return {
         "detections": detections,
+        # Vendor-presence signals: this site uses these systems, but this page
+        # is not a challenge. Informational only; never drives "am I blocked".
+        "presence": result.get("presence", []),
         "auto_retried": result.get("auto_retried", False),
         "retries_used": result.get("retries_used", 0),
         "report": report,

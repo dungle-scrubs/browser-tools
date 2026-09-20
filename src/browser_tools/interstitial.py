@@ -37,12 +37,45 @@ INTERSTITIAL_RETRY_DELAY_SECONDS = 3.0
 INTERSTITIAL_MAX_RETRIES = 3
 INTERSTITIAL_AUTO_RETRY_TYPES = frozenset({"cloudflare_challenge", "access_denied"})
 
-# Outer timeout for the whole detect-and-retry sequence, used by the thread-safe
-# marshaler in CDPHandler.run_post_navigation_detection. Generous buffer over
-# (initial detect + retries * delay) so a slow page cannot hang the daemon.
-DETECT_TOTAL_TIMEOUT_SECONDS = 10 + (
-    INTERSTITIAL_MAX_RETRIES * (INTERSTITIAL_RETRY_DELAY_SECONDS + 2)
-)
+# Signal taxonomy. A detection's ``signal`` field says what kind of evidence
+# fired. A Presence Signal establishes that a site *uses* a vendor: its cookie
+# is set, or its script is on the page. Those are present on every page of a
+# protected site, including ordinary pages inside a logged-in session, so they
+# do not mean this page is blocking. Every other signal is a Challenge Signal:
+# the page itself is blocking or asking. Only a Challenge Signal makes a page
+# an Interstitial.
+PRESENCE_SIGNALS = frozenset({"cookie", "script_src"})
+
+
+def is_challenge_signal(detection: dict[str, Any]) -> bool:
+    """Return whether a detection is evidence that this page is blocking.
+
+    Args:
+        detection: One detection dict from the detection script.
+
+    Returns:
+        True for a Challenge Signal, False for a Presence Signal.
+    """
+    return detection.get("signal") not in PRESENCE_SIGNALS
+
+
+def detect_total_timeout(max_retries: int | None = None) -> float:
+    """Outer timeout for one detect-and-retry cycle.
+
+    Used by the thread-safe marshaler in
+    ``CDPHandler.run_post_navigation_detection``. The budget varies per call
+    now that the caller can set it, so this is computed rather than a
+    constant. Generous buffer over (initial detect + retries * delay) so a
+    slow page cannot hang the daemon.
+
+    Args:
+        max_retries: Retry budget, or None for :data:`INTERSTITIAL_MAX_RETRIES`.
+
+    Returns:
+        Seconds.
+    """
+    retries = INTERSTITIAL_MAX_RETRIES if max_retries is None else max_retries
+    return 10 + retries * (INTERSTITIAL_RETRY_DELAY_SECONDS + 2)
 
 
 def get_detection_script() -> str:
@@ -115,8 +148,31 @@ def format_interstitials(
     return "\n".join(lines)
 
 
+def _split_on_challenge_gate(
+    results: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Split detections into challenges and vendor presence.
+
+    The Challenge Gate: only a Challenge Signal makes a page an Interstitial.
+    Presence is returned separately so a caller that wants to know which vendor
+    fronts a site still can, without it driving the blocked answer.
+
+    Args:
+        results: Detections from one single-shot pass.
+
+    Returns:
+        ``(challenges, presence)``.
+    """
+    challenges = [d for d in results if is_challenge_signal(d)]
+    presence = [d for d in results if not is_challenge_signal(d)]
+    return challenges, presence
+
+
 async def detect_with_retry(
     detect_once: Callable[[], Awaitable[list[dict[str, Any]]]],
+    *,
+    max_retries: int | None = None,
+    delay: float | None = None,
 ) -> dict[str, Any]:
     """Run interstitial detection with auto-retry for JS-solvable challenges.
 
@@ -136,32 +192,60 @@ async def detect_with_retry(
         Dict with ``detections`` (list), ``auto_retried`` (bool), and
         ``retries_used`` (int).
     """
-    detections = await detect_once()
+    if max_retries is None:
+        max_retries = INTERSTITIAL_MAX_RETRIES
+    if delay is None:
+        delay = INTERSTITIAL_RETRY_DELAY_SECONDS
+
+    detections, presence = _split_on_challenge_gate(await detect_once())
     if not detections:
-        return {"detections": [], "auto_retried": False, "retries_used": 0}
+        return {
+            "detections": [],
+            "presence": presence,
+            "auto_retried": False,
+            "retries_used": 0,
+        }
 
     retryable = [d for d in detections if d.get("type") in INTERSTITIAL_AUTO_RETRY_TYPES]
-    non_retryable = [d for d in detections if d.get("type") not in INTERSTITIAL_AUTO_RETRY_TYPES]
 
     if not retryable:
-        return {"detections": detections, "auto_retried": False, "retries_used": 0}
+        return {
+            "detections": detections,
+            "presence": presence,
+            "auto_retried": False,
+            "retries_used": 0,
+        }
 
-    for attempt in range(INTERSTITIAL_MAX_RETRIES):
-        await asyncio.sleep(INTERSTITIAL_RETRY_DELAY_SECONDS)
-        detections = await detect_once()
+    for attempt in range(max_retries):
+        await asyncio.sleep(delay)
+        detections, presence = _split_on_challenge_gate(await detect_once())
 
         if not detections:
-            return {"detections": [], "auto_retried": True, "retries_used": attempt + 1}
+            return {
+                "detections": [],
+                "presence": presence,
+                "auto_retried": True,
+                "retries_used": attempt + 1,
+            }
 
         retryable = [d for d in detections if d.get("type") in INTERSTITIAL_AUTO_RETRY_TYPES]
         if not retryable:
-            return {"detections": detections, "auto_retried": True, "retries_used": attempt + 1}
+            return {
+                "detections": detections,
+                "presence": presence,
+                "auto_retried": True,
+                "retries_used": attempt + 1,
+            }
 
-    # Exhausted retries -- report whatever remains plus any non-retryable.
+    # Exhausted retries -- report the last pass, which is the page's current
+    # state. The first pass's non-retryable detections are not appended: they
+    # are stale by this point, and anything still present is already here.
     return {
-        "detections": detections + non_retryable,
-        "auto_retried": True,
-        "retries_used": INTERSTITIAL_MAX_RETRIES,
+        "detections": detections,
+        "presence": presence,
+        # With a zero budget the loop never ran, so nothing was retried.
+        "auto_retried": max_retries > 0,
+        "retries_used": max_retries,
     }
 
 
@@ -227,7 +311,15 @@ async def _run_detection(
 
 
 def _deduplicate(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Deduplicate by type, keeping highest confidence per type.
+    """Deduplicate by type, keeping the most informative detection per type.
+
+    A Challenge Signal always outranks a Presence Signal for the same type,
+    whatever their confidence strings say: the vendor's cookie being set tells
+    the caller nothing about whether this page is blocking, while the challenge
+    iframe does. Within one signal class, confidence decides. Ranking on
+    confidence alone dropped the challenge evidence for any vendor whose
+    cookie check runs earlier in the script than its challenge check, which is
+    all of them.
 
     Args:
         results: List of detection results.
@@ -236,25 +328,32 @@ def _deduplicate(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
         Deduplicated list.
     """
     rank = {"high": 3, "medium": 2, "low": 1}
+
+    def score(detection: dict[str, Any]) -> tuple[int, int]:
+        return (
+            1 if is_challenge_signal(detection) else 0,
+            rank.get(detection.get("confidence", ""), 0),
+        )
+
     seen: dict[str, dict[str, Any]] = {}
     for r in results:
         type_name = r.get("type", "unknown")
         existing = seen.get(type_name)
-        if not existing or rank.get(r.get("confidence", ""), 0) > rank.get(
-            existing.get("confidence", ""), 0
-        ):
+        if not existing or score(r) > score(existing):
             seen[type_name] = r
     return list(seen.values())
 
 
 __all__ = [
-    "DETECT_TOTAL_TIMEOUT_SECONDS",
     "INTERSTITIAL_AUTO_RETRY_TYPES",
     "INTERSTITIAL_MAX_RETRIES",
     "INTERSTITIAL_RETRY_DELAY_SECONDS",
+    "PRESENCE_SIGNALS",
     "detect_interstitials_async",
+    "detect_total_timeout",
     "detect_with_retry",
     "format_interstitials",
     "get_detection_script",
+    "is_challenge_signal",
     "parse_detection_result",
 ]

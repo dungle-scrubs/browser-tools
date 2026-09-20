@@ -240,6 +240,18 @@ def _add_curated_verbs(
 
     detect = sub.add_parser("detect", help="Run interstitial detection against the current page")
     detect.add_argument("instance", nargs="?", metavar="INSTANCE", help="Instance (omit if only one)")
+    detect_wait = detect.add_mutually_exclusive_group()
+    detect_wait.add_argument(
+        "--wait",
+        type=float,
+        metavar="SECONDS",
+        help="Retry a self-clearing challenge for up to SECONDS (default: 9)",
+    )
+    detect_wait.add_argument(
+        "--no-wait",
+        action="store_true",
+        help="Report the current state at once; do not retry",
+    )
 
     frames = sub.add_parser("frames", help="Inspect or select page frames")
     frames_sub = frames.add_subparsers(dest="frames_action", metavar="ACTION")
@@ -501,7 +513,14 @@ def _run_curated(args: argparse.Namespace, registry_path: str | None) -> int:
         return EXIT_OK
 
     if args.command == "detect":
-        _print_json(curated.detect(instance=args.instance, registry_path=registry_path))
+        wait_seconds = 0.0 if args.no_wait else args.wait
+        _print_json(
+            curated.detect(
+                instance=args.instance,
+                registry_path=registry_path,
+                wait_seconds=wait_seconds,
+            )
+        )
         return EXIT_OK
 
     if args.command == "frames":

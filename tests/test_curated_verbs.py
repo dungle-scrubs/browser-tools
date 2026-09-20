@@ -87,6 +87,7 @@ class FakeHandler:
         self.tool_calls: list[tuple[str, dict]] = []
         self.native_calls: list[tuple[str, dict]] = []
         self.detection_runs = 0
+        self.detection_budgets: list[int | None] = []
         self.stopped = False
         FakeHandler.instances.append(self)
 
@@ -108,8 +109,9 @@ class FakeHandler:
         self.native_calls.append((name, arguments))
         return FakeHandler.native_responses.get(name, make_text(f"{name}-ok"))
 
-    def run_post_navigation_detection(self) -> dict | None:
+    def run_post_navigation_detection(self, max_retries: int | None = None) -> dict | None:
         self.detection_runs += 1
+        self.detection_budgets.append(max_retries)
         return FakeHandler.detection
 
 
@@ -521,6 +523,36 @@ class TestCliFront:
         rc = cli.main(["detect"])
         assert rc == cli.EXIT_OK
         assert fake_handler.instances[0].detection_runs == 1
+
+    def test_detect_no_wait_sends_a_zero_budget(self, capsys, fake_handler):
+        """--no-wait must reach the handler as a zero retry budget."""
+        _seed(self._registry_path, {"only-01": _entry()})
+        FakeHandler.detection = {"detections": [], "auto_retried": False, "retries_used": 0}
+
+        rc = cli.main(["detect", "--no-wait"])
+
+        assert rc == cli.EXIT_OK
+        assert fake_handler.instances[0].detection_budgets == [0]
+
+    def test_detect_wait_seconds_converts_to_retries(self, capsys, fake_handler):
+        """--wait SECONDS becomes a retry count at the 3s retry delay."""
+        _seed(self._registry_path, {"only-01": _entry()})
+        FakeHandler.detection = {"detections": [], "auto_retried": False, "retries_used": 0}
+
+        rc = cli.main(["detect", "--wait", "6"])
+
+        assert rc == cli.EXIT_OK
+        assert fake_handler.instances[0].detection_budgets == [2]
+
+    def test_detect_default_leaves_budget_unset(self, capsys, fake_handler):
+        """With no flag the module default applies, not a computed budget."""
+        _seed(self._registry_path, {"only-01": _entry()})
+        FakeHandler.detection = {"detections": [], "auto_retried": False, "retries_used": 0}
+
+        rc = cli.main(["detect"])
+
+        assert rc == cli.EXIT_OK
+        assert fake_handler.instances[0].detection_budgets == [None]
 
     def test_screenshot_via_cli(self, capsys, fake_screenshot_transport):
         _seed(self._registry_path, {"only-01": _entry()})
