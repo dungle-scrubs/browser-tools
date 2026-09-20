@@ -347,8 +347,11 @@ def wait_transport(monkeypatch):
         monkeypatch.setattr(
             "browser_tools.one_shot.CDPClient", _make_wait_transport(fired, targets)
         )
+        async def _fake_get_ws_url_async(**kw):
+            return "ws://fake/browser"
+
         monkeypatch.setattr(
-            "browser_tools.one_shot.get_ws_url", lambda **kw: "ws://fake/browser"
+            "browser_tools.one_shot.get_ws_url_async", _fake_get_ws_url_async
         )
 
     return _install
@@ -408,8 +411,11 @@ class TestCliFront:
         monkeypatch.setattr(
             "browser_tools.one_shot.CDPClient", _make_wait_transport(fired, targets)
         )
+        async def _fake_get_ws_url_async(**kw):
+            return "ws://fake/browser"
+
         monkeypatch.setattr(
-            "browser_tools.one_shot.get_ws_url", lambda **kw: "ws://fake/browser"
+            "browser_tools.one_shot.get_ws_url_async", _fake_get_ws_url_async
         )
 
     def test_wait_match_prints_json_exit_ok(self, monkeypatch, capsys):

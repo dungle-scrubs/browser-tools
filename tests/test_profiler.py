@@ -89,11 +89,11 @@ def fake_transport(monkeypatch):
         fake_cls = make_fake_cdp_client_cls(calls, metrics_sequence=metrics_sequence)
         monkeypatch.setattr(profiler, "CDPClient", fake_cls)
 
-        def _fake_get_ws_url(*, port, target_type):
+        async def _fake_get_ws_url_async(*, port, target_type):
             ws_urls.append((port, target_type))
             return f"ws://fake/{target_type}/{port}"
 
-        monkeypatch.setattr(profiler, "get_ws_url", _fake_get_ws_url)
+        monkeypatch.setattr(profiler, "get_ws_url_async", _fake_get_ws_url_async)
         return calls, ws_urls
 
     return _install

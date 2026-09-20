@@ -22,7 +22,7 @@ import logging
 import time
 from typing import Any
 
-from .core.cdp_client import CDPClient, get_ws_url
+from .core.cdp_client import CDPClient, get_ws_url_async
 from .core.domains.performance import Performance
 from .core.domains.profiler import Profiler
 
@@ -164,7 +164,7 @@ async def profile_page(duration: float = 5.0, port: int = 9222, format_type: str
     Returns:
         Formatted profile results
     """
-    ws_url = get_ws_url(port=port, target_type="page")
+    ws_url = await get_ws_url_async(port=port, target_type="page")
     profiler = CDPProfiler(ws_url)
 
     try:
@@ -204,7 +204,7 @@ async def profile_until_high_cpu(
     Returns:
         Formatted profile results
     """
-    ws_url = get_ws_url(port=port, target_type="page")
+    ws_url = await get_ws_url_async(port=port, target_type="page")
     profiler = CDPProfiler(ws_url)
 
     try:

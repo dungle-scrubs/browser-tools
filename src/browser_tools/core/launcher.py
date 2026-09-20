@@ -30,7 +30,7 @@ import subprocess
 import sys
 import tempfile
 
-from .connection import check_cdp_port
+from .connection import check_cdp_port_async
 from .registry import REGISTRY_PATH, InstanceInfo, allocate_port, register, cleanup
 from .registry import _load_registry, _resolve_path
 from .utils import process_is_ours, process_is_running, process_start_time
@@ -210,7 +210,7 @@ async def launch_browser(
                 f"Chrome exited immediately with code {process.returncode}. "
                 f"stderr: {stderr_output[:500]}"
             )
-        status = check_cdp_port(port=port)
+        status = await check_cdp_port_async(port=port)
         if status.listening:
             break
         await asyncio.sleep(0.2)
@@ -284,9 +284,10 @@ async def _open_first_window(*, port: int) -> None:
     A browser started with ``--no-startup-window`` opens nothing, and a window
     created over CDP with ``background`` set leaves focus where it is.
     """
-    from .cdp_client import CDPClient, get_ws_url
+    from .cdp_client import CDPClient, get_ws_url_async
 
-    async with CDPClient(ws_url=get_ws_url(port=port, target_type="browser")) as cdp:
+    browser_ws = await get_ws_url_async(port=port, target_type="browser")
+    async with CDPClient(ws_url=browser_ws) as cdp:
         await cdp.send(
             method="Target.createTarget",
             params={"url": "about:blank", "newWindow": True, "background": True},

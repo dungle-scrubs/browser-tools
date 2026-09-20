@@ -14,6 +14,7 @@ connect/disconnect functions were removed in iteration 2 -- all CDP
 connections now go through CDPClient (websockets-based).
 """
 
+import asyncio
 import json
 import socket
 import urllib.request
@@ -75,3 +76,12 @@ def check_cdp_port(*, port: int = 9222) -> PortStatus:
         page_url=page_url,
         page_title=page_title,
     )
+
+
+async def check_cdp_port_async(*, port: int = 9222) -> PortStatus:
+    """Awaitable :func:`check_cdp_port`, for callers on an event loop.
+
+    The probe blocks on a socket connect and two HTTP requests. Run it on a
+    worker thread so the loop stays free. Same arguments, same return.
+    """
+    return await asyncio.to_thread(check_cdp_port, port=port)

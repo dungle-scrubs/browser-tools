@@ -78,8 +78,11 @@ def fake_transport(monkeypatch):
     def _install(targets=None):
         fake_cls, calls = make_fake_cdp_client_cls(targets=targets)
         monkeypatch.setattr("browser_tools.one_shot.CDPClient", fake_cls)
+        async def _fake_get_ws_url_async(**kw):
+            return "ws://fake/browser"
+
         monkeypatch.setattr(
-            "browser_tools.one_shot.get_ws_url", lambda **kw: "ws://fake/browser"
+            "browser_tools.one_shot.get_ws_url_async", _fake_get_ws_url_async
         )
         return calls, fake_cls
 
@@ -198,8 +201,11 @@ class TestOneShotPageSession:
                 return {}
 
         monkeypatch.setattr("browser_tools.one_shot.CDPClient", FakeCDPClient)
+        async def _fake_get_ws_url_async(**kw):
+            return "ws://fake/browser"
+
         monkeypatch.setattr(
-            "browser_tools.one_shot.get_ws_url", lambda **kw: "ws://fake/browser"
+            "browser_tools.one_shot.get_ws_url_async", _fake_get_ws_url_async
         )
 
         async def _run():
@@ -305,7 +311,7 @@ class TestCliCdpErrors:
 
 
 def _drive_session_to_connect(port: int):
-    """Run ``one_shot_page_session`` far enough to hit ``get_ws_url``."""
+    """Run ``one_shot_page_session`` far enough to hit ``get_ws_url_async``."""
 
     async def run():
         async with one_shot_page_session(port=port, target_spec=None, target_by=None):
@@ -323,12 +329,12 @@ def _core_connection_error(cause: BaseException) -> ConnectionError:
 
 class TestConnectionFailureMessage:
     def test_refused_says_no_browser_and_names_bt(self, monkeypatch):
-        def refused(**kw):
+        async def refused(**kw):
             raise _core_connection_error(
                 urllib.error.URLError(ConnectionRefusedError(61, "Connection refused"))
             )
 
-        monkeypatch.setattr("browser_tools.one_shot.get_ws_url", refused)
+        monkeypatch.setattr("browser_tools.one_shot.get_ws_url_async", refused)
         with pytest.raises(ConnectionError) as exc:
             _drive_session_to_connect(9333)
         assert str(exc.value) == "No browser listening on port 9333. Start one with: bt launch"
@@ -344,10 +350,10 @@ class TestConnectionFailureMessage:
         # different failure from an unbound port. Reporting it as "no browser
         # listening" sends the caller to launch another browser, which is the
         # wrong remedy and (via the registry) the wrong diagnosis.
-        def stalled(**kw):
+        async def stalled(**kw):
             raise _core_connection_error(cause)
 
-        monkeypatch.setattr("browser_tools.one_shot.get_ws_url", stalled)
+        monkeypatch.setattr("browser_tools.one_shot.get_ws_url_async", stalled)
         with pytest.raises(ConnectionError) as exc:
             _drive_session_to_connect(9333)
         msg = str(exc.value)
@@ -361,10 +367,10 @@ class TestConnectionFailureMessage:
         assert connection_failure_message(port=1, cause=None).startswith("No browser listening on port 1")
 
     def test_mapped_to_lifecycle_error_by_cli_cdp_errors(self, monkeypatch):
-        def stalled(**kw):
+        async def stalled(**kw):
             raise _core_connection_error(TimeoutError("timed out"))
 
-        monkeypatch.setattr("browser_tools.one_shot.get_ws_url", stalled)
+        monkeypatch.setattr("browser_tools.one_shot.get_ws_url_async", stalled)
 
         @cli_cdp_errors
         def verb():

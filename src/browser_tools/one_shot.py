@@ -43,7 +43,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Callable
 
 from .core.attach import AmbiguousTargetError, TargetNotFoundError, resolve_target
-from .core.cdp_client import CDPClient, get_ws_url
+from .core.cdp_client import CDPClient, get_ws_url_async
 from .core.errors import CDPError, NoPageError
 from .core.registry import InstanceNotFoundError
 from .lifecycle import LifecycleError
@@ -69,7 +69,7 @@ async def one_shot_page_session(
     the module docstring for why this is the one no-page spelling now).
     """
     try:
-        browser_ws_url = get_ws_url(port=port, target_type="browser")
+        browser_ws_url = await get_ws_url_async(port=port, target_type="browser")
     except ConnectionError as exc:
         raise ConnectionError(connection_failure_message(port=port, cause=exc.__cause__)) from exc
     async with CDPClient(ws_url=browser_ws_url) as cdp:

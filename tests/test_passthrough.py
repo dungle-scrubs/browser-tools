@@ -103,8 +103,11 @@ def fake_transport(monkeypatch):
     def _install(responder=None, targets=None):
         fake_cls, calls = make_fake_cdp_client_cls(responder=responder, targets=targets)
         monkeypatch.setattr("browser_tools.one_shot.CDPClient", fake_cls)
+        async def _fake_get_ws_url_async(**kw):
+            return "ws://fake/browser"
+
         monkeypatch.setattr(
-            "browser_tools.one_shot.get_ws_url", lambda **kw: "ws://fake/browser"
+            "browser_tools.one_shot.get_ws_url_async", _fake_get_ws_url_async
         )
         return calls
 

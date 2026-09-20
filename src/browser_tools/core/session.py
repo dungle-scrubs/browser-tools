@@ -22,7 +22,7 @@ import re
 import signal
 import sys
 
-from .cdp_client import CDPClient, get_ws_url
+from .cdp_client import CDPClient, get_ws_url_async
 from .errors import CDPError
 
 # Matches valid CDP method format: Domain.method
@@ -60,7 +60,7 @@ async def run_session(
     """
     # Phase 1: Connect
     try:
-        ws_url = get_ws_url(port=port, target_type="page")
+        ws_url = await get_ws_url_async(port=port, target_type="page")
     except (ConnectionError, RuntimeError) as exc:
         print(str(exc), file=sys.stderr)
         return 1

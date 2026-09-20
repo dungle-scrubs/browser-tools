@@ -251,3 +251,13 @@ def get_page_ws_url(browser_url: str, page_index: int = 0) -> str | None:
     except (urllib.error.URLError, OSError, json.JSONDecodeError):
         logger.debug("Failed to get page WS URL from %s", browser_url, exc_info=True)
     return None
+
+
+async def get_page_ws_url_async(browser_url: str, page_index: int = 0) -> str | None:
+    """Awaitable :func:`get_page_ws_url`, for callers on an event loop.
+
+    The lookup is stdlib urllib over HTTP and blocks for as long as Chrome
+    takes to answer. Run it on a worker thread so the loop stays free. Same
+    arguments, same return.
+    """
+    return await asyncio.to_thread(get_page_ws_url, browser_url, page_index)

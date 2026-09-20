@@ -671,9 +671,9 @@ def _try_cdp_browser_close(port: int) -> None:
     """Best-effort graceful ``Browser.close`` over CDP (never raises)."""
 
     async def _close() -> None:
-        from .core.cdp_client import CDPClient, get_ws_url
+        from .core.cdp_client import CDPClient, get_ws_url_async
 
-        browser_ws = get_ws_url(port=port, target_type="browser")
+        browser_ws = await get_ws_url_async(port=port, target_type="browser")
         async with CDPClient(ws_url=browser_ws) as cdp:
             await cdp.send(method="Browser.close")
 
@@ -685,9 +685,9 @@ def _close_tab(ext: ExtendedInstance, target: str) -> str:
     """Close a single tab via CDP, leaving the browser and profile alive."""
 
     async def _close() -> bool:
-        from .core.cdp_client import CDPClient, get_ws_url
+        from .core.cdp_client import CDPClient, get_ws_url_async
 
-        browser_ws = get_ws_url(port=ext.port, target_type="browser")
+        browser_ws = await get_ws_url_async(port=ext.port, target_type="browser")
         async with CDPClient(ws_url=browser_ws) as cdp:
             result = await cdp.send(
                 method="Target.closeTarget", params={"targetId": target}

@@ -393,10 +393,10 @@ class CDPRuntime:
     async def _connect_cdp(self) -> None:
         """Connect the CDP client to Chrome."""
         try:
-            from .cdp_client import CDPClient, get_page_ws_url
+            from .cdp_client import CDPClient, get_page_ws_url_async
 
             browser_url: str = self._browser_url  # type: ignore[assignment]  # guarded by if-self._browser_url
-            ws_url = get_page_ws_url(browser_url)
+            ws_url = await get_page_ws_url_async(browser_url)
             if not ws_url:
                 return
 

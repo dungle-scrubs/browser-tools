@@ -168,7 +168,10 @@ class TestAttachRouting:
         cdp.connect = fake_connect  # type: ignore[attr-defined]
         cdp.close = fake_close  # type: ignore[attr-defined]
 
-        monkeypatch.setattr(supervisor, "get_ws_url", lambda **kwargs: "ws://fake")
+        async def _fake_get_ws_url_async(**kwargs):
+            return "ws://fake"
+
+        monkeypatch.setattr(supervisor, "get_ws_url_async", _fake_get_ws_url_async)
         monkeypatch.setattr(supervisor, "CDPClient", lambda ws_url: cdp)
 
         async def drive():
