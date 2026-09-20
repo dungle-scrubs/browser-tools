@@ -30,3 +30,6 @@ Thumbs.db
 
 # Agent worktrees (transient)
 .claude/worktrees/
+
+# Task scratch: ledgers, briefs, delegation reports, repro scripts.
+.scratch/
