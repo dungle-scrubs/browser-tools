@@ -1,8 +1,16 @@
-"""Unit tests for CamoufoxSession — mocked, no real browser."""
+"""Unit tests for CamoufoxSession -- mocked, no real browser.
+
+These moved out of the package with the session itself (#92): it drives the
+parity suite's ARIA baseline and has no product caller.
+"""
 
 from __future__ import annotations
 
 import json
+
+import pytest
+
+from browser_tools.extras import MissingExtraError
 
 
 class TestLaunchBrowser:
@@ -48,7 +56,7 @@ class TestLaunchBrowser:
         self, camoufox_session, mock_camoufox_playwright, monkeypatch, tmp_path
     ):
         """A named profile loads saved storage_state and writes it back on close."""
-        monkeypatch.setattr("browser_tools.camoufox_session.CAMOUFOX_STATE_DIR", tmp_path)
+        monkeypatch.setattr("camoufox_session.CAMOUFOX_STATE_DIR", tmp_path)
         state_file = tmp_path / "dev.json"
         state_file.write_text('{"cookies": [], "origins": []}')
 
@@ -277,10 +285,27 @@ class TestToolProxyProtocol:
 
     def test_result_is_json_serializable(self, mock_camoufox_playwright):
         """All results must be JSON-serializable for tool-proxy protocol."""
-        from browser_tools.camoufox_session import CamoufoxSession
+        from camoufox_session import CamoufoxSession
 
         session = CamoufoxSession()
         result = session.call_tool("launch_browser", {})
 
         assert result["result"]["status"] == "running"
         json.dumps(result)
+
+
+class TestMissingExtra:
+    """The install line is what a missing camoufox extra must produce."""
+
+    def test_session_launch_raises_the_install_line_without_the_extra(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import camoufox_session
+
+        # Simulate the extra being absent: the module-level import fell back to
+        # None, which the launch guard turns into a MissingExtraError.
+        monkeypatch.setattr(camoufox_session, "Camoufox", None)
+        session = camoufox_session.CamoufoxSession()
+        with pytest.raises(MissingExtraError) as excinfo:
+            session._tool_launch_browser({})
+        assert str(excinfo.value).endswith("pip install 'browser-tools[camoufox]'")

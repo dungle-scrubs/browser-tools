@@ -311,7 +311,7 @@ def detect(
     registry_path: str | None = None,
     wait_seconds: float | None = None,
 ) -> dict[str, Any]:
-    """Run interstitial detection against the current page (``inspect_blocked``/``inspect_warn``).
+    """Run interstitial detection against the current page.
 
     Drives the exact challenge-response policy in ``interstitial.py`` through
     ``CDPHandler.run_post_navigation_detection`` -- the same detect-and-retry

@@ -30,7 +30,7 @@ pytestmark = [
 
 @pytest.fixture(scope="module")
 def live_engine():
-    from browser_tools.camoufox_session import CamoufoxSession
+    from camoufox_session import CamoufoxSession
 
     session = CamoufoxSession()
     launched = session.call_tool("launch_browser", {"headless": True})

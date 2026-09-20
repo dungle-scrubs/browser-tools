@@ -52,8 +52,8 @@ def missing_extra_message(extra: str, feature: str) -> str:
 def require_camoufox(camoufox: object, feature: str = "The Camoufox engine") -> None:
     """Fail with the camoufox install line when the extra is not installed.
 
-    ``camoufox_session`` and ``camoufox_runner`` import ``camoufox.sync_api``
-    inside a ``try`` and fall back to ``None`` when the extra is absent. Pass
+    ``camoufox_runner`` imports ``camoufox.sync_api`` inside a ``try`` and
+    falls back to ``None`` when the extra is absent. Pass
     that (possibly ``None``) reference here before using it so the caller gets
     the exact install line instead of a ``TypeError`` on a ``None`` call.
 

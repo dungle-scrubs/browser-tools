@@ -38,4 +38,4 @@ jobs:
       - run: uv sync
 
       - name: pytest (unit tests)
-        run: uv run pytest tests/ -q --tb=short --ignore=tests/test_mcp_daemon.py --ignore=tests/test_e2e_camoufox.py
+        run: uv run pytest tests/ -q --tb=short --ignore=tests/parity/test_e2e_camoufox.py
