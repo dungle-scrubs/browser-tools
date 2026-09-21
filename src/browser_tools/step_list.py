@@ -157,22 +157,37 @@ def split_lines(text: str) -> list[tuple[int, str, list[str]]]:
 def _parse_with_cli_parser(argv: list[str], line: int) -> argparse.Namespace:
     """Parse one step's argv with the CLI's own parser.
 
-    ``argparse`` reports a failure by writing to stderr and raising
-    ``SystemExit``, which inside a Step Run would end the run rather than
-    report a step. Both are intercepted, so the diagnostic names the step's
-    line instead of appearing as a bare parser message about a program the
-    caller did not invoke.
+    ``argparse`` ends the process to report itself. A bad flag writes to
+    stderr and raises ``SystemExit(2)``; ``--help`` writes to **stdout** and
+    raises ``SystemExit(0)``. Inside a Step Run either would end the run
+    rather than report a step, and the help text would land on the stdout
+    that a refused run promises to leave empty.
+
+    So both streams are captured and ``SystemExit`` is converted, whatever
+    its code. The diagnostic then names the step's line instead of appearing
+    as a bare parser message about a program the caller did not invoke.
     """
     from .cli import build_parser
 
-    captured = io.StringIO()
+    out, err = io.StringIO(), io.StringIO()
     try:
-        with contextlib.redirect_stderr(captured):
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             return build_parser().parse_args(argv)
     except SystemExit as exc:
-        detail = captured.getvalue().strip().splitlines()
-        message = detail[-1] if detail else f"argparse rejected this step (exit {exc.code})"
-        raise _at(line, message) from exc
+        raise _at(line, _why_argparse_gave_up(argv, err.getvalue(), exc.code)) from exc
+
+
+def _why_argparse_gave_up(argv: list[str], stderr: str, code: object) -> str:
+    """Turn one ``SystemExit`` from the parser into a message about the step."""
+    if code == 0:
+        # --help or --version. Not an error to argparse, not a step either.
+        return (
+            f"'{argv[0]}' was asked to print help rather than run: "
+            "a step is an action, and the run prints nothing but its own output. "
+            "Use `bt guide` outside the run."
+        )
+    detail = stderr.strip().splitlines()
+    return detail[-1] if detail else f"the parser rejected this step (exit {code})"
 
 
 def _check_not_an_instance(argv: list[str], line: int, known: set[str]) -> None:

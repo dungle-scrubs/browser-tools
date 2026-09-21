@@ -139,6 +139,31 @@ class TestTheStepSurface:
             validate("frobnicate\n")
         assert "not a step" in str(caught.value)
 
+    @pytest.mark.parametrize("step", ["snapshot --help", "snapshot -h"])
+    def test_a_help_step_is_refused_and_prints_nothing(self, step, no_instances, capsys):
+        """`--help` is the one argparse case that exits 0 and writes stdout.
+
+        A refused run promises an empty stdout. Letting 417 characters of
+        help text through would break that while still exiting 2, which is
+        the worst of both.
+        """
+        with pytest.raises(StepListError) as caught:
+            validate(step + "\n")
+        assert "print help" in str(caught.value)
+        assert capsys.readouterr().out == "", "the parser's help reached stdout"
+
+    def test_a_bad_flag_still_reports_the_parser_s_own_words(self, no_instances):
+        with pytest.raises(StepListError) as caught:
+            validate("snapshot --bogus\n")
+        assert "--bogus" in str(caught.value)
+
+    def test_a_bad_flag_prints_nothing_either(self, no_instances, capsys):
+        with pytest.raises(StepListError):
+            validate("snapshot --bogus\n")
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert captured.err == "", "the parser's usage message reached stderr"
+
     def test_a_flag_in_the_verb_position_is_refused(self, no_instances):
         """`--version` would otherwise exit 0 out of the middle of a run."""
         with pytest.raises(StepListError):
