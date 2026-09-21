@@ -985,6 +985,123 @@ class TestTheTwoViewsOfTheFrameTreeAgree:
         assert "N" not in [entry["frameId"] for entry in frames.get_flat_frames()]
 
 
+class TestNoEventSequenceStrandsAFrame:
+    """The invariant, against every short sequence rather than chosen ones.
+
+    A cross-family reviewer of RFC-04 pointed out that the search behind this
+    claim lived in a scratch file and not in the suite, and that it had been
+    run with a filter: only sequences whose parent frame already existed. Two
+    sequences outside that filter failed the invariant, and both were real:
+
+      - `frameAttached` naming a parent the map does not hold;
+      - `frameNavigated` for a frame whose ancestor was already detached.
+
+    Both stored a frame nothing held. `frames list` did not show it and
+    `frames select` could, so `storage get` would read a frame the caller had
+    been told did not exist. Both now drop the frame instead, because a frame
+    the map holds is reachable from the root, always.
+
+    The search is here so the claim and the check are the same thing.
+    """
+
+    IDS = ("A", "B", "C")
+
+    def _operations(self):
+        ops = []
+        for frame in self.IDS:
+            for parent in ("R", *self.IDS):
+                if parent != frame:
+                    ops.append(("attach", frame, parent))
+                    ops.append(("navigate", frame, parent))
+            ops.append(("detach", frame, None))
+            ops.append(("navigate", frame, None))
+        return ops
+
+    @staticmethod
+    def _apply(frames, operation):
+        kind, frame_id, parent_id = operation
+        if kind == "attach":
+            frames.handle_frame_attached({"frameId": frame_id, "parentFrameId": parent_id})
+        elif kind == "detach":
+            frames.handle_frame_detached({"frameId": frame_id, "reason": "remove"})
+        else:
+            data = {"id": frame_id, "url": f"https://x.test/{frame_id}"}
+            if parent_id:
+                data["parentId"] = parent_id
+            frames.handle_frame_navigated({"frame": data})
+
+    @pytest.mark.parametrize("length", [1, 2, 3])
+    def test_every_sequence_of_this_length_keeps_the_invariant(self, length):
+        import itertools
+
+        from browser_tools.frame_manager import FrameManager
+
+        check = TestTheTwoViewsOfTheFrameTreeAgree._assert_one_set_of_frames
+        broken: list[tuple] = []
+        for sequence in itertools.product(self._operations(), repeat=length):
+            frames = FrameManager()
+            frames.update_from_frame_tree({"frame": {"id": "R", "url": "https://x.test/"}})
+            for operation in sequence:
+                self._apply(frames, operation)
+            try:
+                check(frames)
+            except AssertionError as exc:
+                broken.append((sequence, str(exc)[:80]))
+                if len(broken) > 2:
+                    break
+        assert not broken, f"these sequences strand a frame: {broken}"
+
+
+class TestAFrameWithNowhereToHangIsDropped:
+    """The two sequences the RFC-04 review found, named individually.
+
+    The search above would catch a regression in either. These say what the
+    rule is, so a reader does not have to run 14,424 sequences to learn it.
+    """
+
+    def _rooted(self):
+        from browser_tools.frame_manager import FrameManager
+
+        frames = FrameManager()
+        frames.update_from_frame_tree({"frame": {"id": "R", "url": "https://x.test/"}})
+        return frames
+
+    def test_an_attach_naming_a_parent_the_map_does_not_hold(self):
+        frames = self._rooted()
+        frames.handle_frame_attached({"frameId": "G", "parentFrameId": "C"})
+        assert "G" not in frames._frames
+        assert frames.select_frame_by_url("x.test").frame_id == "R"
+
+    def test_a_navigation_for_a_frame_whose_ancestor_is_gone(self):
+        frames = self._rooted()
+        frames.handle_frame_attached({"frameId": "C", "parentFrameId": "R"})
+        frames.handle_frame_attached({"frameId": "G", "parentFrameId": "C"})
+        frames.handle_frame_detached({"frameId": "C", "reason": "remove"})
+        frames.handle_frame_navigated(
+            {"frame": {"id": "G", "parentId": "C", "url": "https://x.test/late"}}
+        )
+        assert "G" not in frames._frames
+        assert frames._resolve_frame_by_url("late") is None, (
+            "the frame was selectable and `frames list` did not show it"
+        )
+
+    def test_a_navigation_for_a_frame_whose_parent_is_known_still_lands(self):
+        """The drop is for a frame with nowhere to hang, not for every
+        frame whose `frameNavigated` precedes its `frameAttached`."""
+        frames = self._rooted()
+        frames.handle_frame_navigated(
+            {"frame": {"id": "N", "parentId": "R", "url": "https://x.test/new"}}
+        )
+        assert [e["frameId"] for e in frames.get_flat_frames()] == ["R", "N"]
+
+    def test_a_main_frame_navigation_with_no_parent_still_lands(self):
+        from browser_tools.frame_manager import FrameManager
+
+        frames = FrameManager()
+        frames.handle_frame_navigated({"frame": {"id": "R", "url": "https://x.test/"}})
+        assert [e["frameId"] for e in frames.get_flat_frames()] == ["R"]
+
+
 class TestAStepCannotTurnOffWhatTheRunOwns:
     """The RFC's "a caller undoes their own enable" rule does not cover this.
 

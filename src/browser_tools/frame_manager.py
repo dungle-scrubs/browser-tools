@@ -343,12 +343,20 @@ class FrameManager:
         if not frame_id:
             return
 
-        # A re-attach under a frame that is already below this one would make
-        # the frame its own ancestor. The tree cannot hold that, and keeping
-        # the pieces would leave an island in the map that `frames list` never
-        # shows and no walk ever collects. Drop the subtree instead, and say
-        # so: a frame the map holds is reachable from the root, always.
-        if self._is_descendant(parent_id, frame_id) or parent_id == frame_id:
+        # Two attaches the tree cannot hold, and both leave an island in the
+        # map that `frames list` never shows and no walk ever collects:
+        #
+        #   - a parent that is not in the map, so there is nothing to hang
+        #     the frame from;
+        #   - a parent that is already below this frame, which would make the
+        #     frame its own ancestor.
+        #
+        # Drop the subtree for either, because a frame the map holds is
+        # reachable from the root, always. An island is worse than a drop: it
+        # is unreachable and it was selectable, so `storage get` would read a
+        # frame the caller had been told did not exist.
+        unknown_parent = not parent_id or parent_id not in self._frames
+        if unknown_parent or self._is_descendant(parent_id, frame_id) or parent_id == frame_id:
             self._forget_descendants(frame_id)
             self._unlink(frame_id)
             self._frames.pop(frame_id, None)
@@ -546,12 +554,20 @@ class FrameManager:
                 name=frame_data.get("name", ""),
                 parent_frame_id=frame_data.get("parentId"),
             )
-            self._frames[frame_id] = created
             parent = self._frames.get(created.parent_frame_id or "")
             if parent is not None:
+                self._frames[frame_id] = created
                 parent.children.append(created)
-            elif self._root_frame_id is None and created.parent_frame_id is None:
+            elif created.parent_frame_id is None and self._root_frame_id is None:
+                self._frames[frame_id] = created
                 self._root_frame_id = frame_id
+            else:
+                # The parent was named and is not in the map, so this frame
+                # arrived after its ancestor was detached. Storing it would
+                # leave an island: invisible to `frames list`, selectable by
+                # pattern, and never collected, because the walk that would
+                # reach it goes through the parent that is gone.
+                return
 
         self._reresolve_selection()
 
