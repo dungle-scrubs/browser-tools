@@ -180,11 +180,16 @@ def cli_cdp_errors[**P, T](fn: Callable[P, T]) -> Callable[P, T]:
     def wrapper(*args: P.args, **kwargs: P.kwargs) -> T:
         try:
             return fn(*args, **kwargs)
+        except InstanceNotFoundError as exc:
+            # Adapted here, not in the verbatim core: the vendored text names
+            # upstream's program. See lifecycle.instance_not_found_message.
+            from .lifecycle import instance_not_found_message
+
+            raise LifecycleError(instance_not_found_message(exc)) from exc
         except (
             AmbiguousTargetError,
             TargetNotFoundError,
             NoPageError,
-            InstanceNotFoundError,
         ) as exc:
             raise LifecycleError(str(exc)) from exc
         except CDPError as exc:

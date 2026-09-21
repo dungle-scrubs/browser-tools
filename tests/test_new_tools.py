@@ -842,7 +842,11 @@ async def test_screencast_stop_requires_active_capture():
 
     result = await recorder.stop(connected_cdp(), {"dir": "/tmp/x"})
 
-    assert "no screencast in progress" in result["result"]["content"][0]["text"].lower()
+    text = result["result"]["content"][0]["text"].lower()
+    assert "no screencast is recording" in text
+    # The remedy must not name screencast_start: RFC-01 removed the start/stop pair,
+    # so there is no such verb to point at. See test_diagnostics_name_real_verbs.py.
+    assert "screencast_start" not in text
 
 
 # ---------------------------------------------------------------------------

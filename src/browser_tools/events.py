@@ -176,7 +176,7 @@ def run_attach(
             )
         )
     except InstanceNotFoundError as exc:
-        raise LifecycleError(str(exc)) from exc
+        raise LifecycleError(lifecycle.instance_not_found_message(exc)) from exc
     except (AmbiguousTargetError, TargetNotFoundError, NoPageError) as exc:
         raise LifecycleError(str(exc)) from exc
     except ConnectionError as exc:

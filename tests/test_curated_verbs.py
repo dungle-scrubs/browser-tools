@@ -299,7 +299,12 @@ class TestHandlerToolDispatch:
 
     def test_storage_get_no_frame_selected_is_lifecycle_error(self, registry_path, fake_handler):
         _seed(registry_path, {"only-01": _entry()})
-        FakeHandler.tool_responses = {"get_frame_storage": make_error("No frame selected. Use select_frame first.")}
+        FakeHandler.tool_responses = {
+            "get_frame_storage": make_error(
+                "No frame selected. Run 'frames select PATTERN' first, "
+                "or name the frame on the read with --key."
+            )
+        }
         with pytest.raises(LifecycleError):
             curated.storage_get(instance=None, key=None, registry_path=registry_path)
 

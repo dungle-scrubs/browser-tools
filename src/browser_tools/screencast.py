@@ -150,7 +150,11 @@ class ScreencastRecorder:
             JSON-RPC style response dict.
         """
         if self._active:
-            return make_error("screencast already recording; call screencast_stop first")
+            return make_error(
+                "a screencast is already recording in this process. "
+                "One 'screencast' invocation captures and writes its own frames; "
+                "there is no separate start and stop."
+            )
 
         fmt = str(arguments.get("format", "jpeg")).lower()
         if fmt not in ("jpeg", "png"):
@@ -185,8 +189,8 @@ class ScreencastRecorder:
             self._unsubscribe(cdp)
             return make_error("Page.startScreencast failed")
         return make_text(
-            "Screencast recording. Drive the UI with click/fill/navigate, "
-            "then call screencast_stop to write the frames."
+            "Screencast recording. Frames are buffered in this process and written "
+            "when the capture ends at its duration or its frame cap."
         )
 
     async def stop(self, cdp: Any, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -201,7 +205,10 @@ class ScreencastRecorder:
             JSON-RPC style response dict.
         """
         if not self._active:
-            return make_error("no screencast in progress; call screencast_start first")
+            return make_error(
+                "no screencast is recording in this process. The frame buffer is "
+                "process-local, so a capture started elsewhere cannot be stopped here."
+            )
 
         self._active = False
         with contextlib.suppress(Exception):
@@ -217,8 +224,9 @@ class ScreencastRecorder:
         lines = [f"Captured {len(frames)} frames."]
         if truncated:
             lines.append(
-                f"Note: hit max_frames={self._max_frames}; "
-                "capture may be truncated (raise max_frames or every_nth_frame)."
+                f"Note: hit the frame cap of {self._max_frames}; "
+                "capture may be truncated. Raise it with --max-frames N, or "
+                "shorten the capture with --duration SECONDS."
             )
 
         out_dir = str(arguments.get("dir", "")).strip()
