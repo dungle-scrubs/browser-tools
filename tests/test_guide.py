@@ -269,6 +269,115 @@ class TestNoEntryDescribesSomethingRemoved:
 
 
 # --------------------------------------------------------------------------- #
+# The manual says what the tool is for, not only how each verb is spelled
+# --------------------------------------------------------------------------- #
+
+
+class TestTheManualSaysWhatTheToolIsFor:
+    """A reference that never states its purpose leaves an agent guessing.
+
+    The verb list tells a reader how to spell a command. It does not tell
+    them whether this tool is the right one for the job in front of them,
+    which is the question asked first.
+    """
+
+    def test_there_is_a_purpose_section(self, flat):
+        assert "WHAT THIS IS FOR" in flat
+
+    @pytest.mark.parametrize(
+        "claim",
+        [
+            "Work behind a login",
+            "Pages that resist automation",
+            "the accessibility tree",
+            "It is not an HTTP client",
+        ],
+    )
+    def test_the_purpose_section_names_the_fit(self, flat, claim):
+        assert claim in flat
+
+    def test_it_warns_that_per_invocation_cost_is_real(self, flat):
+        assert "about 70 to 85 ms" in flat
+
+
+# --------------------------------------------------------------------------- #
+# The manual says what is reachable without a curated verb
+# --------------------------------------------------------------------------- #
+
+
+class TestTheManualCoversTheUncuratedSurface:
+    """Thirteen curated verbs are not the capability surface.
+
+    An agent that reads only the verb list concludes it cannot upload a
+    file or set a viewport. Both are one CDP call away. Every recipe named
+    here was run against a live browser; see docs/capability-verification.md.
+    """
+
+    def test_there_is_a_section_for_it(self, flat):
+        assert "NO CURATED VERB? SEND THE PROTOCOL" in flat
+
+    @pytest.mark.parametrize(
+        "method",
+        [
+            "DOM.setFileInputFiles",
+            "Input.insertText",
+            "Emulation.setDeviceMetricsOverride",
+            "Network.getCookies",
+            "Network.setCookie",
+            "Page.printToPDF",
+            "Target.getTargets",
+            "Input.dispatchDragEvent",
+        ],
+    )
+    def test_the_recipe_names_its_method(self, flat, method):
+        assert method in flat
+
+    def test_upload_uses_the_backend_node_id_from_a_uid(self, flat):
+        """A nodeId does not survive an invocation; a backendNodeId does."""
+        assert '"backendNodeId": 32' in flat
+        assert "the number after the dash in its UID" in flat
+
+    def test_it_says_the_passthrough_does_not_wrap_the_result(self, flat):
+        assert "with nothing wrapped" in flat
+
+
+# --------------------------------------------------------------------------- #
+# The manual says what breaks when work is split across two invocations
+# --------------------------------------------------------------------------- #
+
+
+class TestTheManualStatesWhatDoesNotCarry:
+    """The failures that cost the most are the ones nothing warns about.
+
+    Each of these was reproduced against a live browser before it was
+    written down, with the exact error the browser returns.
+    """
+
+    def test_there_is_a_section_for_it(self, flat):
+        assert "WHAT DOES NOT CARRY BETWEEN INVOCATIONS" in flat
+
+    @pytest.mark.parametrize(
+        "failure",
+        [
+            "Could not find node with given id",
+            "Profiler is not enabled",
+            "No dialog is showing",
+        ],
+    )
+    def test_the_real_error_text_is_quoted(self, flat, failure):
+        assert failure in flat
+
+    def test_page_state_and_session_state_are_distinguished(self, flat):
+        assert "Page state" in flat
+        assert "Session state does not" in flat
+
+    def test_frame_selection_is_listed_with_key_as_its_remedy(self, flat):
+        section = flat[flat.index("WHAT DOES NOT CARRY BETWEEN INVOCATIONS"):]
+        assert "frames select" in section
+        assert "--key" in section
+
+
+# --------------------------------------------------------------------------- #
 # What `guide` itself prints
 # --------------------------------------------------------------------------- #
 

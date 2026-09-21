@@ -7,22 +7,23 @@
 
 Browser automation, debugging, and anti-detect browsing CLI. Provides:
 
-- **Raw CDP passthrough** — Any `Domain.method` goes straight to the running
+- **Raw CDP passthrough** - Any `Domain.method` goes straight to the running
   browser, with protocol help read live from it
-- **Snapshot-based page automation** — Accessibility-tree snapshots and UID
+- **Snapshot-based page automation** - Accessibility-tree snapshots and UID
   interaction (`snapshot`, `click --uid`, `fill --uid`), in Python over CDP
-- **Named browser instances** — Long-lived Chrome with a registry and named
+- **Named browser instances** - Long-lived Chrome with a registry and named
   profiles that keep a login across restarts
-- **External browsers** — `--endpoint http://127.0.0.1:9222` drives a browser
+- **External browsers** - `--endpoint http://127.0.0.1:9222` drives a browser
   you already have open and logged in, writing nothing to the registry
-- **Frame-aware tools** — Iframe/CDP frame tree management, execution context
+- **Frame-aware tools** - Iframe/CDP frame tree management, execution context
   resolution, and storage inspection
-- **Interstitial detection** — Multi-signal heuristic detection for Cloudflare,
+- **Interstitial detection** - Multi-signal heuristic detection for Cloudflare,
   DataDome, Akamai, PerimeterX, Imperva, AWS WAF, and other challenge pages
-- **Camoufox anti-detect browsing** — Fingerprint-injected Firefox-based
+- **Camoufox anti-detect browsing** - Fingerprint-injected Firefox-based
   browsing for bot-protected sites
-- **CPU profiling** — Direct CDP-based JavaScript CPU profiling with
-  threshold-triggered capture
+- **Anything else CDP can do** - File upload, viewport emulation, cookies,
+  PDF export and page management have no curated verb and need none; `bt
+  guide` has a worked example of each
 
 ## Quick Start
 
@@ -197,7 +198,7 @@ uv run pytest
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT - see [LICENSE](LICENSE).
 
 ## Contributing
 
