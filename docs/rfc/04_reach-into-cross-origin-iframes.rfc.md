@@ -5,16 +5,18 @@ type: feature
 status: Draft
 author: "Kevin Frilot"
 date: 2026-09-21
-version: 1
+version: 2
 ---
 
 # RFC-04: Reach into cross-origin iframes
 
 ## Abstract
 
-A cross-origin iframe runs in its own renderer process under Chrome's site
-isolation, with its own CDP target. `bt` attaches to the page target and reads
-`Page.getFrameTree` there, so such a frame is absent from `frames list`,
+A frame Chrome puts in its own renderer process gets its own CDP target.
+Chrome's site isolation splits by **site**, not by origin, so a cross-site
+iframe is the usual cause and a port difference alone is not one. `bt`
+attaches to the page target and reads `Page.getFrameTree` there, so such a
+frame is absent from `frames list`,
 `frames select` cannot select it, and `snapshot` shows the `Iframe` node with
 nothing under it. Logins, payment forms, consent banners and embedded editors
 are usually cross-origin iframes, so an agent told "fill the card number"
@@ -53,23 +55,30 @@ findings that shape the design:
 1. **The tool cannot cross the boundary today**, and `--target` is not a
    workaround: `core/attach.py:205-207` filters targets to `type == "page"`,
    so an `iframe` target is not addressable.
-2. **`Target.setAutoAttach` costs 0.3 ms** and the child session arrives 1.2
-   to 8.0 ms later.
+2. **`Target.setAutoAttach` costs 0.3 ms.** The child session arrival figure
+   from version 1 is withdrawn: the probe measured it from a point before the
+   explicit `Target.attachToTarget`, not from `setAutoAttach`. Version 1 also
+   claimed `setAutoAttach` re-attaches the session's own target under a second
+   session id. That is unproven, because the probe registered its handler
+   before the explicit attach and counted that attach's own event.
 3. **The child's frame id is its target id, and its `parentId` names a frame
    already in the parent's tree.** The splice is given, not guessed.
 4. **A child session is an ordinary page session.** `Page.getFrameTree`,
    `DOM.getDocument` and `Runtime.evaluate` all answer on it, and the child's
    own same-origin subframes are in its tree.
-5. **`backendNodeId` collides across sessions**: 9 of 10 parent ids also named
-   a node in the child. A backend id is not an address once two renderers are
-   in play.
+5. **`backendNodeId` collides across renderers**: 9 of 10 parent ids also
+   named a node in the child. The namespace is renderer-local, so a backend id
+   is not an address once two renderers are in play. The 9-of-10 figure is
+   specific to that page; the collision is not.
 6. **Auto-attach does not cascade.** `setAutoAttach` on the page session
    reaches the child and stops; the grandchild needs it re-sent on the child's
    session.
-7. **The lifecycle edges**: a child navigation keeps the session, removing the
-   iframe detaches it, sending on a detached session is
-   `-32001 Session with given id not found`, and auto-attach survives a parent
-   navigation without being re-sent.
+7. **Three lifecycle edges**: a same-origin child navigation keeps the
+   session, removing the iframe detaches it, and sending on a detached session
+   is `-32001 Session with given id not found`. Version 1 added a fourth,
+   "auto-attach survives a parent navigation". That is withdrawn: the probe
+   removed the child before navigating the parent, so it never had an existing
+   child session to keep. Cross-process transitions are untested.
 
 ## Terminology
 
@@ -148,11 +157,15 @@ shows an error.
 later on the probe page. Each Frame Session then needs `Page.enable` and
 `Runtime.enable`, which is the same pair the page session already pays.
 
-Against the 85 ms a step already costs, a page with three OOPIFs adds roughly
-one round trip each. The figure the RFC commits to is **one `setAutoAttach`
-per Frame Session plus two enables per Frame Session**, and an implementation
-phase MUST measure the real total on an ad-heavy page before the design is
-called cheap.
+Version 1 said "roughly one round trip each", which does not describe the
+sequence. Per Frame Session the attachment costs `Page.enable`,
+`Page.getFrameTree`, `Runtime.enable` and `Target.setAutoAttach`: four, before
+any work. A merged snapshot adds an accessibility read and frame-owner
+resolution per session on top.
+
+**The RFC commits to no cost figure.** One OOPIF was measured; a news page has
+a dozen and none of them was. An implementation phase MUST measure the real
+total on a wide page, and the design is not called cheap until it has.
 
 ## Design
 
@@ -193,11 +206,15 @@ manual names.
 
 On each `Target.attachedToTarget`:
 
-1. **Ignore anything that is not an OOPIF.** Measured, `setAutoAttach` on a
-   page session also re-attaches that session's own target under a second
-   session id. The filter is `targetInfo.targetId != <this session's own
-   target>`, which is exact, rather than `type == "iframe"`, which is merely
-   usually right.
+1. **Ignore anything that is not an OOPIF.** Version 1 proposed
+   `targetInfo.targetId != <this session's own target>` and called it exact.
+   It is not: auto-attach reaches workers and other related targets, and that
+   predicate sends a `worker` target into `Page.enable` and
+   `Page.getFrameTree`. The filter is a positive list of target types this
+   design supports, which today is `iframe` alone, **and** an ancestry check
+   that the arriving target's frame resolves to a frame below this session's
+   own. A type not on the list is ignored, and a new type does not become a
+   Frame Session because nobody thought to exclude it.
 2. Register that session's `Page` and `Runtime` handlers, then
    `Page.enable`, `Page.getFrameTree`, `Runtime.enable`, in that order. This
    is the ordering `cdp_handler._connect_cdp` already uses, and it exists
@@ -206,9 +223,15 @@ On each `Target.attachedToTarget`:
 3. Send `setAutoAttach` on the new session too. Measured: auto-attach does not
    cascade, so a grandchild needs it. The recursion terminates because the
    frame tree is finite; an implementation MUST still bound it, because a
-   hostile page can nest deeply. **The bound is 10 levels**, and a frame below
-   it is reported in `frames list` with its URL and marked unreachable rather
-   than silently dropped.
+   hostile page can nest deeply.
+
+   **A depth bound alone is not a bound.** Twenty sibling OOPIFs all pass a
+   depth limit of ten, which is the shape an ad-heavy page actually has. The
+   bounds are: depth, active Frame Sessions, sessions initialising at once,
+   and the aggregate budget for optional work. Their values come from
+   measurement on a wide page, not from a guess. A frame past any bound is
+   reported in `frames list` with its URL and marked unreachable rather than
+   silently dropped.
 4. Splice: find the frame whose id equals `targetInfo.targetId`'s `parentId`
    from the child's own `Page.getFrameTree`, and attach the child's tree
    there. Both halves were measured: the child's frame id is its target id,
@@ -222,7 +245,38 @@ root, exactly once, and a selection resolves in the order `frames list`
 prints.** A spliced tree MUST satisfy the same invariant, and the same
 assertion helper MUST be run against it after every sequence.
 
-Three new ways to break it, each of which MUST be handled:
+Version 1 listed three new ways to break it. The review found the list short
+and the claim behind it overstated: the search said to cover "every plausible
+sequence" had been run with a filter, only sequences whose parent frame
+already existed, and it lived in a scratch file rather than the suite. Two
+sequences outside that filter stranded a frame, both in shipped code. They are
+fixed and the search is now an unfiltered test (14,424 sequences of up to
+three events, zero failures).
+
+That does not settle the splice, because a splice adds concurrency the
+existing event handlers have never seen. **Every asynchronous read MUST carry
+the session and the document generation it was issued against, and a
+completion whose generation has moved on MUST be discarded rather than
+applied.** Without that rule, a `Page.getFrameTree` that returns after its
+session detached overwrites state that replaced it.
+
+The sequences the design MUST specify, beyond the three below:
+
+- an old session's events arriving after ownership moved to a new one;
+- a tree response completing after its session or an ancestor detached;
+- a parent tree refresh landing after child trees were spliced under it;
+- a duplicate attach or navigation erasing descendants already discovered;
+- an OOPIF becoming same-process, and a same-process frame becoming an OOPIF;
+- a pending child whose parent frame never arrives.
+
+**A renderer swap is not a removal.** CDP distinguishes
+`Page.frameDetached` with `reason: "swap"` from DOM removal, and the current
+handler ignores the distinction, so a swap deletes a frame that is still
+there. The review reproduced it: after a navigation and a swap-detach the
+structural invariant still passes while the child frame has vanished. An
+invariant that holds over a wrong tree is the reason this rule is explicit.
+
+The three from version 1, each of which MUST still be handled:
 
 - A child session attaches before the parent's frame tree contains the
   placeholder frame. The splice point does not exist yet. The child's frames
@@ -250,16 +304,87 @@ Three reads currently assume one session, and each needs a routing key.
 `FrameManager.get_selected_execution_context_id()` returns a context id and
 nothing else, which is no longer an address. It MUST become
 `get_selected_context()`, returning the pair `(frame session id, execution
-context id)`, and every caller updated. Returning a context id alone from a
-world with several renderers is the `backendNodeId` mistake again.
+context id)`, and its two production callers updated. Returning a context id
+alone from a world with several renderers is the `backendNodeId` mistake
+again.
 
-**The UID carries the routing.** RFC-01 version 6 made a UID
-`<docToken>-<backendNodeId>`, valid for the lifetime of the document that
-produced it. Measured, backend ids collide across sessions: 9 of 10 did on the
-probe page. The document token does not, so the runtime keeps a map from
-document token to Frame Session, written when a snapshot mints UIDs, and
-`click --uid` resolves through it. A UID whose token is not in the map is the
-existing staleness error, unchanged: the document that produced it is gone.
+**Changing the getter is not enough.** Execution context ids are also
+renderer-local, so the stored map and the event handlers need session identity
+too. Two frames in two sessions can both own context `1`, and today the second
+`Runtime.executionContextCreated` overwrites the first:
+
+```
+handle_execution_context_created(id=1, frame=R)
+handle_execution_context_created(id=1, frame=C)
+handle_execution_context_destroyed(id=1)
+-> R keeps context 1, C has none
+```
+
+The destroy cleared the wrong frame. `Runtime.executionContextsCleared` is
+worse: forwarded from a child session to the current handler, it clears every
+frame's context in the whole tree, so a child navigation breaks an unrelated
+parent read. **Context state MUST be keyed by `(frame session, context id)`,
+and a clear or destroy MUST be scoped to the session it arrived on.**
+
+**The UID carries the routing, and version 1 specified it wrongly.** Two
+defects, both reproduced by the review.
+
+*The map cannot be built by the snapshot.* Version 1 wrote the document token
+to Frame Session map when a snapshot minted UIDs. Each invocation is a new
+runtime, so a later `bt click --uid` has neither that map nor those session
+ids. The existing contract is the opposite, and it is deliberate: a UID
+resolves in a process that never took a snapshot.
+
+```
+reader.current: None
+resolved backendNodeId: 7
+```
+
+Version 1 would read the missing route as a stale document and refuse a UID
+the product currently honours. So **routes are reconstructed from the live
+frame tree on every invocation**, independently of any snapshot, at the point
+a UID is resolved. A route that is missing after reconstruction is one of
+three things and the design MUST tell them apart: the document is gone
+(the existing staleness error, exit 1), the Frame Session has not been
+discovered yet (wait for discovery within the deadline), or the Frame Session
+did not answer (exit 1, and say which frame). Inside a Step Run a navigation
+invalidates the routes for that frame even when its Frame Session survives.
+
+*The document token is not an identity.* `doc_token_from_loader_id` takes the
+first 12 hex characters of the loader id, so two loader ids can produce one
+token:
+
+```
+doc_token_from_loader_id("A"*12 + "0"*20)  ->  AAAAAAAAAAAA
+doc_token_from_loader_id("A"*12 + "1"*20)  ->  AAAAAAAAAAAA
+```
+
+Version 1 said tokens "differ by construction". They do not. This is a
+constructed collision rather than one Chrome is likely to produce, and the
+categorical claim was still false.
+
+Worse for this design, `NativeSnapshotReader.build()` takes **one**
+`doc_token` for a whole build and keys raw nodes by AX `nodeId`. Run over a
+parent and a child tree it produces:
+
+```
+[('RootWebArea', 'PARENTTOKEN-1'),
+ ('Iframe',      'PARENTTOKEN-2'),
+ ('RootWebArea', 'PARENTTOKEN-x3'),
+ ('textbox',     'PARENTTOKEN-x4')]
+```
+
+The child's nodes take the parent's token, and their repeated backend ids
+become unaddressable `x<ordinal>` UIDs. The merged snapshot this RFC specifies
+cannot be produced by the current reader at all.
+
+So the build MUST take **document identity per node**, not per build,
+including for same-process child documents, and AX node ids and owner-node
+lookups MUST be namespaced by their owning frame before any merge. The
+`<docToken>-<backendNodeId>` text shape survives; what changes is what
+`docToken` means. It becomes a frame id plus the **full** loader id, hashed to
+a fixed width, with the collision policy stated: a token is an identity, and
+two live documents MUST NOT share one.
 
 ### `snapshot` across the boundary
 
@@ -283,6 +408,40 @@ node is rendered with a one-line note saying the frame did not answer, and the
 rest of the page is returned, because a snapshot that returns nothing because
 one ad frame timed out is worse than one that returns the page.
 
+**Catching exceptions does not achieve that**, and version 1 assumed it would.
+The snapshot call is bounded by the run's deadline, and when that expires the
+whole read is cancelled, parent tree included. The review reproduced it with a
+stalled child read against the existing machinery:
+
+```
+"text": "Error: take_snapshot did not answer in time"
+"isError": true
+```
+
+The parent tree had already answered and was thrown away. So containment is an
+execution policy, not a `try`:
+
+- each child read is its own bounded task, with its own budget;
+- the child budget in aggregate is capped below the operation's deadline, so
+  there is always time left to return the parent;
+- a task is cancelled when its session detaches;
+- a child failure or timeout resolves to the note on the `Iframe` node.
+
+**There is a second containment boundary, and it is sharper.**
+`core.cdp_client._recv_loop()` calls event handlers synchronously, so an
+exception escaping a child's handler exits the receive loop for the whole
+connection:
+
+```
+Unexpected error in receive loop: child setup failed
+connected= False
+parent pending= ConnectionError('WebSocket connection closed')
+```
+
+One child's setup failure takes down the page session. Every handler this
+design adds MUST contain its own exceptions at that boundary. Registering an
+`async` handler does not help, because the receive loop does not await it.
+
 ### Domain enables, per Frame Session
 
 RFC-03's rule is per-session state and reads unchanged once "session" means
@@ -296,6 +455,20 @@ RFC-03's rule is per-session state and reads unchanged once "session" means
   on that Frame Session.
 - A domain the caller enabled by hand in a raw step is not undone. A raw step
   sends on the page session, so this is unchanged.
+
+Auto-attach is new run-owned state and the existing guards do not cover it.
+Measured against `_validate_passthrough`:
+
+```
+Page.disable            StepListError
+Runtime.disable         StepListError
+Target.setAutoAttach    accepted
+```
+
+A raw step can turn auto-attach off, which silently removes every Frame
+Session from the rest of the run: the same shape as the `Page.disable` step
+RFC-03 refused, with the same silence. **`Target.setAutoAttach` MUST be
+refused as a step** for the same reason, exit 2, nothing sent.
 
 ### Step Run
 
@@ -328,6 +501,18 @@ broken ad iframe must still snapshot, still list frames, and still exit 0.
 That is the rule the implementation is most likely to break and the one its
 tests should attack hardest.
 
+**It has a precedence rule, which version 1 missed.** Suppressing every
+`-32001` as exit 0 would report a `click` that never reached a page. The rule
+is which work the caller asked for:
+
+| The child frame was | A detach mid-operation |
+|---|---|
+| optional, expanding a snapshot or a listing | omit it, note it, exit 0 |
+| named by the caller, through `--uid`, `--key` or a selection | fail that operation, exit 1 |
+
+A `click --uid` whose frame went away did not happen, and the caller MUST be
+told.
+
 ## Security Considerations
 
 Reaching into a cross-origin iframe reads content the parent page's own
@@ -346,9 +531,13 @@ Three consequences, and the first two are the ones that matter:
   its cookies for that origin. `storage get` already refuses without a
   selection or a `--key`, so this needs no new gate, and the manual MUST say
   what the selection now reaches.
-- Auto-attach does not grant anything a caller could not already obtain by
-  driving the iframe's URL directly, with enough effort. It removes the
-  effort.
+- Version 1 said auto-attach grants nothing a caller could not get by driving
+  the iframe's URL directly. That contradicts this RFC's own motivation, which
+  is that the frame's content depends on the parent. Reading an embedded
+  document's **current state**, after its handshake with the parent and with
+  the parent's session behind it, is not the same as opening its URL. This is
+  a real widening, and it is the right one for a tool whose purpose is driving
+  pages an agent was pointed at, but it should not be described as free.
 
 No new network exposure: every session rides the existing browser-level
 WebSocket, bound to loopback.
@@ -382,37 +571,134 @@ bytes, at the cost of a hang on every path that forgets to release. Nothing in
 ## Decisions
 
 1. **`Target.setAutoAttach` with `flatten: true`**, re-sent on every child
-   session, bounded at 10 levels.
-2. **One Spliced Frame Tree**, keeping the invariant `3baf228` landed, with
-   the splice point taken from the child's own `parentId`.
-3. **The document token routes.** `get_selected_execution_context_id` becomes
-   `get_selected_context`, returning a `(frame session, context)` pair.
-4. **`snapshot` merges child trees** at the `Iframe` node, and a child that
-   does not answer is a note on that node rather than a failed snapshot.
-5. **No new verb, no new flag** beyond whatever Open Question 1 settles.
-6. **Nothing about a child frame may fail an invocation that did not ask about
-   one.**
+   session, filtered to a positive list of supported target types plus an
+   ancestry check, and bounded on depth, session count, concurrent
+   initialisation and aggregate optional work.
+2. **One Spliced Frame Tree**, keeping the invariant `3baf228` and `#138`
+   landed, with the splice point taken from the child's own `parentId`, and
+   every asynchronous read carrying the session and document generation it was
+   issued against.
+3. **Routes are reconstructed from the live frame tree on every invocation**,
+   never carried from a snapshot, because a UID resolves in a process that
+   never took one. `get_selected_execution_context_id` becomes
+   `get_selected_context`, returning a `(frame session, context)` pair, and
+   execution-context state is keyed by `(frame session, context id)`.
+4. **Document identity is per node, not per build.** `docToken` becomes a
+   frame id plus the full loader id, hashed to a fixed width, and two live
+   documents MUST NOT share a token. The `<docToken>-<backendNodeId>` text
+   shape is unchanged.
+5. **`snapshot` merges child trees** at the `Iframe` node. Each child read is
+   a bounded task with a budget capped below the operation's deadline, so the
+   parent tree is returned even when a child stalls, and a child that does not
+   answer is a note on that node.
+6. **Every handler contains its own exceptions at the receive-loop boundary**,
+   because that loop is shared and calls handlers synchronously.
+7. **`Target.setAutoAttach` is refused as a step**, exit 2, alongside
+   `Page.disable` and `Runtime.disable`.
+8. **Off by default for the first release**, behind `--frames all`, which the
+   `3baf228` diagnosis names. Settled, see Open Question 1.
+9. **Nothing about an *optional* child frame may fail an invocation.** A child
+   the caller named through `--uid`, `--key` or a selection fails that
+   operation loudly instead.
 
 ## Open Questions
 
-1. **On by default, or behind a flag?** Kevin's call, because it widens what
-   every invocation does. Recommendation: **on by default**, because the
-   error-message fix exists precisely on the premise that agents do not know
-   what they cannot see, and a flag they must know about has the same problem.
-   The fallback is `--frames all`, named in the `3baf228` diagnosis.
+1. ~~**On by default, or behind a flag?**~~ **Settled: behind a flag for the
+   first release**, and Decision 8 records it. Version 1 recommended on by
+   default, on the grounds that an agent must not need to know a flag exists.
+   That reasoning is sound and it is outweighed: six blocking findings in
+   version 1 mean the correctness work is real, and default-on would put every
+   one of those paths into every invocation, including the ones that never
+   asked about a child frame. A flag does not excuse a defect; it limits how
+   far the first release's defects reach. The `3baf228` message names the
+   flag, so an agent that hits the boundary is still told what to do.
+   Default-on becomes a separate, later change once separate-invocation UID
+   routing, renderer swaps, slow children, detach-during-snapshot and wide
+   pages all pass.
 2. **What does `frames list` print for an OOPIF?** The tree position is
    settled. Whether the listing marks the process boundary is not.
-   Recommendation: mark it, because an agent that knows a frame is
-   out-of-process can reason about why a `postMessage` will not work.
+   Recommendation: mark it, because knowing a frame is out-of-process explains
+   why a UID from one snapshot addresses a different document. Version 1 gave
+   `postMessage` as the reason, which is wrong: `postMessage` works across
+   renderer processes.
 3. **Does `screencast` or `screenshot` change?** Neither is frame-scoped
    today; both capture the page. Recommendation: no change, and the manual
    says so.
-4. **What is the real cost on an ad-heavy page?** The probe page has one
-   OOPIF. A news site has a dozen. The implementation phase MUST measure
-   before the design is called cheap, and Decision 1's bound may need to
-   become a count rather than a depth.
+4. **What is the real cost on a wide page?** Unmeasured, and Decision 1's
+   bounds cannot be given values until it is. This is the first thing the
+   implementation phase does, before any of the design is called cheap.
+5. **What is the OOPIF readiness barrier?** `wait-idle` polls resource-entry
+   counts in the page session, so it says nothing about whether a child
+   session has attached and answered. A run that navigates and then reads a
+   child frame needs a barrier that waits for discovery, and this RFC does not
+   specify one.
 
 ## Changes in this revision
+
+**Version 2** (2026-09-21) is the revision after a cross-family adversarial
+review by `gpt-6-astra@codex` against the version 1 snapshot at `2239955`.
+The full report is in `.scratch/rfc-04/review-report.md`. The verdict was
+block pending revision: six blocking findings, seven non-blocking, and a
+correction to three of version 1's seven measured findings. Every one was
+reproduced locally before it was applied. The reviewer's sandbox refused
+sockets, so its work was source inspection and controlled input, which it
+said plainly rather than reporting as live.
+
+Blocking, and what changed:
+
+1. **UID routing could not work across invocations.** Version 1 built the
+   document-token-to-session map when a snapshot minted UIDs. A later `bt
+   click --uid` is a new process with no map, and the existing contract
+   deliberately resolves a UID without a snapshot in that process. Routes are
+   now reconstructed from the live frame tree on every invocation, and a
+   missing route distinguishes a gone document from an undiscovered or
+   unresponsive Frame Session.
+2. **The document token is not an identity.** `doc_token_from_loader_id` takes
+   12 hex characters, so version 1's "differ by construction" was false. Worse,
+   `NativeSnapshotReader.build()` takes one token per build and turns repeated
+   backend ids into unaddressable `x<ordinal>` UIDs, so the merged snapshot
+   could not be produced at all. Identity is now per node, from a frame id plus
+   the full loader id.
+3. **The OOPIF filter accepted workers.** `targetId != own_target_id` is true
+   for a worker target, which version 1 would have sent into `Page.enable`.
+   The filter is now a positive type list plus an ancestry check.
+4. **The invariant was not established for the sequences a splice adds.** The
+   search behind the claim was filtered and uncommitted. It is now an
+   unfiltered test, and the two sequences it had excluded were real defects,
+   fixed in #138. The RFC now requires session and document generation on
+   every asynchronous read, and separates a renderer swap from a removal.
+5. **Changing the context getter was not enough.** Context ids are
+   renderer-local, so the stored map and the events need session identity too.
+   Reproduced: two frames owning context `1`, and a destroy clearing the wrong
+   one.
+6. **Containment needs an execution policy, not exception handling.** The
+   deadline cancels the whole snapshot, parent tree included, so catching a
+   child's exception does not save the page. Child reads are now bounded tasks
+   with an aggregate budget below the deadline. A second boundary was found:
+   `_recv_loop` calls handlers synchronously, so one child's exception closes
+   the whole connection.
+
+Three of version 1's measured findings were overstated and are corrected in
+place: the child-arrival timings used the wrong reference point, the claimed
+second page session was the probe counting its own explicit attach, and
+"auto-attach survives a parent navigation" was never tested because the probe
+removed the child first.
+
+Non-blocking, applied: cross-origin is not the same as out-of-process, since
+site isolation splits by site; `postMessage` works across renderer processes,
+so Open Question 2's reason was wrong; the cost accounting omitted
+`Page.getFrameTree` and the snapshot reads; the security section's
+direct-navigation equivalence contradicted the motivation; a depth bound
+alone does not bound twenty siblings; and `wait-idle` is not an OOPIF
+readiness barrier, which is now Open Question 5.
+
+**Open Question 1 is settled**: off by default for the first release, behind
+`--frames all`. This reverses version 1's recommendation, on Kevin's decision
+and with the reviewer concurring.
+
+The reviewer confirmed the scope fits, and noted that RFC-01's exclusion
+applies to that merge effort rather than to this capability, so RFC-04 should
+authorize it explicitly. It does, in Decisions.
 
 **Version 1** (2026-09-21) is the first draft. Every CDP claim was measured
 against headless Chrome before it was written; the transcripts and probes are
