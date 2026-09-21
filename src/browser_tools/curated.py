@@ -626,12 +626,15 @@ def screenshot(
     url: str | None = None,
     registry_path: str | None = None,
     endpoint: str | None = None,
+    handler: CDPHandler | None = None,
 ) -> dict[str, Any]:
     """Capture a page screenshot (frozen ``take_screenshot``, CDP-native form).
 
-    Takes no ``handler``: this verb runs over a One-Shot Session, not over a
-    ``CDPHandler``. A Step Run reaches it through
-    :func:`capture_on_session` on the session it already holds.
+    ``handler`` is a session already open, which a Step Run holds for every
+    step. This verb runs over a One-Shot Session rather than over the
+    handler's tool surface, so it takes the handler's session pair and
+    submits the capture to the handler's loop. The rendering below, which is
+    what the caller actually sees, is the same either way.
 
     ``--path`` writes the PNG to a file; without it the base64 ``data:`` URI is
     returned. ``--target``/``--url`` pick the page target, as on the passthrough
@@ -640,18 +643,25 @@ def screenshot(
     """
     if target is not None and url is not None:
         raise UsageError("cannot specify both --target and --url")
-    port = _resolve_port(instance, registry_path, endpoint)
 
-    spec: str | None = None
-    target_by: str | None = None
-    if target is not None:
-        spec = target
-        target_by = "index" if target.isdigit() else "id"
-    elif url is not None:
-        spec = url
-        target_by = "url"
+    if handler is not None:
+        cdp, session_id = handler.session
+        data = handler.submit(capture_on_session(cdp, session_id))
+    else:
+        port = _resolve_port(instance, registry_path, endpoint)
 
-    data = asyncio.run(_capture_screenshot(port, spec, target_by, external=endpoint is not None))
+        spec: str | None = None
+        target_by: str | None = None
+        if target is not None:
+            spec = target
+            target_by = "index" if target.isdigit() else "id"
+        elif url is not None:
+            spec = url
+            target_by = "url"
+
+        data = asyncio.run(
+            _capture_screenshot(port, spec, target_by, external=endpoint is not None)
+        )
 
     if not data:
         raise LifecycleError("no screenshot data returned from the browser")

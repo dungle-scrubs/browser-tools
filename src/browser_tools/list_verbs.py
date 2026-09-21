@@ -116,6 +116,11 @@ async def collect_on_session(
             cdp.off(event=event_name, callback=handler)
 
 
+#: Headroom over a collection window, so the bound never fires before the
+#: window it is bounding has closed.
+_COLLECTION_GRACE_SECONDS = 15.0
+
+
 def _run_collection(
     *,
     instance: str | None,
@@ -125,6 +130,7 @@ def _run_collection(
     url: str | None,
     registry_path: str | None,
     endpoint: str | None = None,
+    handler: Any | None = None,
 ) -> list[dict[str, Any]]:
     """Shared resolve-instance-and-collect path for both list verbs.
 
@@ -132,6 +138,15 @@ def _run_collection(
     ... implemented as thin wrappers over a short attach session") and
     delegates to ``collect_on_session`` over it.
     """
+    if handler is not None:
+        # A Step Run already holds the session. Collecting on it keeps the
+        # window inside the run's one connection instead of opening a second.
+        cdp, session_id = handler.session
+        return handler.submit(
+            collect_on_session(cdp, session_id, events, duration),
+            timeout=duration + _COLLECTION_GRACE_SECONDS,
+        )
+
     port = lifecycle.resolve_cdp_port(instance, registry_path, endpoint)
 
     spec, target_by = _target_slot(target, url)
@@ -186,6 +201,7 @@ def console_list(
     duration: float = DEFAULT_LIST_WINDOW_SECONDS,
     registry_path: str | None = None,
     endpoint: str | None = None,
+    handler: Any | None = None,
 ) -> list[dict[str, Any]]:
     """Collect console messages over a short attach window and render them.
 
@@ -201,6 +217,7 @@ def console_list(
         url=url,
         registry_path=registry_path,
         endpoint=endpoint,
+        handler=handler,
     )
     return [_render_console_entry(item) for item in raw]
 
@@ -264,6 +281,7 @@ def network_list(
     duration: float = DEFAULT_LIST_WINDOW_SECONDS,
     registry_path: str | None = None,
     endpoint: str | None = None,
+    handler: Any | None = None,
 ) -> list[dict[str, Any]]:
     """Collect network request/response events over a short attach window.
 
@@ -279,5 +297,6 @@ def network_list(
         url=url,
         registry_path=registry_path,
         endpoint=endpoint,
+        handler=handler,
     )
     return _render_network_entries(raw)

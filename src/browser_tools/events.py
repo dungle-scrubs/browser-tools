@@ -379,6 +379,11 @@ def _timeout_message(event: str, match: str | None, timeout: float) -> str:
     return f"timeout: no {event} event{suffix} within {timeout}s"
 
 
+#: Headroom over a wait's own deadline, so the outer bound never fires first
+#: and turns the wait's own `WaitTimeout` into something else.
+_WAIT_GRACE_SECONDS = 5.0
+
+
 @cli_cdp_errors
 def wait(
     *,
@@ -390,6 +395,7 @@ def wait(
     url: str | None = None,
     registry_path: str | None = None,
     endpoint: str | None = None,
+    handler: Any | None = None,
 ) -> dict[str, Any]:
     """Block for one matching event and return its JSON dict.
 
@@ -399,6 +405,16 @@ def wait(
     seam's own failures. Target-resolution, no-page, CDP, and connection
     failures become ``LifecycleError`` (CLI exit 1), via ``@cli_cdp_errors``.
     """
+    if handler is not None:
+        # A Step Run already holds the session. `timeout=0` means no deadline
+        # here, so the submitted wait gets none either; the run's own
+        # `--timeout` is what bounds an otherwise unbounded step.
+        cdp, session_id = handler.session
+        return handler.submit(
+            wait_on_session(cdp, session_id, event, match, timeout),
+            timeout=None if timeout == 0 else timeout + _WAIT_GRACE_SECONDS,
+        )
+
     port = lifecycle.resolve_cdp_port(instance, registry_path, endpoint)
 
     spec, target_by = _target_slot(target, url)
