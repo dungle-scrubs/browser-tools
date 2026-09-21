@@ -121,6 +121,30 @@ def _resolve_port(
 
 
 @contextlib.contextmanager
+def _handler_for(
+    handler: CDPHandler | None,
+    instance: str | None,
+    target: str | None,
+    registry_path: str | None,
+    endpoint: str | None,
+) -> Generator[CDPHandler]:
+    """Yield the session this verb runs on, opening one only if it must.
+
+    Every curated verb opens its own connection when called alone. Inside a
+    Step Run the session is opened once and shared, so the run passes the
+    handler in and this yields it untouched. Ownership decides teardown: a
+    handler passed in is never closed here, including when the body raises,
+    because the next step still needs it.
+    """
+    if handler is not None:
+        yield handler
+        return
+    port = _resolve_port(instance, registry_path, endpoint)
+    with _cdp_handler_session(port, target, external=endpoint is not None) as opened:
+        yield opened
+
+
+@contextlib.contextmanager
 def _cdp_handler_session(
     port: int, target_spec: str | None = None, *, external: bool = False
 ) -> Generator[CDPHandler]:
@@ -236,6 +260,7 @@ def snapshot(
     target: str | None = None,
     registry_path: str | None = None,
     endpoint: str | None = None,
+    handler: CDPHandler | None = None,
 ) -> dict[str, Any]:
     """Return the native UID accessibility tree (frozen ``take_snapshot``).
 
@@ -243,8 +268,7 @@ def snapshot(
     not focus-guarded. ``target`` selects the page whose UIDs are returned,
     which is what makes those UIDs usable with ``click --target``.
     """
-    port = _resolve_port(instance, registry_path, endpoint)
-    with _cdp_handler_session(port, target, external=endpoint is not None) as handler:
+    with _handler_for(handler, instance, target, registry_path, endpoint) as handler:
         tree = _native_or_raise(handler, "take_snapshot", {})
     return {"snapshot": tree}
 
@@ -256,6 +280,7 @@ def click(
     target: str | None = None,
     registry_path: str | None = None,
     endpoint: str | None = None,
+    handler: CDPHandler | None = None,
 ) -> dict[str, Any]:
     """Native UID click (frozen ``click``), over the #40 interaction path.
 
@@ -265,8 +290,7 @@ def click(
     check unable to fire: it was always "current", so a UID from a different
     tree resolved against it by ordinal and named whatever now sat there.
     """
-    port = _resolve_port(instance, registry_path, endpoint)
-    with _cdp_handler_session(port, target, external=endpoint is not None) as handler:
+    with _handler_for(handler, instance, target, registry_path, endpoint) as handler:
         _refuse_input_to_hidden_tab(handler)
         text = _native_or_raise(handler, "click", {"uid": uid})
     return {"uid": uid, "result": text}
@@ -280,13 +304,13 @@ def fill(
     target: str | None = None,
     registry_path: str | None = None,
     endpoint: str | None = None,
+    handler: CDPHandler | None = None,
 ) -> dict[str, Any]:
     """Native UID fill (frozen ``fill``), over the #40 interaction path.
 
     Takes no snapshot, for the reason :func:`click` gives.
     """
-    port = _resolve_port(instance, registry_path, endpoint)
-    with _cdp_handler_session(port, target, external=endpoint is not None) as handler:
+    with _handler_for(handler, instance, target, registry_path, endpoint) as handler:
         _refuse_input_to_hidden_tab(handler)
         result = _native_or_raise(handler, "fill", {"uid": uid, "value": text})
     return {"uid": uid, "text": text, "result": result}
@@ -304,10 +328,10 @@ def wait_idle(
     idle_ms: int = DEFAULT_IDLE_MS,
     registry_path: str | None = None,
     endpoint: str | None = None,
+    handler: CDPHandler | None = None,
 ) -> dict[str, Any]:
     """Wait for network idle (frozen ``wait_idle``)."""
-    port = _resolve_port(instance, registry_path, endpoint)
-    with _cdp_handler_session(port, external=endpoint is not None) as handler:
+    with _handler_for(handler, instance, None, registry_path, endpoint) as handler:
         text = _tool_or_raise(handler, "wait_idle", {"timeout_ms": timeout_ms, "idle_ms": idle_ms})
     return {"result": text}
 
@@ -319,10 +343,10 @@ def wait_stable(
     stable_ms: int = DEFAULT_STABLE_MS,
     registry_path: str | None = None,
     endpoint: str | None = None,
+    handler: CDPHandler | None = None,
 ) -> dict[str, Any]:
     """Wait for DOM quiescence (frozen ``wait_stable``)."""
-    port = _resolve_port(instance, registry_path, endpoint)
-    with _cdp_handler_session(port, external=endpoint is not None) as handler:
+    with _handler_for(handler, instance, None, registry_path, endpoint) as handler:
         text = _tool_or_raise(
             handler, "wait_stable", {"timeout_ms": timeout_ms, "stable_ms": stable_ms}
         )
@@ -373,6 +397,7 @@ def detect(
     registry_path: str | None = None,
     endpoint: str | None = None,
     wait_seconds: float | None = None,
+    handler: CDPHandler | None = None,
 ) -> dict[str, Any]:
     """Run interstitial detection against the current page.
 
@@ -384,8 +409,7 @@ def detect(
     max_retries = None
     if wait_seconds is not None:
         max_retries = max(0, math.ceil(wait_seconds / INTERSTITIAL_RETRY_DELAY_SECONDS))
-    port = _resolve_port(instance, registry_path, endpoint)
-    with _cdp_handler_session(port, external=endpoint is not None) as handler:
+    with _handler_for(handler, instance, None, registry_path, endpoint) as handler:
         result = handler.run_post_navigation_detection(max_retries)
     if result is None:
         raise LifecycleError("interstitial detection unavailable (no CDP session)")
@@ -416,10 +440,10 @@ def frames_list(
     instance: str | None,
     registry_path: str | None = None,
     endpoint: str | None = None,
+    handler: CDPHandler | None = None,
 ) -> dict[str, Any]:
     """List the page's frames (frozen ``list_frames``)."""
-    port = _resolve_port(instance, registry_path, endpoint)
-    with _cdp_handler_session(port, external=endpoint is not None) as handler:
+    with _handler_for(handler, instance, None, registry_path, endpoint) as handler:
         text = _tool_or_raise(handler, "list_frames", {})
     return {"frames": text}
 
@@ -430,10 +454,10 @@ def frames_select(
     pattern: str,
     registry_path: str | None = None,
     endpoint: str | None = None,
+    handler: CDPHandler | None = None,
 ) -> dict[str, Any]:
     """Select a frame by URL pattern (frozen ``select_frame``)."""
-    port = _resolve_port(instance, registry_path, endpoint)
-    with _cdp_handler_session(port, external=endpoint is not None) as handler:
+    with _handler_for(handler, instance, None, registry_path, endpoint) as handler:
         text = _tool_or_raise(handler, "select_frame", {"url_pattern": pattern})
     return {"selected": text}
 
@@ -443,10 +467,10 @@ def frames_reset(
     instance: str | None,
     registry_path: str | None = None,
     endpoint: str | None = None,
+    handler: CDPHandler | None = None,
 ) -> dict[str, Any]:
     """Clear frame selection back to the top-level page (frozen ``reset_frame``)."""
-    port = _resolve_port(instance, registry_path, endpoint)
-    with _cdp_handler_session(port, external=endpoint is not None) as handler:
+    with _handler_for(handler, instance, None, registry_path, endpoint) as handler:
         text = _tool_or_raise(handler, "reset_frame", {})
     return {"result": text}
 
@@ -462,6 +486,7 @@ def storage_get(
     key: str | None = None,
     registry_path: str | None = None,
     endpoint: str | None = None,
+    handler: CDPHandler | None = None,
 ) -> dict[str, Any]:
     """Read a frame's storage (frozen ``get_frame_storage``).
 
@@ -470,8 +495,7 @@ def storage_get(
     read (a URL pattern), selected within this one invocation before the read;
     omitting it surfaces the tool's own "No frame selected" error (exit 1).
     """
-    port = _resolve_port(instance, registry_path, endpoint)
-    with _cdp_handler_session(port, external=endpoint is not None) as handler:
+    with _handler_for(handler, instance, None, registry_path, endpoint) as handler:
         if key:
             _tool_or_raise(handler, "select_frame", {"url_pattern": key})
         text = _tool_or_raise(handler, "get_frame_storage", {})
@@ -492,6 +516,7 @@ def screencast(
     max_frames: int = DEFAULT_SCREENCAST_MAX_FRAMES,
     registry_path: str | None = None,
     endpoint: str | None = None,
+    handler: CDPHandler | None = None,
 ) -> dict[str, Any]:
     """Capture a bounded screencast and write its frames, in one invocation.
 
@@ -525,8 +550,7 @@ def screencast(
     """
     check_screencast_values(duration, fmt)
 
-    port = _resolve_port(instance, registry_path, endpoint)
-    with _cdp_handler_session(port, external=endpoint is not None) as handler:
+    with _handler_for(handler, instance, None, registry_path, endpoint) as handler:
         _tool_or_raise(handler, "screencast_start", {"format": fmt, "max_frames": max_frames})
         frames = _capture_for(handler, duration, max_frames)
         text = _tool_or_raise(handler, "screencast_stop", {"dir": out_dir})
@@ -568,19 +592,29 @@ async def _capture_screenshot(
         cdp,
         session_id,
     ):
-        data = ""
-        for attempt in range(SCREENSHOT_BLANK_MAX_RETRIES + 1):
-            result = await cdp.send(
-                method="Page.captureScreenshot",
-                params={"format": "png"},
-                session_id=session_id,
-            )
-            data = result.get("data", "")
-            if not data or not screenshot_looks_blank(data):
-                return data
-            if attempt < SCREENSHOT_BLANK_MAX_RETRIES:
-                await asyncio.sleep(SCREENSHOT_BLANK_RETRY_DELAY_SECONDS)
-        return data
+        return await capture_on_session(cdp, session_id)
+
+
+async def capture_on_session(cdp: Any, session_id: str) -> str:
+    """Capture one full-page PNG over a session someone else opened.
+
+    Split out so a Step Run can reach it: the run holds one session for every
+    step, so it cannot call a function that opens its own. The bare verb still
+    goes through this, so there is one capture implementation, not two.
+    """
+    data = ""
+    for attempt in range(SCREENSHOT_BLANK_MAX_RETRIES + 1):
+        result = await cdp.send(
+            method="Page.captureScreenshot",
+            params={"format": "png"},
+            session_id=session_id,
+        )
+        data = result.get("data", "")
+        if not data or not screenshot_looks_blank(data):
+            return data
+        if attempt < SCREENSHOT_BLANK_MAX_RETRIES:
+            await asyncio.sleep(SCREENSHOT_BLANK_RETRY_DELAY_SECONDS)
+    return data
 
 
 @cli_cdp_errors
@@ -594,6 +628,10 @@ def screenshot(
     endpoint: str | None = None,
 ) -> dict[str, Any]:
     """Capture a page screenshot (frozen ``take_screenshot``, CDP-native form).
+
+    Takes no ``handler``: this verb runs over a One-Shot Session, not over a
+    ``CDPHandler``. A Step Run reaches it through
+    :func:`capture_on_session` on the session it already holds.
 
     ``--path`` writes the PNG to a file; without it the base64 ``data:`` URI is
     returned. ``--target``/``--url`` pick the page target, as on the passthrough

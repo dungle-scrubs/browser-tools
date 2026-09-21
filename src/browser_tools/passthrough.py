@@ -150,6 +150,24 @@ def strip_endpoint_flag(argv: list[str]) -> tuple[list[str], str | None]:
     return remaining, endpoint
 
 
+async def send_on_session(
+    cdp: Any,
+    session_id: str,
+    method: str,
+    params: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Send one method over a session someone else opened.
+
+    Split out so a Step Run can reach it: the run holds one session for every
+    step, so it cannot call a function that opens its own. The hidden-tab
+    refusal travels with the send rather than being left to the caller,
+    because a step must not be able to reach the browser around it.
+    """
+    if method.startswith(_INPUT_DELIVERY_PREFIXES):
+        await _refuse_input_to_hidden_tab(cdp, session_id)
+    return await cdp.send(method=method, params=params, session_id=session_id)
+
+
 def extract_target_flags(
     argv: list[str],
 ) -> tuple[list[str], str | None, str | None, str | None]:
@@ -322,9 +340,7 @@ def send(
         async with one_shot_page_session(
             port, spec, target_by, external=endpoint is not None
         ) as (cdp, session_id):
-            if method.startswith(_INPUT_DELIVERY_PREFIXES):
-                await _refuse_input_to_hidden_tab(cdp, session_id)
-            return await cdp.send(method=method, params=params, session_id=session_id)
+            return await send_on_session(cdp, session_id, method, params)
 
     try:
         return asyncio.run(_send())

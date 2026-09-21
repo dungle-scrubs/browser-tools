@@ -19,6 +19,14 @@ from .core.attach import AmbiguousTargetError, TargetNotFoundError
 
 logger = logging.getLogger(__name__)
 
+
+def _running_loop() -> asyncio.AbstractEventLoop | None:
+    """The loop on this thread, or None when this thread runs no loop."""
+    try:
+        return asyncio.get_running_loop()
+    except RuntimeError:
+        return None
+
 #: Connection failures that are outcomes rather than defects: no browser on
 #: the port, and a target spec that names no page or more than one. They get a
 #: one-line message; everything else keeps its traceback.
@@ -348,6 +356,48 @@ class CDPRuntime:
     def connect_error(self) -> str | None:
         """Why the connection failed, once it has. ``None`` until then."""
         return self._connect_error
+
+    @property
+    def session(self) -> tuple[Any, str] | None:
+        """The run's ``(client, sessionId)``, or None before it connects."""
+        if self._cdp_client is None:
+            return None
+        return self._cdp_client.raw, self._cdp_client.session_id
+
+    def submit(self, coro: Any, timeout: float | None = None) -> Any:
+        """Run one coroutine on this runtime's loop and return its result.
+
+        The loop belongs to the runtime's background thread, so a caller on
+        another thread cannot await the coroutine itself. A Step Run uses
+        this for the One-Shot Session verbs, which are coroutines over the
+        session this runtime already holds.
+        """
+        try:
+            if self._loop is None:
+                raise RuntimeError("the CDP runtime is not running")
+            if _running_loop() is self._loop:
+                # The loop would have to run this coroutine and wait for it at
+                # the same time. It cannot, so the wait never ends.
+                raise RuntimeError("submit was called from the runtime's own loop")
+            future = asyncio.run_coroutine_threadsafe(coro, self._loop)
+        except BaseException:
+            # Nothing took ownership of the coroutine, so nothing will ever
+            # await it. Left alone it emits "coroutine was never awaited" on
+            # stderr, at the exact moment a run is already reporting why it
+            # failed.
+            coro.close()
+            raise
+
+        try:
+            return future.result(timeout=timeout)
+        except BaseException:
+            # The wait ended; the coroutine did not. Abandoning it leaves work
+            # running on the session the next step is about to use, and on the
+            # one teardown is about to close. Cancelling reaches the coroutine
+            # and runs its cleanup. What it already sent to the browser was
+            # sent; this stops what has not happened yet.
+            future.cancel()
+            raise
 
     @property
     def mode(self) -> str:
@@ -684,6 +734,15 @@ class CDPHandler:
     def connect_error(self) -> str | None:
         """Why the runtime's connection failed, once it has."""
         return self._rt.connect_error
+
+    @property
+    def session(self) -> tuple[Any, str] | None:
+        """The runtime's ``(client, sessionId)``, or None before it connects."""
+        return self._rt.session
+
+    def submit(self, coro: Any, timeout: float | None = None) -> Any:
+        """Run one coroutine on the runtime's loop; see :meth:`CDPRuntime.submit`."""
+        return self._rt.submit(coro, timeout=timeout)
 
     @property
     def mode(self) -> str:
