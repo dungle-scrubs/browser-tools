@@ -637,7 +637,9 @@ bytes, at the cost of a hang on every path that forgets to release. Nothing in
 
 **Version 2** (2026-09-21) is the revision after a cross-family adversarial
 review by `gpt-6-astra@codex` against the version 1 snapshot at `2239955`.
-The full report is in `.scratch/rfc-04/review-report.md`. The verdict was
+The full report is in
+`docs/rfc/04_reach-into-cross-origin-iframes.review-01.md`, and the brief it
+answered is beside it. The verdict was
 block pending revision: six blocking findings, seven non-blocking, and a
 correction to three of version 1's seven measured findings. Every one was
 reproduced locally before it was applied. The reviewer's sandbox refused

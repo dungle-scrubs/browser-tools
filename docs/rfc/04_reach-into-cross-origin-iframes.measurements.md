@@ -184,40 +184,43 @@ as a failure of the step.
 
 ## The probes
 
-All three live in `.scratch/rfc-04/`, which is git-ignored, so they are
-reproduced here in full.
+All five are committed at `docs/rfc/04_probes/`, so every figure above can be
+reproduced from the repository. Version 1 of this file said they were
+reproduced in full here and then paraphrased them, which the review caught.
+They are described below and committed in full there.
 
-### `probe.sh` and `probe_nested.sh`
+| File | What it does | Findings |
+|---|---|---|
+| `probe.sh` | serves the two loopback origins, launches a headless instance, resolves its port from the registry by name, navigates, hands the browser WebSocket URL to a Python probe | setup |
+| `probe_nested.sh` | the same for three origins, with the grandchild on IPv6 loopback | setup |
+| `probe_autoattach.py` | attaches with `flatten: true`, sends `setAutoAttach`, then reads the child session's frame tree, DOM, backend ids and origin | 2 to 5 |
+| `probe_edges.py` | four sequences in order: navigate the child, remove the iframe, send on the dead session, navigate the parent | 3 and 7 |
+| `probe_nesting.py` | sends `setAutoAttach` on the page session, counts what arrives, re-sends on the child session, counts again | 6 |
 
-Both stand up the loopback origins, launch a headless instance, resolve its
-port from the registry by name, navigate, and hand the browser WebSocket URL
-to a Python probe. `probe.sh` serves two origins; `probe_nested.sh` serves
-three, with the grandchild on IPv6 loopback.
+Each shell probe refuses to run when it cannot resolve its instance's port:
 
 ```bash
-INSTANCE=$("${BT[@]}" launch --headless | python3 -c 'import json,sys; print(json.load(sys.stdin)["name"])')
-PORT=$("${BT[@]}" status | python3 -c "
-import json,sys
-for row in json.load(sys.stdin):
-    if row['name'] == '$INSTANCE': print(row['port']); break
-")
 [ -z "$PORT" ] && { echo 'no port; refusing to probe someone else's browser'; exit 1; }
-WS=$(curl -s "http://127.0.0.1:$PORT/json/version" | python3 -c 'import json,sys; print(json.load(sys.stdin)["webSocketDebuggerUrl"])')
 ```
 
-### `probe_autoattach.py`
+## Two figures this file withdraws
 
-Attaches to the page target with `flatten: true`, sends `setAutoAttach`,
-prints every attach event, then reads the child session's frame tree, its DOM,
-its backend ids against the parent's, and its origin. Findings 2 to 5.
+The review of RFC-04 version 1 found two measurement errors here, and they are
+corrected rather than quietly dropped.
 
-### `probe_edges.py`
+**The child-arrival offsets are not offsets from `setAutoAttach`.**
+`probe_edges.py` sets `start` before it sends `Target.attachToTarget`, and the
+printed offsets are measured from `start`. The "1.2 ms after the call" reading
+in version 1 is wrong. The 0.3 ms for the `setAutoAttach` command itself uses
+its own `t0` and stands.
 
-The same setup, then four sequences in order: navigate the child, remove the
-iframe, send on the dead session, navigate the parent. Records every
-`Target.*` event with a millisecond offset. Findings 3 and 7.
+**The second `page` attach event was the probe's own explicit attach.** The
+probe registers its `Target.attachedToTarget` handler before calling
+`Target.attachToTarget`, so that call's event is in the list. Version 1 read
+it as `setAutoAttach` re-attaching the session's own target and built a filter
+rule on it. Replayed against a controlled client that emitted exactly one page
+event during explicit attach and only an iframe event during auto-attach, the
+probe still printed two events and `isOurPage=True`. Nothing here establishes
+that auto-attach produces a second page session.
 
-### `probe_nesting.py`
-
-Three origins. Sends `setAutoAttach` on the page session, counts what
-arrives, then re-sends it on the child session and counts again. Finding 6.
+Finding 2 in the RFC is narrowed to what these probes actually measured.
