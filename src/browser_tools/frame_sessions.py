@@ -41,6 +41,7 @@ here after finding each one broken in the draft:
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -156,6 +157,27 @@ class FrameSessions:
     def _subscribe(self, session_id: str) -> None:
         self._client.on("Target.attachedToTarget", self._on_attached, session_id)
         self._client.on("Target.detachedFromTarget", self._on_detached, session_id)
+
+    def _subscribe_runtime(self, session_id: str) -> None:
+        """File this session's execution contexts against its frames.
+
+        Subscribe before the enable, never after. `Runtime.enable` replays
+        the contexts that already exist, and a handler registered afterwards
+        throws that replay away - the same mistake `_connect_cdp` records
+        for the page session, where it left every frame with no context and
+        made `storage get` return cookies only.
+
+        Bound to this session id, because a context id means nothing without
+        it. `functools.partial` rather than a lambda: a lambda closing over
+        the loop variable would file every session's contexts under the last
+        session id.
+        """
+        for event, handler in (
+            ("Runtime.executionContextCreated", self._frames.handle_execution_context_created),
+            ("Runtime.executionContextDestroyed", self._frames.handle_execution_context_destroyed),
+            ("Runtime.executionContextsCleared", self._frames.handle_execution_contexts_cleared),
+        ):
+            self._client.on(event, functools.partial(handler, session_id=session_id), session_id)
 
     async def _set_auto_attach(self, session_id: str) -> None:
         """Turn auto-attach on, and wait until its attaches have arrived.
@@ -289,6 +311,7 @@ class FrameSessions:
                 # yet. Hold it rather than attaching it anywhere else.
                 session.pending_tree = tree
 
+        self._subscribe_runtime(session.session_id)
         await self._client.send(method="Runtime.enable", session_id=session.session_id)
         if self._is_stale(session, generation):
             return

@@ -175,30 +175,32 @@ CURATED VERBS
       which is the behaviour above. `all` attaches to each cross-origin
       iframe as well and splices its frames into the one tree.
 
-      READ THIS BEFORE YOU USE IT. Today the flag does exactly two things:
-      it lists cross-origin iframes, and it lets you select one. NOTHING
-      READS FROM THE FRAME YOU SELECT. A cross-origin iframe has no
-      execution context in this tool yet, so:
+      What works today, and what does not:
 
-          storage get      returns cookies only, with no localStorage and
-                           no sessionStorage, and exits 0
+          frames list      lists cross-origin iframes in tree position,
+                           marked [out-of-process]
+          frames select    selects one, at any nesting depth
+          storage get      READS THE SELECTED FRAME'S OWN localStorage and
+                           sessionStorage, from its own renderer
           snapshot         still prints the Iframe node with nothing under
-                           it, so there is no uid inside the frame
-          click, fill      have no uid to address, so they cannot reach it
+                           it, whatever is selected
+          click, fill      no uid exists inside the frame, so they cannot
+                           reach it
 
-      Routing a read to the frame's own session is the next phase of the
-      work (RFC-04, Decisions 4 and 5) and is not built. Until it is, drive
-      the iframe's URL as a page of its own when you need to read or click
-      inside it.
-
-      What the flag is good for today is finding out what is there: which
-      cross-origin iframes the page has, their URLs, and where they sit in
-      the tree.
+      So a read that goes through a context is routed, and a read that goes
+      through a uid is not. Merging the child accessibility trees into one
+      snapshot is the remaining work; until it lands, drive the iframe's URL
+      as a page of its own when you need to click inside it.
 
       `frames list --frames all` marks a frame in another process
       [out-of-process]. A frame past a bound is listed [unreachable] with its
       URL rather than dropped, so a frame you cannot reach is still a row you
       can see. The bounds are 32 frame sessions and 10 levels of nesting.
+
+      [unreachable] rows come after the tree, at a fixed indent. They are not
+      in tree position, because the tool never attached to the frame and so
+      does not know where it sits. Read them as a list of what was left out,
+      not as children of the frame above them.
 
       Accepted by `frames list`, `frames select`, `frames reset`, `storage
       get`, `snapshot`, `click`, `fill`, and `run`, where it covers every
@@ -211,8 +213,10 @@ CURATED VERBS
       119.7 ms with --frames all. On a page with no cross-origin iframe the
       flag costs one CDP round trip, about 8 ms.
 
-      It does not change `screenshot` or `screencast`. Neither is
-      frame-scoped; both capture the page, with or without the flag.
+      `screenshot`, `screencast`, `wait-idle`, `detect`, `console-list` and
+      `network-list` do not take --frames at all; passing it is a usage error
+      (exit 2). None of them is frame-scoped, so there is nothing for the
+      flag to mean there.
 
   storage get [--key K]
       The selected frame's storage. --key is a frame URL pattern to select

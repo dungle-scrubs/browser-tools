@@ -673,9 +673,22 @@ acceptance, because the glossary should not name nouns no code uses yet.
 select, and the `--frames all` flag, off by default. Open Questions 2, 3 and
 4 are settled above, 5 is narrowed, and the three nouns are in `CONTEXT.md`.
 
-**What Phase 1 does not give you, stated because the first write-up of it
-claimed otherwise.** Routing (Decisions 4 and 5) is not built, and routing is
-what makes a selection useful. Verified against the released 0.7.0:
+**Phase 2a shipped the context half of routing.** The execution-context map
+is keyed by `(frame session, context id)`, a destroy and a clear are scoped
+to the session they arrived on, `get_selected_execution_context_id` is now
+`get_selected_context` returning the pair, and a frame-scoped evaluate is
+sent on the frame's own session. `storage get` on a selected Out-of-Process
+Frame reads that frame's own storage, verified through two levels of
+nesting across three renderers: depth 0 reads `A0`, depth 1 `B1`, depth 2
+`A2`, where depth 0 and depth 2 share an origin and differ only by document.
+
+The UID half - routes rebuilt from the live frame tree, document identity
+per node, and the merged snapshot - is not built. `snapshot` still shows a
+cross-origin iframe's `Iframe` node with nothing under it, so `click` and
+`fill` have no uid inside the frame to address.
+
+**What Phase 1 did not give you, stated because the first write-up of it
+claimed otherwise.** Verified against the released 0.7.0, before Phase 2a:
 
     frames select a=2        selects the frame, "(no execution context yet)"
     storage get              "Cookies (0):", exit 0
@@ -686,16 +699,16 @@ which is the worst of the three because it looks like an answer. `click` and
 `fill` address a uid, and no uid exists inside the frame, so they cannot
 reach it either.
 
-The cause is Decision 4's premise. The execution-context map is keyed by
+The cause was Decision 4's premise. The execution-context map was keyed by
 context id alone, and a context id is unique per session, not per browser.
-Recording a child session's contexts in that map would collide with the
-page's. That is why filing the child's `Runtime.executionContextCreated`
-events is not a one-line addition, and why it is Phase 2 rather than a
-Phase 1 omission.
+Recording a child session's contexts in that map would have collided with
+the page's. That is why filing the child's `Runtime.executionContextCreated`
+events was not a one-line addition, and why it was Phase 2 rather than a
+Phase 1 omission. Phase 2a did the re-keying and the two reads now work.
 
-`GUIDE.txt` says all of this under `--frames all`, in the manual an agent
-reads before it drives a browser, because an agent that selects a frame and
-then trusts `storage get` gets a wrong answer with a zero exit code.
+`GUIDE.txt` tracks this under `--frames all`, in the manual an agent reads
+before it drives a browser, because an agent that selects a frame and then
+trusts a read it cannot make gets a wrong answer with a zero exit code.
 
 **Version 2** (2026-09-21) is the revision after a cross-family adversarial
 review by `gpt-6-astra@codex` against the version 1 snapshot at `2239955`.

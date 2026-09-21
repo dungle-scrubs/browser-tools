@@ -1254,13 +1254,37 @@ class CDPHandler:
         if frame is None:
             return make_error(await self._no_frame_matched(url_pattern))
 
-        ctx_id = fm.get_selected_execution_context_id()
-        ctx_info = f", executionContextId={ctx_id}" if ctx_id else " (no execution context yet)"
+        context = fm.get_selected_context()
+        if context is None:
+            ctx_info = " (no execution context yet)"
+        else:
+            session_id, ctx_id = context
+            where = "page session" if session_id is None else f"frame session {session_id}"
+            ctx_info = f", executionContextId={ctx_id} on the {where}"
         return make_text(
             f"Selected frame: {frame.frame_id}\n"
             f"URL: {frame.url}\n"
             f"Origin: {frame.security_origin}{ctx_info}"
         )
+
+    def client_for_session(self, frame_session_id: str | None) -> Any:
+        """The client to send a frame-scoped command on.
+
+        A command against a frame in another renderer has to go to that
+        renderer's Frame Session. Sending it on the page session with the
+        child's `contextId` fails, because a context id is unique within one
+        renderer and means nothing outside it.
+
+        ``None`` is the page session, which is every frame's answer until an
+        Out-of-Process Frame is attached. A second `AttachedSessionClient`
+        over the same connection is the whole adapter: it registers nothing
+        and owns nothing, it only carries the session id onto each send.
+        """
+        if frame_session_id is None or self._cdp_client is None:
+            return self._cdp_client
+        from .attached_session import AttachedSessionClient
+
+        return AttachedSessionClient(self._cdp_client.raw, frame_session_id)
 
     async def _out_of_process_frames(self, url_pattern: str) -> list[str]:
         """URLs of `iframe` targets matching the pattern, newest first.
@@ -1355,7 +1379,12 @@ class CDPHandler:
         storage_types = arguments.get(
             "storage_types", ["cookies", "localStorage", "sessionStorage"]
         )
-        ctx_id = fm.get_selected_execution_context_id()
+        context = fm.get_selected_context()
+        # The evaluate goes to the frame's own renderer. `cdp` stays the page
+        # session for `Network.getCookies`, which is browser-scoped and takes
+        # a URL rather than a context.
+        ctx_id = context[1] if context else None
+        frame_cdp = self.client_for_session(context[0]) if context else cdp
         result_parts: list[str] = []
 
         if "cookies" in storage_types:
@@ -1376,7 +1405,7 @@ class CDPHandler:
         if ctx_id and "localStorage" in storage_types:
             try:
                 ls_result = await _safe_cdp_send(
-                    cdp,
+                    frame_cdp,
                     "Runtime.evaluate",
                     {
                         "expression": "JSON.stringify(Object.fromEntries(Object.entries(localStorage).slice(0, 20)))",
@@ -1395,7 +1424,7 @@ class CDPHandler:
         if ctx_id and "sessionStorage" in storage_types:
             try:
                 ss_result = await _safe_cdp_send(
-                    cdp,
+                    frame_cdp,
                     "Runtime.evaluate",
                     {
                         "expression": "JSON.stringify(Object.fromEntries(Object.entries(sessionStorage).slice(0, 20)))",

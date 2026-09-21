@@ -314,3 +314,86 @@ not kept.
 
 All four are pinned by `tests/test_frame_session_discovery.py` and by
 `docs/rfc/04_probes/mutate_discovery.py`, whose 8 mutants all read CAUGHT.
+
+## Audit of the claims Phase 1 shipped
+
+After the `storage get` overclaim reached PyPI in 0.7.0, every other claim
+made about `--frames all` was run against the **installed** binary rather
+than the checkout. `.scratch/audit/` holds the harnesses. Seven claims held,
+one did not.
+
+### Held
+
+| claim | evidence |
+|---|---|
+| the bound is 32 Frame Sessions, and a frame past it is listed `[unreachable]` | a page with 40 sibling cross-origin iframes: 40 `iframe` targets, 32 listed `[out-of-process]`, 8 listed `[unreachable]` |
+| the bound is 10 levels of nesting | alternating `127.0.0.1` and `localhost` 14 deep: 10 listed `[out-of-process]`, `?d=11` listed `[unreachable]` |
+| `frames reset` takes the flag | exit 0 |
+| the flag is accepted by exactly the eight verbs the manual names | `frames list`, `frames select`, `frames reset`, `storage get`, `snapshot`, `click`, `fill`, `run` accept it; `screenshot`, `screencast`, `wait-idle`, `detect`, `console-list` reject it with exit 2 |
+| `snapshot` returns the host tree, with no child content, even with the child selected | `"ChildButton" in snapshot` is False |
+| `click` cannot reach the child, and does not misroute | the only button uid a snapshot offers is the host's; clicking it with the cross-origin child selected fires the **host** button, not the child's |
+| discovery survives a mid-run navigation | a run starting on a page with no iframes, navigating to one with 20, then listing: 20 of 20, ten runs out of ten. Still an observation and not a guarantee, because nothing waits on discovery; `wait-idle` happened to be enough |
+
+### Did not hold
+
+The manual said `screenshot` and `screencast` "capture the page, with or
+without the flag", which reads as though the flag may be passed to them. It
+may not: `screenshot --frames all` is `unrecognized arguments: --frames`,
+exit 2. Corrected to name the six verbs that reject it.
+
+One thing the deep-nesting run exposed that no claim covered: `[unreachable]`
+rows print at a fixed indent after the tree, so `?d=11` appeared to sit
+beside `?d=1` rather than below `?d=10`. The tool never attached to that
+frame and so does not know its position. The manual now says to read those
+rows as a list of what was left out.
+
+## Phase 2a, routing a read to the frame's own renderer
+
+### The read, verified across three renderers
+
+A page on `127.0.0.1:8142` embedding `localhost:8143` embedding
+`127.0.0.1:8142` again. Each document writes its own depth into
+`localStorage`. Depth 0 and depth 2 share an origin and differ only by
+document, so a correct answer at depth 2 cannot come from origin matching.
+
+```
+frames list --frames all
+  82219D02...: http://127.0.0.1:8142/?d=0
+    3A3B27A5...: http://localhost:8143/?d=1 [out-of-process]
+      893BEA74...: http://127.0.0.1:8142/?d=2 [out-of-process]
+
+storage get --key d=0            localStorage: {"depth":"A0"}
+frames select d=1 ; storage get  localStorage: {"depth":"B1"}
+frames select d=2 ; storage get  localStorage: {"depth":"A2"}
+```
+
+Before Phase 2a the second and third both returned `Cookies (0):` with no
+storage at all.
+
+`frames select` now says where the context lives, because the id alone
+stopped being an address:
+
+```
+Origin: http://localhost:8141, executionContextId=1 on the frame session 4A98A85D...
+```
+
+### The gap the suite did not have
+
+`client_for_session` was written onto the wrong class and the whole suite
+still passed: 1458 tests, none of which asserted which session a
+frame-scoped read is sent on. The live run caught it on the first try.
+
+`tests/test_frame_routing.py` closes that. It layers its doubles the way
+production layers them - a `Wire` under an `AttachedSessionClient` - because
+a single flat double lets a broken adapter pass.
+
+### Mutation
+
+`docs/rfc/04_probes/mutate_routing.py`, 9 mutants, all CAUGHT. Three of them
+were MISSED on the first run and each named a real gap:
+
+| mutant | what was missing |
+|---|---|
+| let a destroy cross the session boundary | nothing exercised a frame that changed Frame Session while holding a context id its old session also used |
+| subscribe a child's Runtime events after the enable | no test asserted the ordering for a child session, only for the page session |
+| file every child's contexts under the last session id | the tests called the handlers directly instead of through the subscription, so the binding was never exercised. The frame's own `execution_context_id` is set either way; only a later destroy reads the map back and finds nothing |
