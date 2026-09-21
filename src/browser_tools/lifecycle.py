@@ -192,6 +192,23 @@ def profile_user_data_dir(profile: str) -> Path:
     return profiles_root() / profile
 
 
+def instance_not_found_message(exc: InstanceNotFoundError) -> str:
+    """Return the vendored not-found text with this program's name in it.
+
+    ``core.registry.InstanceNotFoundError`` ends its no-instances message with
+    "Launch one with: chrome-agent launch". That is upstream's program name, and
+    this package installs ``browser-tools`` and ``bt`` instead, so the remedy the
+    diagnostic offers cannot be run. RFC-01, "Refusals and exit codes", requires
+    the named remedy to work.
+
+    ``registry.py`` is a verbatim vendored module, so the text stays untouched
+    there and is adapted here, at the call site, exactly as
+    ``one_shot.connection_failure_message`` adapts the vendored connection error
+    (RFC-01, "Vendoring rules").
+    """
+    return str(exc).replace("chrome-agent launch", "bt launch")
+
+
 class LifecycleError(Exception):
     """An operational lifecycle failure (maps to CLI exit code 1)."""
 
@@ -845,7 +862,7 @@ def resolve_cdp_port(
     try:
         info = core_registry.lookup(instance_name=instance, registry_path=registry_path)
     except InstanceNotFoundError as exc:
-        raise LifecycleError(str(exc)) from exc
+        raise LifecycleError(instance_not_found_message(exc)) from exc
     return info.port
 
 
@@ -1107,7 +1124,9 @@ def status(
         if not instances:
             available = [i.name for i in read_instances(registry_path=registry_path)]
             raise LifecycleError(
-                str(InstanceNotFoundError(name=instance, available=available))
+                instance_not_found_message(
+                    InstanceNotFoundError(name=instance, available=available)
+                )
             )
 
     out: list[dict[str, Any]] = []
@@ -1428,7 +1447,9 @@ def stop(
     ext = by_name.get(instance)
     if ext is None:
         raise LifecycleError(
-            str(InstanceNotFoundError(name=instance, available=list(by_name)))
+            instance_not_found_message(
+                InstanceNotFoundError(name=instance, available=list(by_name))
+            )
         )
 
     # A tab close is one path for both engines, and it does not reach the
@@ -1454,7 +1475,7 @@ def stop(
             registry_path=registry_path,
         )
     except InstanceNotFoundError as exc:
-        raise LifecycleError(str(exc)) from exc
+        raise LifecycleError(instance_not_found_message(exc)) from exc
 
 
 def cleanup(registry_path: str | None = None) -> list[str]:

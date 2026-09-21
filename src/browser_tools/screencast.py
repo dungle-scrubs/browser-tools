@@ -224,8 +224,9 @@ class ScreencastRecorder:
         lines = [f"Captured {len(frames)} frames."]
         if truncated:
             lines.append(
-                f"Note: hit max_frames={self._max_frames}; "
-                "capture may be truncated (raise max_frames or every_nth_frame)."
+                f"Note: hit the frame cap of {self._max_frames}; "
+                "capture may be truncated. Raise it with --max-frames N, or "
+                "shorten the capture with --duration SECONDS."
             )
 
         out_dir = str(arguments.get("dir", "")).strip()

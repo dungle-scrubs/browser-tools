@@ -734,7 +734,9 @@ class CDPHandler:
         if name in ("click", "fill"):
             uid = str(arguments.get("uid", "")).strip()
             if not uid:
-                return make_error(f"E008: native '{name}' requires a 'uid' from a prior take_snapshot")
+                return make_error(
+                    f"E008: '{name}' requires --uid UID from a prior 'snapshot'"
+                )
             try:
                 if name == "click":
                     result = await self._native_interactor.click_async(send, uid)
@@ -856,8 +858,9 @@ class CDPHandler:
         selected = fm.get_selected_frame()
         if selected is None:
             return make_error(
-                "No frame selected. Run 'frames select PATTERN' first, "
-                "or name the frame on the read with --key."
+                "No frame selected. Pass --key PATTERN to name the frame on this "
+                "read. A 'frames select' in an earlier command does not carry "
+                "over: the selection belongs to the process that made it."
             )
 
         storage_types = arguments.get(
