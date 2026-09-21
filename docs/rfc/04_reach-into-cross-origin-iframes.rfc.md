@@ -2,10 +2,10 @@
 number: 04
 title: "Reach into cross-origin iframes"
 type: feature
-status: Draft
+status: Accepted
 author: "Kevin Frilot"
 date: 2026-09-21
-version: 2
+version: 3
 ---
 
 # RFC-04: Reach into cross-origin iframes
@@ -634,6 +634,20 @@ bytes, at the cost of a hang on every path that forgets to release. Nothing in
    specify one.
 
 ## Changes in this revision
+
+**Version 3** (2026-09-21) is the acceptance. Kevin accepted the RFC as it
+stood at version 2. No normative text changed with it: version 2 is what was
+accepted, and the specification is what gets built.
+
+Open Question 1 was already settled at version 2 and Decision 8 records it.
+The four remaining open questions are implementation-phase work, not
+acceptance blockers. Open Question 4, the cost on a wide page, is the first
+thing the implementation measures, because Decision 1's bounds have no values
+until it does.
+
+**Step Run**, **Out-of-Process Frame**, **Frame Session** and **Spliced Frame
+Tree** land in `CONTEXT.md` with the first implementation phase, not with the
+acceptance, because the glossary should not name nouns no code uses yet.
 
 **Version 2** (2026-09-21) is the revision after a cross-family adversarial
 review by `gpt-6-astra@codex` against the version 1 snapshot at `2239955`.
