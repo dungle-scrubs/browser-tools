@@ -539,7 +539,11 @@ class TestADeadlineBoundsWorkNotTeardown:
 
         runtime = CDPRuntime(None)
         runtime.set_deadline(time.monotonic() - 10)
-        assert runtime.bounded_timeout(30) == DEADLINE_GRACE_SECONDS, (
+        # Approximate, not exact. The budget is `(now + GRACE) - now` across
+        # two clock reads, so float subtraction can land a few parts in 10^15
+        # either side of the constant. CI caught an exact comparison failing
+        # on 5.000000000000014 while the same assertion passed locally.
+        assert runtime.bounded_timeout(30) == pytest.approx(DEADLINE_GRACE_SECONDS, abs=0.05), (
             "a call made while unwinding past the deadline was refused, so the "
             "step could not undo what it started"
         )
