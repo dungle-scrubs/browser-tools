@@ -409,7 +409,7 @@ def wait(
         # A Step Run already holds the session. `timeout=0` means no deadline
         # here, so the submitted wait gets none either; the run's own
         # `--timeout` is what bounds an otherwise unbounded step.
-        cdp, session_id = handler.session
+        cdp, session_id = handler.require_session()
         return handler.submit(
             wait_on_session(cdp, session_id, event, match, timeout),
             timeout=None if timeout == 0 else timeout + _WAIT_GRACE_SECONDS,

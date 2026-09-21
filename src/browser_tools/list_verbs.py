@@ -141,7 +141,7 @@ def _run_collection(
     if handler is not None:
         # A Step Run already holds the session. Collecting on it keeps the
         # window inside the run's one connection instead of opening a second.
-        cdp, session_id = handler.session
+        cdp, session_id = handler.require_session()
         return handler.submit(
             collect_on_session(cdp, session_id, events, duration),
             timeout=duration + _COLLECTION_GRACE_SECONDS,

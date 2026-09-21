@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from .core.attach import AmbiguousTargetError, TargetNotFoundError
+from .lifecycle import LifecycleError
 
 logger = logging.getLogger(__name__)
 
@@ -739,6 +740,21 @@ class CDPHandler:
     def session(self) -> tuple[Any, str] | None:
         """The runtime's ``(client, sessionId)``, or None before it connects."""
         return self._rt.session
+
+    def require_session(self) -> tuple[Any, str]:
+        """The runtime's ``(client, sessionId)``, or a refusal saying why not.
+
+        A verb handed this handler is about to send on it. ``session`` is
+        ``None`` before the connection comes up, and the pair alone is not a
+        liveness guarantee: it survives a disconnect while ``available`` is
+        false. Unpacking it blind turns either case into a `TypeError` about
+        `NoneType` at the point of use, which says nothing about the browser.
+        """
+        pair = self._rt.session
+        if pair is None or not self.available:
+            reason = self.connect_error or "the CDP session is not connected"
+            raise LifecycleError(reason)
+        return pair
 
     def submit(self, coro: Any, timeout: float | None = None) -> Any:
         """Run one coroutine on the runtime's loop; see :meth:`CDPRuntime.submit`."""

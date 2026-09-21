@@ -26,6 +26,15 @@ class FakeHandler:
         self.stopped = False
         self.seen: list[str] = []
         self.session = ("CLIENT", "SESSION-1")
+        self.available = True
+        self.connect_error = None
+
+    def require_session(self):
+        from browser_tools.lifecycle import LifecycleError
+
+        if self.session is None or not self.available:
+            raise LifecycleError(self.connect_error or "the CDP session is not connected")
+        return self.session
 
     def stop(self):
         self.stopped = True
@@ -133,3 +142,35 @@ class TestWithoutAHandlerNothingChanges:
         )
         cli.step_envelope(_args("snapshot"), None)
         assert opened == [None], "a bare invocation was handed a session"
+
+
+class TestAStepWillNotSendOnAMissingSession:
+    """`session` is None before the connection, and outlives a disconnect.
+
+    Unpacking it blind turns both cases into a `TypeError` about `NoneType`
+    at the point of use, which tells a caller nothing about the browser.
+    """
+
+    @pytest.mark.parametrize("verb", ["screenshot", "console-list", "wait"])
+    def test_a_disconnected_handler_is_refused_with_a_reason(self, verb):
+        from browser_tools.lifecycle import LifecycleError
+
+        handler = FakeHandler()
+        handler.available = False
+        handler.connect_error = "Cannot reach browser on port 9222"
+
+        with pytest.raises(LifecycleError, match="Cannot reach browser"):
+            cli.step_envelope(
+                _args(verb, duration=0.1, path=None, event="X.y", match=None, timeout=1),
+                None,
+                handler=handler,
+            )
+
+    def test_a_handler_with_no_session_is_refused(self):
+        from browser_tools.lifecycle import LifecycleError
+
+        handler = FakeHandler()
+        handler.session = None
+
+        with pytest.raises(LifecycleError):
+            cli.step_envelope(_args("screenshot", path=None), None, handler=handler)

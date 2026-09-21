@@ -645,7 +645,7 @@ def screenshot(
         raise UsageError("cannot specify both --target and --url")
 
     if handler is not None:
-        cdp, session_id = handler.session
+        cdp, session_id = handler.require_session()
         data = handler.submit(capture_on_session(cdp, session_id))
     else:
         port = _resolve_port(instance, registry_path, endpoint)
