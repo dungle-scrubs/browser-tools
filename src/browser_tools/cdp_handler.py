@@ -810,7 +810,7 @@ class CDPHandler:
         if frame is None:
             return make_error(
                 f"E002: No frame found matching '{url_pattern}'. "
-                "Use list_frames to see available frames."
+                "Run 'frames list' to see available frames."
             )
 
         ctx_id = fm.get_selected_execution_context_id()
@@ -855,7 +855,10 @@ class CDPHandler:
 
         selected = fm.get_selected_frame()
         if selected is None:
-            return make_error("No frame selected. Use select_frame first.")
+            return make_error(
+                "No frame selected. Run 'frames select PATTERN' first, "
+                "or name the frame on the read with --key."
+            )
 
         storage_types = arguments.get(
             "storage_types", ["cookies", "localStorage", "sessionStorage"]
