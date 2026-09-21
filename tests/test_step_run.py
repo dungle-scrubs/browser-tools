@@ -960,6 +960,30 @@ class TestTheGraceIsOneBudgetForTheWholeUnwind:
         )
         assert first <= DEADLINE_GRACE_SECONDS
 
+    def test_the_first_call_gets_no_more_than_the_grace_at_any_clock(
+        self, monkeypatch
+    ):
+        """The flake this pins, reproduced without waiting for the right clock.
+
+        `left` used to be `(now + DEADLINE_GRACE_SECONDS) - now`, which is
+        not exactly the grace in binary floating point. On a runner about a
+        minute past boot the round trip overshoots roughly 2% of the time,
+        and CI duly failed with `5.000000000000014 <= 5.0`. The clock value
+        below is one of the draws that does it.
+        """
+        import browser_tools.cdp_handler as cdp_handler
+        from browser_tools.cdp_handler import DEADLINE_GRACE_SECONDS, CDPRuntime
+
+        clock = 63.01849439829268
+        assert (clock + DEADLINE_GRACE_SECONDS) - clock > DEADLINE_GRACE_SECONDS, (
+            "this clock value no longer overshoots, so the test proves nothing"
+        )
+        monkeypatch.setattr(cdp_handler.time, "monotonic", lambda: clock)
+
+        runtime = CDPRuntime(None)
+        runtime._deadline = clock - 1
+        assert runtime.bounded_timeout(30) <= DEADLINE_GRACE_SECONDS
+
     def test_a_spent_budget_still_leaves_enough_to_send_one_call(self):
         from browser_tools.cdp_handler import TEARDOWN_FLOOR_SECONDS, CDPRuntime
 

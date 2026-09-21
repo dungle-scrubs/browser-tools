@@ -498,7 +498,14 @@ class CDPRuntime:
         # it unwinds could run four graces past a deadline the caller set.
         if self._grace_until is None:
             self._grace_until = now + DEADLINE_GRACE_SECONDS
-        left = self._grace_until - now
+        # Clamped to the grace itself, not just derived from it. `now + g - now`
+        # is not exactly `g` in binary floating point once `time.monotonic()`
+        # is large: on a CI runner the first call after the deadline came back
+        # with 5.000000000000014 against a grace of 5.0. The excess cannot
+        # matter to a timeout, but "no call gets more than one grace" is the
+        # rule this method exists to enforce, and a rule that holds to within
+        # a rounding error is a different rule.
+        left = min(self._grace_until - now, DEADLINE_GRACE_SECONDS)
         # Never zero. A call given no time at all fails before it is sent, and
         # then the teardown this grace exists for does not happen either.
         return max(left, TEARDOWN_FLOOR_SECONDS)
