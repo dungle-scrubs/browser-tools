@@ -451,9 +451,76 @@ def _browser_args_from_remainder(remainder: list[str] | None) -> list[str]:
     )
 
 
+#: Verbs whose ``--target`` and ``--url`` name the same thing two ways.
+_TARGET_OR_URL_VERBS = frozenset({"attach", "wait", "console-list", "network-list"})
+
+
+def check_preconditions(args: argparse.Namespace) -> None:
+    """Every per-verb requirement ``argparse`` deliberately leaves optional.
+
+    ``build_parser`` accepts a bare verb on purpose, so ``click`` with no
+    ``--uid`` parses cleanly and fails later. These are the checks that catch
+    it, and they are gathered here rather than left inline because a Step Run
+    validates every step through this same function before it runs any of them
+    (RFC-03, "Validation, before any step runs"). A copied second set would let
+    a step behave differently inside a run than outside it.
+
+    Raises ``PassthroughUsageError`` (exit 2). Returns None when the verb
+    carries everything it needs.
+    """
+    command = getattr(args, "command", None)
+
+    names_the_target_twice = (
+        getattr(args, "target", None) is not None and getattr(args, "url", None) is not None
+    )
+    if command in _TARGET_OR_URL_VERBS and names_the_target_twice:
+        raise PassthroughUsageError("cannot specify both --target and --url")
+
+    if command == "click" and not getattr(args, "uid", None):
+        raise PassthroughUsageError("click requires --uid N (a UID from a prior snapshot)")
+
+    if command == "fill":
+        if not getattr(args, "uid", None):
+            raise PassthroughUsageError("fill requires --uid N (a UID from a prior snapshot)")
+        if getattr(args, "text", None) is None:
+            raise PassthroughUsageError("fill requires --text T")
+
+    if command == "frames" and getattr(args, "frames_action", None) not in {
+        "list",
+        "select",
+        "reset",
+    }:
+        raise PassthroughUsageError("frames takes one sub-action: list, select, or reset")
+
+    if command == "storage" and getattr(args, "storage_action", None) != "get":
+        raise PassthroughUsageError("storage takes one sub-action: get")
+
+    if command == "screencast":
+        removed = getattr(args, "removed_action", None)
+        if removed is not None:
+            raise PassthroughUsageError(
+                f"screencast takes no sub-action: '{removed}' is not one. "
+                "start and stop were replaced by a single bounded capture, because "
+                "the frame buffer is process-local and a stop in a second process "
+                "could never reach the first one's frames. Use: "
+                "bt screencast --dir DIR [--duration SECONDS] [--format FMT] "
+                "[--max-frames N]"
+            )
+        if not getattr(args, "dir", None):
+            raise PassthroughUsageError(
+                "screencast requires --dir DIR. It captures and writes the frames "
+                "in one invocation; there is no separate start or stop."
+            )
+        curated.check_screencast_values(args.duration, args.format)
+
+    if command == "detect":
+        curated.check_detect_wait(None if args.no_wait else args.wait)
+
+
 def _run(args: argparse.Namespace) -> int:
     """Dispatch one parsed verb. Raises LifecycleError for operational failures."""
     registry_path = lifecycle.registry_path_from_env()
+    check_preconditions(args)
 
     if args.command == "launch":
         instance = lifecycle.launch(
@@ -526,8 +593,6 @@ def _run(args: argparse.Namespace) -> int:
         return EXIT_OK
 
     if args.command == "attach":
-        if args.target is not None and args.url is not None:
-            raise PassthroughUsageError("cannot specify both --target and --url")
         instance, subscriptions = events.resolve_attach_args(args.args)
         instance = _one_instance(getattr(args, "instance", None), instance)
         events.run_attach(
@@ -541,8 +606,6 @@ def _run(args: argparse.Namespace) -> int:
         return EXIT_OK
 
     if args.command == "wait":
-        if args.target is not None and args.url is not None:
-            raise PassthroughUsageError("cannot specify both --target and --url")
         event = events.wait(
             instance=args.instance,
             event=args.event,
@@ -557,8 +620,6 @@ def _run(args: argparse.Namespace) -> int:
         return EXIT_OK
 
     if args.command == "console-list":
-        if args.target is not None and args.url is not None:
-            raise PassthroughUsageError("cannot specify both --target and --url")
         messages = list_verbs.console_list(
             instance=args.instance,
             target=args.target,
@@ -571,8 +632,6 @@ def _run(args: argparse.Namespace) -> int:
         return EXIT_OK
 
     if args.command == "network-list":
-        if args.target is not None and args.url is not None:
-            raise PassthroughUsageError("cannot specify both --target and --url")
         requests = list_verbs.network_list(
             instance=args.instance,
             target=args.target,
@@ -628,8 +687,6 @@ def _run_curated(args: argparse.Namespace, registry_path: str | None) -> int:
         return EXIT_OK
 
     if args.command == "click":
-        if not args.uid:
-            raise PassthroughUsageError("click requires --uid N (a UID from a prior snapshot)")
         _print_json(
             curated.click(
                 instance=args.instance,
@@ -642,10 +699,6 @@ def _run_curated(args: argparse.Namespace, registry_path: str | None) -> int:
         return EXIT_OK
 
     if args.command == "fill":
-        if not args.uid:
-            raise PassthroughUsageError("fill requires --uid N (a UID from a prior snapshot)")
-        if args.text is None:
-            raise PassthroughUsageError("fill requires --text T")
         _print_json(
             curated.fill(
                 instance=args.instance,
@@ -698,9 +751,6 @@ def _run_curated(args: argparse.Namespace, registry_path: str | None) -> int:
         return _run_frames(args, registry_path)
 
     if args.command == "storage":
-        action = getattr(args, "storage_action", None)
-        if action != "get":
-            raise PassthroughUsageError("storage takes one sub-action: get")
         _print_json(
             curated.storage_get(
                 instance=args.instance,
@@ -725,20 +775,6 @@ def _run_curated(args: argparse.Namespace, registry_path: str | None) -> int:
         return EXIT_OK
 
     if args.command == "screencast":
-        if args.removed_action is not None:
-            raise PassthroughUsageError(
-                f"screencast takes no sub-action: '{args.removed_action}' is not one. "
-                "start and stop were replaced by a single bounded capture, because "
-                "the frame buffer is process-local and a stop in a second process "
-                "could never reach the first one's frames. Use: "
-                "bt screencast --dir DIR [--duration SECONDS] [--format FMT] "
-                "[--max-frames N]"
-            )
-        if not args.dir:
-            raise PassthroughUsageError(
-                "screencast requires --dir DIR. It captures and writes the frames "
-                "in one invocation; there is no separate start or stop."
-            )
         _print_json(
             curated.screencast(
                 instance=args.instance,

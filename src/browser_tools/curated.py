@@ -334,6 +334,39 @@ def wait_stable(
 # ---------------------------------------------------------------------------
 
 
+#: Image formats ``Page.startScreencast`` accepts.
+SCREENCAST_FORMATS = ("jpeg", "png")
+
+
+def check_screencast_values(duration: float, fmt: str) -> None:
+    """Reject a capture that cannot run, without opening a connection.
+
+    Public because Step List validation calls it too: RFC-03 requires every
+    step to be checked before the first one runs, and a check that lives
+    only inside ``screencast`` would be reached after earlier steps had
+    already driven the browser.
+    """
+    if duration <= 0:
+        raise UsageError("screencast --duration must be greater than 0 seconds")
+    if fmt not in SCREENCAST_FORMATS:
+        raise UsageError("screencast --format must be 'jpeg' or 'png'")
+
+
+def check_detect_wait(wait_seconds: float | None) -> None:
+    """Reject a wait that cannot be turned into a retry budget.
+
+    ``detect`` converts the wait with ``math.ceil``, which raises on NaN and
+    on infinity. Unchecked, ``bt detect --wait nan`` exits 1 with a
+    traceback; it is a malformed invocation, so it is exit 2 with a message.
+    A negative wait is not rejected, because the conversion already floors
+    the budget at zero.
+    """
+    if wait_seconds is None:
+        return
+    if not math.isfinite(wait_seconds):
+        raise UsageError("detect --wait must be a finite number of seconds")
+
+
 def detect(
     *,
     instance: str | None,
@@ -347,6 +380,7 @@ def detect(
     ``CDPHandler.run_post_navigation_detection`` -- the same detect-and-retry
     the daemon runs automatically post-navigation, surfaced here as a verb.
     """
+    check_detect_wait(wait_seconds)
     max_retries = None
     if wait_seconds is not None:
         max_retries = max(0, math.ceil(wait_seconds / INTERSTITIAL_RETRY_DELAY_SECONDS))
@@ -489,10 +523,7 @@ def screencast(
         LifecycleError: The capture could not start, or the frames could not
             be written.
     """
-    if duration <= 0:
-        raise UsageError("screencast --duration must be greater than 0 seconds")
-    if fmt not in ("jpeg", "png"):
-        raise UsageError("screencast --format must be 'jpeg' or 'png'")
+    check_screencast_values(duration, fmt)
 
     port = _resolve_port(instance, registry_path, endpoint)
     with _cdp_handler_session(port, external=endpoint is not None) as handler:
