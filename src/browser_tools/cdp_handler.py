@@ -11,6 +11,7 @@ import asyncio
 import base64
 import logging
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -308,12 +309,21 @@ class CDPRuntime:
     instead of sharing one class.
     """
 
+    # Declared on the class, not only in `__init__`, so every runtime reaching
+    # `bounded_timeout` has them. Tests build a runtime with `__new__` to drive
+    # one method without a browser behind it, and a bound that is only an
+    # instance attribute raises `AttributeError` there instead of returning the
+    # caller's own timeout.
+    _target_by: str | None = None
+    _deadline: float | None = None
+
     def __init__(
         self,
         browser_url: str | None,
         mode: str = "full",
         stealth: bool = False,
         target_spec: str | None = None,
+        target_by: str | None = None,
     ) -> None:
         """Initialize the CDP runtime.
 
@@ -334,6 +344,7 @@ class CDPRuntime:
         self._mode = mode
         self._stealth = stealth
         self._target_spec = target_spec
+        self._target_by = target_by
         self._loop: asyncio.AbstractEventLoop | None = None
         self._ready = threading.Event()
         self._stop_event: asyncio.Event | None = None
@@ -343,6 +354,11 @@ class CDPRuntime:
         # a Step Run shares it (RFC-03), so it cannot be scoped to one command.
         self._sessions: Any = None
         self._connect_error: str | None = None
+        # A Step Run's whole-run deadline, as a monotonic instant. Every wait
+        # on this runtime clamps to what is left of it, so the run's
+        # `--timeout` reaches the step in flight instead of only being
+        # checked between steps.
+        self._deadline: float | None = None
         # Screencast capture state machine (Page.startScreencast buffer, ack,
         # write-to-dir). Owned here so the screencast tool handlers stay
         # two-line delegators.
@@ -365,6 +381,19 @@ class CDPRuntime:
             return None
         return self._cdp_client.raw, self._cdp_client.session_id
 
+    def set_deadline(self, deadline: float | None) -> None:
+        """Bound every later wait on this runtime by one monotonic instant."""
+        self._deadline = deadline
+
+    def bounded_timeout(self, timeout: float | None) -> float | None:
+        """``timeout`` clamped to what is left of the run's deadline."""
+        if self._deadline is None:
+            return timeout
+        remaining = self._deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("the run's deadline passed")
+        return remaining if timeout is None else min(timeout, remaining)
+
     def submit(self, coro: Any, timeout: float | None = None) -> Any:
         """Run one coroutine on this runtime's loop and return its result.
 
@@ -380,6 +409,7 @@ class CDPRuntime:
                 # The loop would have to run this coroutine and wait for it at
                 # the same time. It cannot, so the wait never ends.
                 raise RuntimeError("submit was called from the runtime's own loop")
+            bound = self.bounded_timeout(timeout)
             future = asyncio.run_coroutine_threadsafe(coro, self._loop)
         except BaseException:
             # Nothing took ownership of the coroutine, so nothing will ever
@@ -390,7 +420,7 @@ class CDPRuntime:
             raise
 
         try:
-            return future.result(timeout=timeout)
+            return future.result(timeout=bound)
         except BaseException:
             # The wait ended; the coroutine did not. Abandoning it leaves work
             # running on the session the next step is about to use, and on the
@@ -494,6 +524,8 @@ class CDPRuntime:
         ``--target`` to escape with. Both paths sort page targets by target
         ID, so index 1 is the page ``pages[0]`` was.
         """
+        if self._target_by is not None:
+            return self._target_spec or "", self._target_by
         if self._target_spec is None:
             return "1", "index"
         return self._target_spec, ("index" if self._target_spec.isdigit() else "id")
@@ -700,6 +732,7 @@ class CDPHandler:
         mode: str = "full",
         stealth: bool = False,
         target_spec: str | None = None,
+        target_by: str | None = None,
     ) -> None:
         """Initialize the handler registry over a fresh CDP runtime.
 
@@ -710,7 +743,9 @@ class CDPHandler:
                 :class:`CDPRuntime`. No JavaScript is injected.
             target_spec: Which page to attach to; see :class:`CDPRuntime`.
         """
-        self._rt = CDPRuntime(browser_url, mode, stealth=stealth, target_spec=target_spec)
+        self._rt = CDPRuntime(
+            browser_url, mode, stealth=stealth, target_spec=target_spec, target_by=target_by
+        )
         # Tool name -> bound handler. Built from the class-level _CDP_HANDLERS
         # table, which is parity-checked against tool_registry.CDP_TOOLS above.
         self._handlers: dict[str, Any] = {
@@ -740,6 +775,10 @@ class CDPHandler:
     def session(self) -> tuple[Any, str] | None:
         """The runtime's ``(client, sessionId)``, or None before it connects."""
         return self._rt.session
+
+    def set_deadline(self, deadline: float | None) -> None:
+        """Bound every later wait on this handler; see :meth:`CDPRuntime.set_deadline`."""
+        self._rt.set_deadline(deadline)
 
     def require_session(self) -> tuple[Any, str]:
         """The runtime's ``(client, sessionId)``, or a refusal saying why not.
@@ -835,7 +874,7 @@ class CDPHandler:
 
         future = asyncio.run_coroutine_threadsafe(self._dispatch_tool(name, arguments), self._loop)
         try:
-            return future.result(timeout=REQUEST_TIMEOUT_SECONDS)
+            return future.result(timeout=self._rt.bounded_timeout(REQUEST_TIMEOUT_SECONDS))
         except Exception as exc:
             logger.warning("call_tool(%s) error: %s", name, exc)
             future.cancel()
@@ -864,7 +903,7 @@ class CDPHandler:
             self._dispatch_native(name, arguments), self._loop
         )
         try:
-            return future.result(timeout=REQUEST_TIMEOUT_SECONDS)
+            return future.result(timeout=self._rt.bounded_timeout(REQUEST_TIMEOUT_SECONDS))
         except Exception as exc:
             logger.warning("call_native(%s) error: %s", name, exc)
             future.cancel()

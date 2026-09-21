@@ -81,6 +81,10 @@ EXCLUDED_VERBS: dict[str, str] = {
     "window-border": "it does not drive the attached browser",
     "guide": "it does not drive the attached browser",
     "help": "it does not drive the attached browser",
+    "run": (
+        "a Step List is data, not code: a run inside a run would be nesting, "
+        "and nesting is control flow. Put the steps in one list"
+    ),
 }
 
 #: Flags the invocation owns. A step carrying one is a usage error: the
@@ -109,9 +113,35 @@ class Step:
     #: The passthrough step's params, already parsed from JSON.
     params: dict[str, Any] | None = None
 
+    def __post_init__(self) -> None:
+        """Exactly one of ``args`` and ``method`` is set.
+
+        A step is a curated verb or a raw CDP method, never both and never
+        neither. Checked here so the two accessors below can promise what
+        they return, instead of every caller re-testing it and one of them
+        getting it wrong.
+        """
+        if (self.args is None) == (self.method is None):
+            raise ValueError(
+                f"step {self.number} must carry either a parsed verb or a CDP method, "
+                f"not {'both' if self.args is not None else 'neither'}"
+            )
+
     @property
     def is_passthrough(self) -> bool:
         return self.method is not None
+
+    def as_verb(self) -> argparse.Namespace:
+        """The parsed namespace, for a curated step."""
+        if self.args is None:
+            raise ValueError(f"step {self.number} is a raw CDP step, not a verb")
+        return self.args
+
+    def as_method(self) -> tuple[str, dict[str, Any] | None]:
+        """``(method, params)``, for a raw CDP step."""
+        if self.method is None:
+            raise ValueError(f"step {self.number} is a verb, not a raw CDP step")
+        return self.method, self.params
 
 
 class StepListError(UsageError):

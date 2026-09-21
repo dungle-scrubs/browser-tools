@@ -28,7 +28,7 @@ import json
 import sys
 from typing import Any
 
-from . import curated, events, lifecycle, list_verbs, passthrough, user_settings
+from . import curated, events, lifecycle, list_verbs, passthrough, step_run, user_settings
 from .lifecycle import LifecycleError
 from .passthrough import UsageError as PassthroughUsageError
 from .usage import UsageError
@@ -67,6 +67,7 @@ _KNOWN_VERBS = {
     "storage",
     "screenshot",
     "screencast",
+    "run",
 }
 
 
@@ -285,8 +286,39 @@ def build_parser() -> argparse.ArgumentParser:
     _add_endpoint(network_list)
 
     _add_curated_verbs(sub)
+    _add_run_verb(sub)
 
     return parser
+
+
+def _add_run_verb(
+    sub: argparse._SubParsersAction[argparse.ArgumentParser],  # pyright: ignore[reportPrivateUsage]
+) -> None:
+    """Add ``run``: one ordered Step List, one invocation (RFC-03).
+
+    ``--target``/``--url`` belong to the run, not to a step: the connection
+    opens once, so the page is chosen once. A step carrying either is a usage
+    error, refused by ``step_list.validate`` before step 1.
+    """
+    run_parser = sub.add_parser("run", help="Run an ordered list of steps in one invocation")
+    run_parser.add_argument(
+        "instance", nargs="?", metavar="INSTANCE", help="Instance (omit if only one)"
+    )
+    run_parser.add_argument(
+        "file", metavar="FILE", help="The step list, one verb phrase per line; - reads stdin"
+    )
+    run_parser.add_argument(
+        "--timeout",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help="Bound the whole run (default: none, because every step bounds itself)",
+    )
+    run_parser.add_argument("--target", metavar="SPEC", help="Select the page target (index or id)")
+    run_parser.add_argument(
+        "--url", metavar="SUBSTRING", help="Select the page target by URL substring"
+    )
+    _add_endpoint(run_parser)
 
 
 def _add_curated_verbs(
@@ -523,7 +555,7 @@ def _browser_args_from_remainder(remainder: list[str] | None) -> list[str]:
 
 
 #: Verbs whose ``--target`` and ``--url`` name the same thing two ways.
-_TARGET_OR_URL_VERBS = frozenset({"attach", "wait", "console-list", "network-list"})
+_TARGET_OR_URL_VERBS = frozenset({"attach", "wait", "console-list", "network-list", "run"})
 
 
 def check_preconditions(args: argparse.Namespace) -> None:
@@ -690,8 +722,42 @@ def _run(args: argparse.Namespace) -> int:
         _print_json(step_envelope(args, registry_path))
         return EXIT_OK
 
+    if args.command == "run":
+        return _run_step_list(args, registry_path)
+
     # No verb given: usage.
     return EXIT_USAGE
+
+
+def _run_step_list(args: argparse.Namespace, registry_path: str | None) -> int:
+    """Run a Step List and print its Run Document (RFC-03).
+
+    The one verb that prints on stdout when it exits 1. A run that died at
+    step 7 still completed six steps, and a caller that cannot see which ones
+    does not know the state the browser is in. The exit code is what
+    separates a partial run from a whole one, which is why The Manual states
+    the caller contract in that order: exit code, then ``run.status``, then
+    the steps.
+
+    A failure before step 1 prints nothing, exactly as every other verb does:
+    there is no document, because nothing ran.
+    """
+    document, succeeded = step_run.run(
+        instance=args.instance,
+        source=args.file,
+        timeout=args.timeout,
+        target=args.target,
+        url=args.url,
+        registry_path=registry_path,
+        endpoint=args.endpoint,
+    )
+    _print_json(document)
+    if succeeded:
+        return EXIT_OK
+    diagnostic = step_run.describe_failure(document)
+    if diagnostic is not None:
+        print(f"error: {diagnostic}", file=sys.stderr)
+    return EXIT_OPERATIONAL
 
 
 #: Curated verbs dispatched through ``browser_tools.curated`` (RFC-01 #50).
