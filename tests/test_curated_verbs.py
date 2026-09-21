@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import base64
 import json
+import time
 from typing import ClassVar
 
 import pytest
@@ -93,6 +94,9 @@ class FakeHandler:
         self.detection_runs = 0
         self.detection_budgets: list[int | None] = []
         self.stopped = False
+        #: Mirrors ``CDPHandler.connect_error``: None while the connection is
+        #: still coming up, a reason once it has failed.
+        self.connect_error: str | None = None
         #: Frames the bounded ``screencast`` capture will see buffered (#99).
         self.frame_count = FakeHandler.frames
         FakeHandler.instances.append(self)
@@ -171,6 +175,8 @@ class TestInstanceResolution:
         _seed(registry_path, {"only-01": _entry()})
 
         class NeverReady(FakeHandler):
+            """Never comes up and never says why, so the deadline decides."""
+
             @property
             def available(self) -> bool:
                 return False
@@ -179,6 +185,31 @@ class TestInstanceResolution:
         monkeypatch.setattr(curated, "HANDLER_CONNECT_TIMEOUT_SECONDS", 0.05)
         with pytest.raises(LifecycleError):
             curated.snapshot(instance="only-01", registry_path=registry_path)
+
+    def test_a_known_failure_does_not_wait_out_the_deadline(
+        self, monkeypatch, registry_path
+    ):
+        """The runtime knows why. Reporting it late says less, slower."""
+        _seed(registry_path, {"only-01": _entry()})
+
+        class FailsImmediately(FakeHandler):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.connect_error = "Cannot reach browser on port 9222"
+
+            @property
+            def available(self) -> bool:
+                return False
+
+        monkeypatch.setattr(curated, "CDPHandler", FailsImmediately)
+        monkeypatch.setattr(curated, "HANDLER_CONNECT_TIMEOUT_SECONDS", 30.0)
+        started = time.monotonic()
+        with pytest.raises(LifecycleError) as caught:
+            curated.snapshot(instance="only-01", registry_path=registry_path)
+        elapsed = time.monotonic() - started
+
+        assert elapsed < 5.0, f"waited {elapsed:.1f}s for an answer it already had"
+        assert "Cannot reach browser on port 9222" in str(caught.value)
 
 
 # ---------------------------------------------------------------------------

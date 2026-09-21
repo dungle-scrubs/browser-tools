@@ -146,15 +146,24 @@ def _cdp_handler_session(
     thread.start()
     deadline = time.monotonic() + HANDLER_CONNECT_TIMEOUT_SECONDS
     connected = False
+    reason: str | None = None
     while time.monotonic() < deadline:
         if handler.available:
             connected = True
+            break
+        # The runtime knows why it failed. Waiting out the whole deadline to
+        # then report a generic message throws that away and costs the user
+        # ten seconds to say less.
+        reason = handler.connect_error
+        if reason is not None:
             break
         time.sleep(0.02)
     if not connected:
         handler.stop()
         thread.join(timeout=2.0)
         message = f"could not open a CDP session on the instance at port {port}"
+        if reason:
+            message = f"{message}: {reason}"
         if external:
             message = (
                 f"--endpoint on port {port} did not answer. "
@@ -299,9 +308,7 @@ def wait_idle(
     """Wait for network idle (frozen ``wait_idle``)."""
     port = _resolve_port(instance, registry_path, endpoint)
     with _cdp_handler_session(port, external=endpoint is not None) as handler:
-        text = _tool_or_raise(
-            handler, "wait_idle", {"timeout_ms": timeout_ms, "idle_ms": idle_ms}
-        )
+        text = _tool_or_raise(handler, "wait_idle", {"timeout_ms": timeout_ms, "idle_ms": idle_ms})
     return {"result": text}
 
 
@@ -489,9 +496,7 @@ def screencast(
 
     port = _resolve_port(instance, registry_path, endpoint)
     with _cdp_handler_session(port, external=endpoint is not None) as handler:
-        _tool_or_raise(
-            handler, "screencast_start", {"format": fmt, "max_frames": max_frames}
-        )
+        _tool_or_raise(handler, "screencast_start", {"format": fmt, "max_frames": max_frames})
         frames = _capture_for(handler, duration, max_frames)
         text = _tool_or_raise(handler, "screencast_stop", {"dir": out_dir})
     return {"frames": frames, "dir": out_dir, "result": text}
@@ -528,9 +533,10 @@ async def _capture_screenshot(
     shared retry budget): a near-uniform capture is retried after a short
     delay, matching the daemon's ``take_screenshot`` post-capture check.
     """
-    async with one_shot_page_session(
-        port, target_spec, target_by, external=external
-    ) as (cdp, session_id):
+    async with one_shot_page_session(port, target_spec, target_by, external=external) as (
+        cdp,
+        session_id,
+    ):
         data = ""
         for attempt in range(SCREENSHOT_BLANK_MAX_RETRIES + 1):
             result = await cdp.send(
@@ -576,9 +582,7 @@ def screenshot(
         spec = url
         target_by = "url"
 
-    data = asyncio.run(
-        _capture_screenshot(port, spec, target_by, external=endpoint is not None)
-    )
+    data = asyncio.run(_capture_screenshot(port, spec, target_by, external=endpoint is not None))
 
     if not data:
         raise LifecycleError("no screenshot data returned from the browser")
