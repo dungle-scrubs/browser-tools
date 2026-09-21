@@ -81,12 +81,21 @@ class TestTheRootResolvesByPrecedence:
         monkeypatch.setattr("pathlib.Path.home", classmethod(lambda cls: tmp_path))
         assert lifecycle.profiles_root().is_relative_to(tmp_path)
 
-    def test_the_default_is_not_in_a_temp_root(self, monkeypatch, tmp_path):
-        """The whole point: the operating system must not clear it."""
+    def test_the_default_is_under_the_home_data_directory(self, monkeypatch, tmp_path):
+        """The whole point: the operating system must not clear it.
+
+        Asserted against the legacy constant and the patched home rather than
+        against the string "/tmp": a CI runner's home can itself sit under
+        /tmp, which would make a literal prefix check pass or fail for a
+        reason that has nothing to do with the root.
+        """
         monkeypatch.delenv(lifecycle.PROFILES_ENV_VAR, raising=False)
         monkeypatch.delenv("XDG_DATA_HOME", raising=False)
         monkeypatch.setattr("pathlib.Path.home", classmethod(lambda cls: tmp_path))
-        assert not str(lifecycle.profiles_root()).startswith("/tmp")
+        root = lifecycle.profiles_root()
+        assert root.is_relative_to(tmp_path)
+        assert not root.is_relative_to(lifecycle.LEGACY_PROFILES_ROOT)
+        assert root != lifecycle.legacy_profiles_root()
 
     def test_the_registry_stays_in_tmp(self, monkeypatch):
         """A cleared registry after a reboot is self-consistent; a profile is not."""
