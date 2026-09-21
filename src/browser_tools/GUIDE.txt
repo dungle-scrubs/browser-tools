@@ -160,6 +160,16 @@ CURATED VERBS
       Inspect and select page frames. PATTERN is a frame URL substring. Any
       other sub-action is a usage error (exit 2).
 
+      SAME-PROCESS FRAMES ONLY. A cross-origin iframe runs in its own renderer
+      process under Chrome's site isolation, with its own CDP target. It is
+      absent from `frames list`, `frames select` cannot select it, and
+      `snapshot` shows the Iframe node with nothing under it. `--target` does
+      not reach it either: only page targets are attachable. Logins, payment
+      forms and consent banners are usually cross-origin iframes, so this is
+      the common case rather than the exotic one. Drive the iframe's URL as a
+      page of its own instead. `frames select` says so when it can tell that
+      is what happened.
+
   storage get [--key K]
       The selected frame's storage. --key is a frame URL pattern to select
       before reading. It is NOT a cookie name or a local-storage key. Without

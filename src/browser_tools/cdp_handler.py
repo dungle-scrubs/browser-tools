@@ -1151,10 +1151,7 @@ class CDPHandler:
 
         frame = fm.select_frame_by_url(url_pattern)
         if frame is None:
-            return make_error(
-                f"E002: No frame found matching '{url_pattern}'. "
-                "Run 'frames list' to see available frames."
-            )
+            return make_error(await self._no_frame_matched(url_pattern))
 
         ctx_id = fm.get_selected_execution_context_id()
         ctx_info = f", executionContextId={ctx_id}" if ctx_id else " (no execution context yet)"
@@ -1162,6 +1159,53 @@ class CDPHandler:
             f"Selected frame: {frame.frame_id}\n"
             f"URL: {frame.url}\n"
             f"Origin: {frame.security_origin}{ctx_info}"
+        )
+
+    async def _out_of_process_frames(self, url_pattern: str) -> list[str]:
+        """URLs of `iframe` targets matching the pattern, newest first.
+
+        A cross-origin iframe runs in its own renderer process under Chrome's
+        site isolation, which gives it its own CDP target. It is not in
+        `Page.getFrameTree` on the page session and its lifecycle events do
+        not arrive there, so the frame manager cannot see it at all.
+
+        Asking the browser is the only way to tell "no such frame" apart from
+        "a frame this tool cannot reach". The call is on the failure path
+        only, and a browser that will not answer it leaves the caller with
+        the plain message rather than an error about the diagnosis.
+        """
+        cdp = self._cdp_client
+        if cdp is None or not cdp.connected:
+            return []
+        try:
+            result = await cdp.send(method="Target.getTargets")
+        except (_get_cdp_error_class(), ConnectionError, TimeoutError, OSError):
+            return []
+        lowered = url_pattern.lower()
+        return [
+            info.get("url", "")
+            for info in result.get("targetInfos", [])
+            if info.get("type") == "iframe" and lowered in info.get("url", "").lower()
+        ]
+
+    async def _no_frame_matched(self, url_pattern: str) -> str:
+        """Why no frame matched, saying which of the two reasons it was."""
+        out_of_process = await self._out_of_process_frames(url_pattern)
+        if not out_of_process:
+            return (
+                f"E002: No frame found matching '{url_pattern}'. "
+                "Run 'frames list' to see available frames."
+            )
+        listed = ", ".join(out_of_process[:3])
+        return (
+            f"E002: No frame found matching '{url_pattern}'. The browser has "
+            f"a cross-origin iframe at {listed}, and this tool cannot reach "
+            "it: site isolation puts it in its own process with its own CDP "
+            "target, so it is absent from 'frames list' and 'snapshot' shows "
+            "the Iframe node with nothing under it. There is no flag for "
+            "this yet and --target does not reach it either. Drive the "
+            "iframe's URL as a page instead, or work above it. See "
+            "https://github.com/dungle-scrubs/browser-tools/issues/127."
         )
 
     async def _handle_reset_frame(self, arguments: dict[str, Any]) -> dict[str, Any]:
