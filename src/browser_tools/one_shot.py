@@ -40,13 +40,77 @@ import functools
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, Callable
+    from collections.abc import AsyncGenerator, Callable, Iterable
 
 from .core.attach import AmbiguousTargetError, TargetNotFoundError, resolve_target
 from .core.cdp_client import CDPClient, get_ws_url_async
 from .core.errors import CDPError, NoPageError
 from .core.registry import InstanceNotFoundError
 from .lifecycle import LifecycleError
+
+#: Domains the run's ``CDPRuntime`` owns for the whole run (RFC-03, "Domain-
+#: enable state"). A step may enable either - it needs them on - but MUST NOT
+#: disable one: the frame manager reads ``Page`` events, so a step that turned
+#: ``Page`` off would break frame selection for every later step.
+#:
+#: The cost of the exemption, stated because The Manual states it: a step does
+#: not get a *first* enable on these. A first ``Runtime.enable`` on a session
+#: replays the execution contexts that already exist and a second replays
+#: nothing, so `wait --event Runtime.executionContextCreated` after any
+#: Runtime-touching step reports nothing where the same command alone reports
+#: the contexts already there.
+RUN_OWNED_DOMAINS = frozenset({"Page", "Runtime"})
+
+
+@contextlib.asynccontextmanager
+async def domains_enabled(
+    cdp: Any, session_id: str, domains: Iterable[str]
+) -> AsyncGenerator[None]:
+    """Enable each domain for the body, then disable what this body turned on.
+
+    Domain enables are session state, and nothing in the tree used to send a
+    disable. That was harmless while the session died with the invocation. A
+    Step Run's session outlives every step, so an enable from step 3 is still
+    in force at step 9 - and a second enable on one session is a no-op that
+    replays nothing, which silently changes what a later step observes.
+    Disabling on the way out restores first-enable semantics for the next step
+    that wants the domain.
+
+    It runs the same way outside a run, where the disable is one round trip of
+    about a millisecond against a session that was going to be detached. One
+    code path is worth more than that millisecond: a rule that only applied
+    inside a run would be a second behaviour to keep correct.
+
+    Two things are deliberately not undone here. Domains in
+    :data:`RUN_OWNED_DOMAINS`, per the rule above. And a domain the caller
+    enabled by hand in a raw passthrough step, which never reaches this
+    function: an enable the caller typed is that step's whole output, and
+    undoing it would make the step a no-op. A caller who turns a domain on by
+    hand turns it off by hand.
+
+    Failures either way are suppressed. Some domains have no ``enable`` at
+    all, which is why the enable path already ignored ``CDPError``; the
+    disable path gets the same treatment, and also ignores a dropped
+    connection. A disable that fails costs a later step its first enable,
+    which the rule above already names as the known exception. Raising here
+    would instead fail a step whose work had already succeeded, and from a
+    ``finally``, where it would mask whatever the body raised.
+    """
+    turned_on: list[str] = []
+    try:
+        for domain in dict.fromkeys(domains):
+            try:
+                await cdp.send(method=f"{domain}.enable", session_id=session_id)
+            except CDPError:
+                # No enable for this domain, so nothing to undo either.
+                continue
+            if domain not in RUN_OWNED_DOMAINS:
+                turned_on.append(domain)
+        yield
+    finally:
+        for domain in reversed(turned_on):
+            with contextlib.suppress(CDPError, ConnectionError):
+                await cdp.send(method=f"{domain}.disable", session_id=session_id)
 
 
 @contextlib.asynccontextmanager

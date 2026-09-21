@@ -34,7 +34,6 @@ the vendored target-selection machinery (``core.attach.resolve_target``).
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 from typing import TYPE_CHECKING, Any
 
@@ -44,9 +43,8 @@ if TYPE_CHECKING:
     from .core.cdp_client import CDPClient
 
 from . import lifecycle
-from .core.errors import CDPError
 from .events import _target_slot  # pyright: ignore[reportPrivateUsage]
-from .one_shot import cli_cdp_errors, one_shot_page_session
+from .one_shot import cli_cdp_errors, domains_enabled, one_shot_page_session
 
 #: The collection window's default duration in seconds. Short by design: this
 #: is a snapshot-over-a-beat, not an open-ended stream (that is ``attach``'s
@@ -97,20 +95,14 @@ async def collect_on_session(
         cdp.on(event=event_name, callback=handler, session_id=session_id)
 
     try:
-        enabled_domains: set[str] = set()
-        for event_name in events:
-            domain = event_name.split(".")[0]
-            if domain in enabled_domains:
-                continue
-            enabled_domains.add(domain)
-            with contextlib.suppress(CDPError):
-                # Events delivered during this await are already buffered.
-                await cdp.send(method=f"{domain}.enable", session_id=session_id)
-
-        if duration > 0:
-            await asyncio.sleep(duration)
-
-        return list(collected)
+        # Enabled for this window and disabled after it, so a second
+        # `console-list` in one run still gets a first enable (RFC-03,
+        # "Domain-enable state"). Events delivered during the enable are
+        # already buffered.
+        async with domains_enabled(cdp, session_id, (e.split(".")[0] for e in events)):
+            if duration > 0:
+                await asyncio.sleep(duration)
+            return list(collected)
     finally:
         for event_name, handler in handlers.items():
             cdp.off(event=event_name, callback=handler)

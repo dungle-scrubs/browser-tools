@@ -320,6 +320,30 @@ class FrameManager:
             )
         )
 
+    def _forget_descendants(self, frame_id: str) -> None:
+        """Drop every frame below ``frame_id``, which a navigation destroyed.
+
+        Only the descendants: the frame itself survives its own navigation
+        with a new document. Walks the flat map by parent id rather than the
+        ``children`` lists, so a frame whose parent link was recorded without
+        a matching child entry is still removed.
+        """
+        doomed: list[str] = []
+        frontier = [frame_id]
+        while frontier:
+            parent_id = frontier.pop()
+            for candidate_id, candidate in self._frames.items():
+                if candidate.parent_frame_id == parent_id and candidate_id not in doomed:
+                    doomed.append(candidate_id)
+                    frontier.append(candidate_id)
+
+        for doomed_id in doomed:
+            self._frames.pop(doomed_id, None)
+            if self._selected_frame_id == doomed_id:
+                # The pattern is kept, as everywhere else: the re-resolution
+                # below may find the selection again in the new document.
+                self._selected_frame_id = None
+
     def handle_frame_navigated(self, params: dict[str, Any]) -> None:
         """Handle Page.frameNavigated event.
 
@@ -331,11 +355,19 @@ class FrameManager:
         if not frame_id:
             return
 
+        # A navigated frame gets a new document, and the old document's child
+        # frames go with it. Chrome sends no `Page.frameDetached` for them, so
+        # nothing else here can learn they are gone: without this, `frames
+        # list` keeps reporting frames that no longer exist, and a selection
+        # re-resolves onto one of them and reads a frame that is not there.
+        self._forget_descendants(frame_id)
+
         frame = self._frames.get(frame_id)
         if frame:
             frame.url = frame_data.get("url", frame.url)
             frame.security_origin = frame_data.get("securityOrigin", frame.security_origin)
             frame.name = frame_data.get("name", frame.name)
+            frame.children = []
         else:
             # Frame navigated before we saw attached — create it
             self._frames[frame_id] = FrameInfo(
@@ -349,8 +381,19 @@ class FrameManager:
         # Re-resolve frame selection if URL pattern is active
         if self._selected_url_pattern:
             resolved = self._resolve_frame_by_url(self._selected_url_pattern)
-            if resolved:
-                self._selected_frame_id = resolved.frame_id
+            # The `else` matters (RFC-03, "Frame selection across steps"). Without
+            # it a re-resolution that finds nothing leaves the previous frame id
+            # in place, and the next frame-scoped read succeeds against a frame
+            # whose URL no longer matches the pattern the caller selected. Inside
+            # a Step Run the selection outlives the step, so that stale id is read
+            # by later steps; `select_frame_by_url` already clears on a no-match
+            # and this is the one path that did not.
+            #
+            # The pattern is kept, matching what a detach does. The caller
+            # selected by pattern, so a later navigation that brings a matching
+            # frame back re-points the selection at it. Only `frames reset` and a
+            # new `frames select` clear the pattern.
+            self._selected_frame_id = resolved.frame_id if resolved else None
 
         self._event_buffer.append(
             FrameEvent(

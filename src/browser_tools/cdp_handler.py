@@ -1131,8 +1131,11 @@ class CDPHandler:
         if selected is None:
             return make_error(
                 "No frame selected. Pass --key PATTERN to name the frame on this "
-                "read. A 'frames select' in an earlier command does not carry "
-                "over: the selection belongs to the process that made it."
+                "read, or select one first. Inside a 'bt run' a 'frames select' "
+                "step governs the steps after it, and a navigation that leaves "
+                "the pattern matching no frame clears it. Between separate "
+                "commands a selection never carries over: it belongs to the "
+                "process that made it."
             )
 
         storage_types = arguments.get(

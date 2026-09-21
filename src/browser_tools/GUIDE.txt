@@ -214,10 +214,37 @@ RUNNING MANY STEPS IN ONE INVOCATION
       in a step list is a usage error (exit 2).
 
       FRAME SELECTION LASTS. `frames select` in one step governs the steps after
-      it, so `storage get` with no --key works inside a run.
+      it, so `storage get` with no --key works inside a run. A selection
+      remembers the pattern you gave it, so after a navigation it re-points at
+      whatever frame now matches. If nothing matches any more, the selection is
+      cleared and the next frame-scoped step fails rather than reading the wrong
+      frame. The selected frame going away clears it too, but the pattern is
+      kept either way, so a later navigation that brings a matching frame back
+      selects it again. Only `frames reset` and a new `frames select` change the
+      pattern.
 
-      EVERYTHING ELSE BEHAVES AS IT WOULD ALONE. A step inside a run does what
-      the same command does on its own.
+      AFTER A NAVIGATION, WAIT BEFORE YOU READ. Page.navigate returns when the
+      navigation commits, and the frame tree updates from the event that
+      follows it. A step placed straight after a navigate can run before that
+      event arrives and see the frames of the page you just left. Put a
+      `wait --event Page.loadEventFired` or a `wait-idle` step in between.
+
+      EVERYTHING ELSE BEHAVES AS IT WOULD ALONE, WITH ONE EXCEPTION. A step
+      inside a run does what the same command does on its own. Domains a step
+      turns on are turned off when that step ends, so a second `network-list`
+      in one run sees what the first one saw.
+
+      The exception is the Page and Runtime domains. A run needs them on
+      throughout to track frames, so they are never turned off between steps.
+      A step that relies on being the first to turn one of them on does not
+      get that. `wait --event Runtime.executionContextCreated` after any step
+      that touched Runtime reports nothing, where the same command on its own
+      reports the contexts that already exist; `console-list` is in the same
+      position, because it turns Runtime on too. Run either one on its own.
+
+      A raw step you write yourself is yours to undo. `Network.enable {}`
+      stays on until a later step turns it off; the rule above covers only the
+      domains a verb turns on for you.
 
       UIDS ARE UNCHANGED. A UID is still valid until the page navigates, no
       longer and no shorter. One process does not extend it. Because no step can
