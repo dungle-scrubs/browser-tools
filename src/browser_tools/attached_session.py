@@ -61,6 +61,17 @@ class AttachedSessionClient:
         return self._session_id
 
     @property
+    def raw(self) -> CoreCDPClient:
+        """The browser-level client underneath, for a caller that needs it.
+
+        A Step Run executes the One-Shot Session verbs by calling their
+        ``*_on_session`` coroutines, which take the core client and a
+        ``sessionId`` rather than this adapter. They get them from here, so
+        every step still runs on the run's one session.
+        """
+        return self._client
+
+    @property
     def connected(self) -> bool:
         """Whether the underlying connection is usable."""
         return not self._closed and bool(getattr(self._client, "_connected", False))

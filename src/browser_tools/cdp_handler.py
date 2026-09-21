@@ -350,6 +350,25 @@ class CDPRuntime:
         return self._connect_error
 
     @property
+    def session(self) -> tuple[Any, str] | None:
+        """The run's ``(client, sessionId)``, or None before it connects."""
+        if self._cdp_client is None:
+            return None
+        return self._cdp_client.raw, self._cdp_client.session_id
+
+    def submit(self, coro: Any, timeout: float | None = None) -> Any:
+        """Run one coroutine on this runtime's loop and return its result.
+
+        The loop belongs to the runtime's background thread, so a caller on
+        another thread cannot await the coroutine itself. A Step Run uses
+        this for the One-Shot Session verbs, which are coroutines over the
+        session this runtime already holds.
+        """
+        if self._loop is None:
+            raise RuntimeError("the CDP runtime is not running")
+        return asyncio.run_coroutine_threadsafe(coro, self._loop).result(timeout=timeout)
+
+    @property
     def mode(self) -> str:
         """Current access mode ('full' or 'inspect')."""
         return self._mode
@@ -684,6 +703,15 @@ class CDPHandler:
     def connect_error(self) -> str | None:
         """Why the runtime's connection failed, once it has."""
         return self._rt.connect_error
+
+    @property
+    def session(self) -> tuple[Any, str] | None:
+        """The runtime's ``(client, sessionId)``, or None before it connects."""
+        return self._rt.session
+
+    def submit(self, coro: Any, timeout: float | None = None) -> Any:
+        """Run one coroutine on the runtime's loop; see :meth:`CDPRuntime.submit`."""
+        return self._rt.submit(coro, timeout=timeout)
 
     @property
     def mode(self) -> str:
