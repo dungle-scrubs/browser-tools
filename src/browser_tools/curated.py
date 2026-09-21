@@ -607,8 +607,17 @@ def _capture_for(handler: CDPHandler, duration: float, max_frames: int) -> int:
     Returns as soon as the buffer is full rather than waiting out ``duration``:
     once ``max_frames`` is reached the recorder stops acking, so CDP flow
     control pauses the stream and no further frame can arrive.
+
+    Inside a Step Run it also stops at the run's deadline. This loop waits in
+    the calling thread with nothing in flight, so it is the one wait
+    ``bounded_timeout`` cannot reach, and without this a `--timeout 3` run
+    would sit through a `--duration 20` capture. The frames already buffered
+    are kept and written: the capture did happen, and a run that stops does
+    not undo what its steps already did.
     """
     deadline = time.monotonic() + duration
+    if handler.deadline is not None:
+        deadline = min(deadline, handler.deadline)
     while time.monotonic() < deadline:
         if handler.screencast_frame_count >= max_frames:
             break

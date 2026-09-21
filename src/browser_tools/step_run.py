@@ -70,6 +70,19 @@ def _one_step(step: step_list.Step, handler: Any, registry_path: str | None) -> 
     return cli.step_envelope(step.as_verb(), registry_path, handler=handler)
 
 
+def _why(exc: BaseException, timeout: float | None) -> str:
+    """The step's own reason, with the run's deadline named when it caused it.
+
+    The reason is kept either way. A caller told only "the deadline passed"
+    cannot tell a step that was nearly done from one that was stuck, and the
+    step already said which.
+    """
+    reason = str(exc) or "the step did not answer in time"
+    if timeout is None or "deadline" in reason:
+        return reason
+    return f"the run's {timeout}s deadline passed: {reason}"
+
+
 def execute(
     steps: list[step_list.Step],
     handler: Any,
@@ -100,24 +113,17 @@ def execute(
             if deadline is not None and time.monotonic() >= deadline:
                 raise TimeoutError("the run's deadline passed")
             result = _one_step(step, handler, registry_path)
-        except TimeoutError as exc:
-            # A step's own bound can raise this too, so the run's deadline is
-            # what decides which of the two happened, not the exception type.
+        except (TimeoutError, LifecycleError) as exc:
+            # The exception type does not say which of the two happened. A
+            # step cut off by the run's deadline surfaces as whatever its own
+            # layer raises: `wait` raises TimeoutError straight out, while a
+            # curated verb's tool call turns it into an error envelope and so
+            # into LifecycleError. The clock is the only reliable test, and
+            # asking it here is what keeps `timeout` and `failed` apart.
             timed_out = deadline is not None and time.monotonic() >= deadline
             status = STATUS_TIMEOUT if timed_out else STATUS_FAILED
             entry["status"] = status
-            entry["error"] = (
-                f"the run's {timeout}s deadline passed" if timed_out else str(exc) or "timed out"
-            )
-            entries.append(entry)
-            break
-        except LifecycleError as exc:
-            # Exit 1 as a bare invocation, so exit 1 here. `WaitTimeout` is
-            # one of these: a step's own deadline is a step failure, and the
-            # run did not time out.
-            status = STATUS_FAILED
-            entry["status"] = STATUS_FAILED
-            entry["error"] = str(exc)
+            entry["error"] = _why(exc, timeout if timed_out else None)
             entries.append(entry)
             break
         else:

@@ -296,6 +296,12 @@ assert set(_CDP_HANDLERS) == CDP_TOOLS, (
 )
 
 
+#: What a CDP call gets once a Step Run's deadline has passed. Enough for a
+#: step to undo what it started (stop a screencast, disable a domain), and
+#: not enough to carry on working past the deadline the caller set.
+DEADLINE_GRACE_SECONDS = 5.0
+
+
 class CDPRuntime:
     """Owns the CDP background thread, event loop, WebSocket connection, frame
     manager, screencast recorder, and the thread-safe marshal methods the Daemon
@@ -385,13 +391,37 @@ class CDPRuntime:
         """Bound every later wait on this runtime by one monotonic instant."""
         self._deadline = deadline
 
+    @property
+    def deadline(self) -> float | None:
+        """The run's deadline, for a step that waits without a call in flight.
+
+        `bounded_timeout` can only shorten a wait that is waiting on CDP. A
+        step that polls locally, as the screencast capture does, has nothing
+        in flight to cut, so it reads the deadline and clamps its own.
+        """
+        return self._deadline
+
     def bounded_timeout(self, timeout: float | None) -> float | None:
-        """``timeout`` clamped to what is left of the run's deadline."""
+        """``timeout`` clamped to what is left of the run's deadline.
+
+        A deadline bounds work, not teardown. Once it has passed, the call
+        being made is a step unwinding - and refusing that call leaves the
+        browser in whatever state the step was halfway through. A
+        `screencast` cut off at the deadline would never reach
+        `Page.stopScreencast`, so the capture it started would go on running
+        on a page nobody is watching. So a passed deadline returns a small
+        fixed budget rather than raising.
+
+        The run still stops, and not because of this method: the call that
+        was in flight when the deadline passed is cut short by its own
+        clamped bound, and `step_run.execute` checks the clock before it
+        starts each step.
+        """
         if self._deadline is None:
             return timeout
         remaining = self._deadline - time.monotonic()
         if remaining <= 0:
-            raise TimeoutError("the run's deadline passed")
+            return DEADLINE_GRACE_SECONDS
         return remaining if timeout is None else min(timeout, remaining)
 
     def submit(self, coro: Any, timeout: float | None = None) -> Any:
@@ -780,6 +810,11 @@ class CDPHandler:
         """Bound every later wait on this handler; see :meth:`CDPRuntime.set_deadline`."""
         self._rt.set_deadline(deadline)
 
+    @property
+    def deadline(self) -> float | None:
+        """The run's deadline; see :attr:`CDPRuntime.deadline`."""
+        return self._rt.deadline
+
     def require_session(self) -> tuple[Any, str]:
         """The runtime's ``(client, sessionId)``, or a refusal saying why not.
 
@@ -878,7 +913,9 @@ class CDPHandler:
         except Exception as exc:
             logger.warning("call_tool(%s) error: %s", name, exc)
             future.cancel()
-            return make_error(str(exc))
+            # A bare TimeoutError stringifies to "", which would reach the
+            # caller as the word "Error" and nothing else.
+            return make_error(str(exc) or f"{name} did not answer in time")
 
     def call_native(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         """Execute a native snapshot/UID tool on the CDP loop (thread-safe).
@@ -907,7 +944,9 @@ class CDPHandler:
         except Exception as exc:
             logger.warning("call_native(%s) error: %s", name, exc)
             future.cancel()
-            return make_error(str(exc))
+            # A bare TimeoutError stringifies to "", which would reach the
+            # caller as the word "Error" and nothing else.
+            return make_error(str(exc) or f"{name} did not answer in time")
 
     def mark_native_navigation(self) -> None:
         """Invalidate the native snapshot's UIDs after a navigation.

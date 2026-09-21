@@ -339,7 +339,8 @@ class TestTheRunDeadline:
         monkeypatch.setattr(step_run, "_one_step", blocked)
         document, _ = step_run.execute([_step(1)], FakeHandler(), timeout=0.02)
         assert document["run"]["status"] == "timeout"
-        assert "0.02s deadline" in document["steps"][0]["error"]
+        assert document["steps"][0]["status"] == "timeout"
+        assert "deadline" in document["steps"][0]["error"]
 
     def test_a_steps_own_timeout_with_no_run_deadline_is_a_failure(self, monkeypatch):
         """Not every TimeoutError is the run's. Without a deadline none of them is."""
@@ -521,3 +522,168 @@ class TestTheCliFront:
         )
         assert cli.main(["run", "steps.txt", "--target", "1", "--url", "x"]) == 2
         assert capsys.readouterr().out == ""
+
+
+class TestADeadlineBoundsWorkNotTeardown:
+    """A run that stops must not leave the browser mid-step.
+
+    Found live, not by the suite: with a 3-second `--timeout`, a
+    `screencast` step reached its deadline, and the `screencast_stop` that
+    would have ended the capture was refused for being past the deadline.
+    `Page.stopScreencast` never reached the browser.
+    """
+
+    def test_a_passed_deadline_still_grants_a_budget(self):
+        from browser_tools.cdp_handler import DEADLINE_GRACE_SECONDS, CDPRuntime
+
+        runtime = CDPRuntime(None)
+        runtime.set_deadline(time.monotonic() - 10)
+        assert runtime.bounded_timeout(30) == DEADLINE_GRACE_SECONDS, (
+            "a call made while unwinding past the deadline was refused, so the "
+            "step could not undo what it started"
+        )
+
+    def test_the_grace_is_enough_to_act_and_not_enough_to_work(self):
+        from browser_tools.cdp_handler import DEADLINE_GRACE_SECONDS
+
+        assert 0 < DEADLINE_GRACE_SECONDS <= 10
+
+    def test_a_live_deadline_still_clamps(self):
+        from browser_tools.cdp_handler import CDPRuntime
+
+        runtime = CDPRuntime(None)
+        runtime.set_deadline(time.monotonic() + 2)
+        assert 0 < (runtime.bounded_timeout(30) or 0) <= 2
+
+    def test_no_deadline_leaves_the_timeout_alone(self):
+        from browser_tools.cdp_handler import CDPRuntime
+
+        assert CDPRuntime(None).bounded_timeout(30) == 30
+        assert CDPRuntime(None).bounded_timeout(None) is None
+
+
+class TestTheStatusComesFromTheClockNotTheExceptionType:
+    """A step cut off by the run's deadline raises whatever its own layer raises.
+
+    `wait` raises TimeoutError straight out. A curated verb's tool call turns
+    the same event into an error envelope and so into LifecycleError. Reading
+    the type alone reported the second one as `failed`, which tells the caller
+    the page is broken when the truth is that `--timeout` was too small.
+    """
+
+    def test_a_lifecycle_error_after_the_deadline_is_a_timeout(self, monkeypatch):
+        def late(step, handler, registry_path):
+            time.sleep(0.05)
+            raise LifecycleError("Error: the run's deadline passed")
+
+        monkeypatch.setattr(step_run, "_one_step", late)
+        document, _ = step_run.execute([_step(1)], FakeHandler(), timeout=0.02)
+        assert document["run"]["status"] == "timeout", (
+            "a curated step cut off by the deadline was reported as a plain "
+            "failure, so the caller cannot tell to raise --timeout"
+        )
+
+    def test_a_lifecycle_error_before_the_deadline_is_a_failure(self, monkeypatch):
+        _outcomes(monkeypatch, [LifecycleError("the UID is stale")])
+        document, _ = step_run.execute([_step(1)], FakeHandler(), timeout=60)
+        assert document["run"]["status"] == "failed"
+        assert document["steps"][0]["error"] == "the UID is stale"
+
+    def test_the_steps_own_reason_survives_a_timeout(self, monkeypatch):
+        """"The deadline passed" alone cannot tell a stuck step from a slow one."""
+
+        def late(step, handler, registry_path):
+            time.sleep(0.05)
+            raise LifecycleError("the element is covered by an overlay")
+
+        monkeypatch.setattr(step_run, "_one_step", late)
+        document, _ = step_run.execute([_step(1)], FakeHandler(), timeout=0.02)
+        error = document["steps"][0]["error"]
+        assert "the element is covered by an overlay" in error, error
+        assert "0.02s deadline" in error, error
+
+    def test_a_reason_that_already_names_the_deadline_is_not_doubled(self, monkeypatch):
+        def late(step, handler, registry_path):
+            time.sleep(0.05)
+            raise LifecycleError("the run's deadline passed")
+
+        monkeypatch.setattr(step_run, "_one_step", late)
+        document, _ = step_run.execute([_step(1)], FakeHandler(), timeout=0.02)
+        assert document["steps"][0]["error"] == "the run's deadline passed"
+
+
+class TestALocalWaitClampsItself:
+    """The one wait `bounded_timeout` cannot reach.
+
+    The screencast capture polls in the calling thread, so no CDP call is in
+    flight to cut short. Without its own clamp a `--timeout 3` run sat
+    through a `--duration 20` capture and took 20.2 seconds.
+    """
+
+    class _Recorder:
+        def __init__(self, deadline):
+            self.deadline = deadline
+            self.screencast_frame_count = 0
+
+    def test_the_capture_stops_at_the_runs_deadline(self):
+        from browser_tools import curated
+
+        handler = self._Recorder(time.monotonic() + 0.2)
+        started = time.monotonic()
+        curated._capture_for(handler, duration=30, max_frames=1000)
+        elapsed = time.monotonic() - started
+        assert elapsed < 5, (
+            f"the capture ran {elapsed:.1f}s past a deadline 0.2s away, so the "
+            "run's --timeout does not bound a step that waits locally"
+        )
+
+    def test_without_a_run_it_keeps_its_own_duration(self):
+        from browser_tools import curated
+
+        handler = self._Recorder(None)
+        started = time.monotonic()
+        curated._capture_for(handler, duration=0.15, max_frames=1000)
+        assert time.monotonic() - started >= 0.15, (
+            "a bare screencast stopped early, so --duration no longer means what it says"
+        )
+
+    def test_a_full_buffer_still_ends_it_early(self):
+        from browser_tools import curated
+
+        handler = self._Recorder(None)
+        handler.screencast_frame_count = 10
+        started = time.monotonic()
+        assert curated._capture_for(handler, duration=30, max_frames=10) == 10
+        assert time.monotonic() - started < 1
+
+
+class TestACallThatTimesOutSaysSomething:
+    """`str(TimeoutError())` is "", which reached the caller as bare "Error"."""
+
+    def test_call_tool_names_the_tool(self, monkeypatch):
+        import asyncio as _asyncio
+
+        from browser_tools.cdp_handler import CDPHandler, CDPRuntime
+
+        handler = CDPHandler.__new__(CDPHandler)
+        rt = CDPRuntime.__new__(CDPRuntime)
+        loop = type("L", (), {"is_running": lambda self: True})()
+        rt._loop = loop  # pyright: ignore[reportAttributeAccessIssue]
+        handler._rt = rt
+
+        class _Future:
+            def result(self, timeout=None):
+                raise TimeoutError
+
+            def cancel(self):
+                pass
+
+        def fake(coro, loop):
+            coro.close()
+            return _Future()
+
+        monkeypatch.setattr(_asyncio, "run_coroutine_threadsafe", fake)
+        response = handler.call_tool("screencast_stop", {})
+        text = response["result"]["content"][0]["text"]
+        assert response["result"]["isError"] is True
+        assert "screencast_stop" in text and "in time" in text, text

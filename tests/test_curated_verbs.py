@@ -92,6 +92,8 @@ class FakeHandler:
         self.mode = mode
         self.target_spec = target_spec
         self.target_by = target_by
+        #: Mirrors ``CDPHandler.deadline``: None outside a Step Run.
+        self.deadline = None
         self.tool_calls: list[tuple[str, dict]] = []
         self.native_calls: list[tuple[str, dict]] = []
         self.detection_runs = 0
