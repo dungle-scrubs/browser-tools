@@ -1,0 +1,346 @@
+browser-tools / bt -- the agent manual
+
+This is the whole CLI. Reading it is enough to drive a browser with this tool;
+nothing else needs to be read first. `bt guide` prints it.
+
+The tool tracks named browser instances in a registry. Each instance is one
+running browser process, named after the directory it was launched from.
+Liveness is engine-aware: Chrome is process identity plus CDP port
+attribution, Camoufox is process identity plus a user-data-dir hold. Never PID
+existence alone.
+
+
+NAMING THE INSTANCE
+
+  Every verb that drives a browser takes the instance ahead of the verb:
+
+    bt web-01 snapshot
+    bt web-01 frames select checkout
+    bt web-01 Page.navigate '{"url": "https://..."}'
+
+  A bare leading token is an instance name when the registry knows it, and the
+  verb otherwise, so `bt frames select checkout` needs no escaping. INSTANCE
+  may be omitted when exactly one instance is registered; with several, every
+  verb names the candidates rather than guessing (exit 1). Naming the instance
+  twice is a usage error (exit 2).
+
+
+LIFECYCLE VERBS
+
+  launch [--engine chrome|camoufox] [--profile NAME] [--channel NAME]
+         [--headless] [--port PORT] [--fingerprint FILE] [--no-window-border]
+         [-- BROWSER_ARGS]
+      Launch a browser and register it. Prints the new instance as JSON.
+      --engine camoufox starts an anti-detect Camoufox instance. launch takes
+      no positional argument: the name is assigned by the registry, and a bare
+      token before -- is a usage error (exit 2), because it would otherwise be
+      handed to the browser along with every flag after it.
+
+  status [INSTANCE]
+      Every registered instance with liveness, engine, profile and page
+      targets, as JSON. With INSTANCE, only that one. It reports the registry,
+      so a browser driven with --endpoint does not appear.
+
+  stop [INSTANCE] [--target SPEC]
+      Stop a browser and retire its registry entry, or close one tab with
+      --target. A profile-bound instance keeps its user-data-dir; an unbound
+      one has its session dir reaped. Closing a tab is Chrome only (exit 1 on
+      Camoufox), and needs a live instance (exit 1).
+
+  cleanup
+      Remove stale registry entries and orphaned session directories. Live
+      instances are never touched, and no path under a profile root is ever
+      deleted -- profiles go away through `profile delete`, never on age. An
+      unparseable registry deletes nothing and is quarantined instead.
+
+  profile list
+      Every named profile with its name, its path, and the live instance
+      holding it (null when free). Needs no running instance; an empty root
+      lists nothing. A profile still in the old /tmp root is marked
+      "legacy": true.
+
+  profile delete NAME
+      Remove one profile directory, and its login with it. A name outside the
+      permitted character set, or one whose resolved path leaves the profile
+      root, is a usage error (exit 2) and deletes nothing. A profile a live
+      instance holds is refused (exit 1) naming the holder.
+
+  profile migrate [--dry-run] [--back]
+      Move profiles still in the old /tmp root into the durable one.
+      --dry-run reports what would move and moves nothing. --back reverses it,
+      and is the rollback for the root move: once the profiles have moved on
+      disk, reverting the code does not move them back. A live holder is
+      refused, and a name present on both sides is refused rather than merged.
+
+  guide
+      Print this manual. Plain text, not JSON.
+
+  window-border [on|off]
+      Show, or persistently set, whether marked windows draw the colored
+      border and corner badge over the page (default on). They cover the
+      page's outer edge and top-left corner; 'off' removes them from every
+      running browser within a second and keeps them off for later launches.
+      The tab-title prefix stays either way. --no-window-border on launch
+      turns off all marking for that one launch.
+
+
+CURATED VERBS
+
+  Each takes [INSTANCE] as above, and --endpoint URL to drive an external
+  browser. Each prints one JSON document on stdout.
+
+  snapshot [--target SPEC]
+      The accessibility tree, one UID per node. This is how you find something
+      to click or fill.
+
+  click --uid UID [--target SPEC]
+  fill --uid UID --text T [--target SPEC]
+      Act on the node a snapshot named. Missing --uid or --text is a usage
+      error (exit 2). A UID that names a node with no DOM node behind it, or
+      a node that is not an element, is exit 1.
+
+  wait-idle [--timeout-ms MS] [--idle-ms MS]
+  wait-stable [--timeout-ms MS] [--stable-ms MS]
+      Wait for network idle (default 5000ms deadline, 500ms quiet window), or
+      for the DOM to stop changing (5000ms, 300ms).
+
+  detect [--wait SECONDS | --no-wait]
+      Run interstitial detection against the current page. --wait bounds the
+      retry for a self-clearing challenge; --no-wait reports the current state
+      at once. Only JS-solvable challenges auto-retry. Vendor presence is
+      reported alongside the blocked answer, never in place of it: a cookie
+      proving a site uses a bot-protection vendor is on every page of that
+      site and does not by itself mean the page is blocking you.
+
+  console-list [--target SPEC | --url SUBSTRING] [--duration SECONDS]
+  network-list [--target SPEC | --url SUBSTRING] [--duration SECONDS]
+      Collect console messages, or network requests and responses, over a
+      short attach window (default 2 seconds). network-list correlates
+      requests and responses by requestId, keeps rows in first-observation
+      order, and keeps request-only and response-only rows with the missing
+      fields null. Both subscribe before enabling their domain, so an event
+      emitted during enable is in the result.
+
+  frames list | frames select PATTERN | frames reset
+      Inspect and select page frames. PATTERN is a frame URL substring. Any
+      other sub-action is a usage error (exit 2).
+
+  storage get [--key K]
+      The selected frame's storage. --key is a frame URL pattern to select
+      before reading. It is NOT a cookie name or a local-storage key. Without
+      a selected frame and without --key, exit 1.
+
+  screenshot [--path FILE] [--target SPEC | --url SUBSTRING]
+      A full-page PNG. Without --path, the base64 data URI. A near-uniform
+      capture is retried once before it is returned.
+
+  screencast --dir DIR [--duration SECONDS] [--format FMT] [--max-frames N]
+      Capture a screencast and write its frames plus a frames.json manifest to
+      DIR, in one invocation. Capture ends at whichever comes first: the
+      duration (default 5 seconds) or the frame cap (default 600). --dir is
+      required (exit 2). There is no separate start and stop, and naming one
+      is a usage error: the frame buffer belongs to the process that captured
+      it, so a stop in a second process could never reach the first one's
+      frames.
+
+
+EVENT VERBS
+
+  attach [INSTANCE] +Domain.event [+Domain.event ...]
+         [--target SPEC | --url SUBSTRING] [--endpoint URL]
+      Stream subscribed CDP events as JSON Lines, one event per line, until
+      stdin reaches EOF or the process is signalled. It prints a
+      {"status": "ready"} line first. While it runs, a line of `+Domain.event`
+      on stdin adds a subscription and `-Domain.event` removes one. Two
+      attached observers never see each other's subscriptions. At least one
+      +Domain.event is required (exit 2), and a token that is not
+      Domain.event-shaped is a usage error (exit 2).
+
+  wait [INSTANCE] --event Domain.event [--match SUBSTRING]
+       [--timeout SECONDS] [--target SPEC | --url SUBSTRING] [--endpoint URL]
+      Block until one matching event fires, then print it as JSON. It
+      subscribes before it begins examining events, so an event that fires in
+      between is buffered, not lost. --match is a substring test against the
+      event's whole JSON serialization, not against its parameters alone.
+      --timeout defaults to 30 seconds; --timeout 0 means no deadline. On the
+      deadline: a diagnostic on stderr, exit 1, and nothing on stdout.
+
+
+RAW PROTOCOL
+
+  [INSTANCE] Domain.method '{...json params...}'
+             [--target SPEC | --url SUBSTRING] [--endpoint URL]
+      Send any CDP method the installed browser supports straight to it and
+      print the JSON result. No curated verb needs to exist for the method.
+      Parameters must parse to a JSON object; anything else is a usage error
+      (exit 2). Methods that raise the window are refused; see NEVER TAKE THE
+      SCREEN.
+
+  help [INSTANCE] [Domain.method] [--endpoint URL]
+      With a running instance, print the live CDP protocol schema read from
+      that browser: every domain, one domain's commands and events, or one
+      method's full signature. With zero or several live instances, or an
+      unreachable one, it prints static usage instead. Plain text, not JSON.
+
+
+SELECTING A PAGE
+
+  --target SPEC means one thing everywhere: a 1-based index into the page
+  targets sorted by target ID, or a target ID prefix. A value is read as an
+  index only when every character is a digit. The sort is normative, so
+  --target 1 names the same page in every verb.
+
+  --url SUBSTRING selects by URL substring instead. --target and --url are
+  mutually exclusive; giving both is a usage error (exit 2).
+
+
+THE UID RULE
+
+  A snapshot gives each node a UID of the form <docToken>-<backendNodeId>.
+  One rule covers its whole lifetime:
+
+    A UID is valid until the page navigates. After a navigation, take a new
+    snapshot. Nothing else invalidates it.
+
+  So a fresh snapshot invalidates nothing: taking one between two fills is
+  unnecessary, and the second fill's UID from the first snapshot still
+  resolves. Clicking, filling, scrolling and DOM changes do not invalidate a
+  UID either. A UID minted against a previous document fails with exit 1 and
+  says to take a new snapshot.
+
+  A node the accessibility tree reports with no DOM node behind it gets a UID
+  of the form <docToken>-x<n>. Those are readable in the snapshot but cannot
+  be clicked or filled.
+
+
+NEVER TAKE THE SCREEN
+
+  A person is working on this machine. A browser window that comes to the
+  front takes their keyboard focus and moves their window manager to it, and
+  the next call takes it again. Three refusals keep windows in the background,
+  and each names a remedy that works:
+
+  - Target.activateTarget and Page.bringToFront are refused (exit 2).
+  - Target.createTarget with background:false is refused (exit 2);
+    Target.createTarget always opens in the background.
+  - Input sent to a background tab -- a tab that is not the selected tab of
+    its window -- fails (exit 1). Chrome drops it without an error, which is
+    what makes an agent reach for activateTarget.
+
+  Input and screenshots reach the selected tab of a window even when the
+  window is behind other windows or on another workspace. To work in a second
+  page, open it in its own window and target it:
+
+    bt Target.createTarget '{"url": "https://...", "newWindow": true}'
+    bt Input.dispatchMouseEvent '{...}' --target <targetId>
+
+  Or navigate the tab you already have with Page.navigate. launch opens its
+  window in the background too.
+
+
+PROFILES AND LOGIN
+
+  A profile is a persistent identity: a browser user-data-dir that keeps
+  cookies and logins across restarts. A fingerprint profile is a different
+  thing entirely -- a file of launch flags passed with --fingerprint, which
+  shapes how the browser presents itself and stores no login at all.
+
+  To establish a login, do it by hand once:
+
+    bt launch --profile shopify-admin          # headed, so you can see it
+    bt Page.navigate '{"url": "https://admin.shopify.com"}'
+    # log in yourself in that window: username, password, 2FA, whatever it asks
+    bt stop
+
+  From then on, the same flag reuses the same identity:
+
+    bt launch --profile shopify-admin
+    bt snapshot                                # already signed in
+
+  The profile directory is <profile root>/shopify-admin, and it survives
+  `stop`, reboots, headed and headless switches, viewport changes, and the
+  directory you invoke from. Without --profile a launch gets a fresh throwaway
+  directory and starts logged out. Camoufox keeps a login only with --profile.
+
+  PROFILE EXCLUSIVITY. A profile is held by at most one live instance.
+  Launching into a profile another instance holds fails (exit 1) naming the
+  holder, rather than opening a second browser on the same directory:
+
+    Profile 'shopify-admin' is already held by live instance 'web-01'.
+    Stop it first, or launch a different profile.
+
+  The remedy is `bt stop web-01`, and then the launch succeeds.
+
+  THE PROFILE ROOT is durable storage, resolved in this order, with an empty
+  value falling through to the next:
+
+    1. $BROWSER_TOOLS_PROFILES_DIR
+    2. $XDG_DATA_HOME/browser-tools/profiles
+    3. ~/.local/share/browser-tools/profiles
+
+  It used to be /tmp/browser-tools-profiles, where the operating system
+  deleted every signed-in session at boot, silently. A profile still there is
+  listed with "legacy": true, `profile migrate` moves them all across, and
+  `launch --profile NAME` brings that one forward by itself. The registry
+  stays in /tmp: a cleared registry after a reboot is self-consistent, because
+  no browser survives one.
+
+
+EXTERNAL BROWSERS
+
+  --endpoint URL drives a browser this tool did not launch: one the person
+  already has open, and already logged in. It goes on the browser-driving
+  verbs, per invocation.
+
+    bt snapshot --endpoint http://127.0.0.1:9222
+    bt Page.navigate '{"url": "https://..."}' --endpoint http://127.0.0.1:9222
+
+  Start the browser yourself with --remote-debugging-port=PORT, log in by hand
+  in that browser, then pass that port. There is no instance name, so every
+  invocation carries the flag.
+
+  THE BROWSER IS NOT REGISTERED. Nothing is written to the registry, so
+  `status` does not list it, and `stop` and `cleanup` neither see it nor touch
+  it. That absence is deliberate: those verbs act on registry entries, and an
+  external browser's user-data-dir is the person's real profile directory.
+
+  Three refusals, each exit 2, each naming a remedy that works:
+
+  - LOOPBACK ONLY. 127.0.0.1 and ::1 are accepted and nothing else, not even
+    localhost. A CDP endpoint is unauthenticated full control of a logged-in
+    browser, cookies included, so a remote one is a takeover channel. Reach a
+    browser on another machine by forwarding it, and the endpoint is loopback
+    again:
+
+      ssh -L 9222:127.0.0.1:9222 <host>
+
+  - Browser.close and Browser.crash are refused: they would end every window
+    and tab the person had open. Everything else passes. To close one tab,
+    send Target.closeTarget with that tab's id in the params, and --target
+    SPEC to pick the page the call is sent over when several are open:
+
+      bt Target.closeTarget '{"targetId": "<id>"}' --target 1 --endpoint URL
+  - --endpoint with --profile is refused: a profile is a launch-time identity
+    and --endpoint launches nothing. Use `bt launch --profile NAME` instead.
+
+  launch, status, stop, cleanup, guide and profile reject --endpoint (exit 2).
+  Everything under NEVER TAKE THE SCREEN applies unchanged. A browser that
+  dies mid-session shows up as a connection error on the next invocation,
+  which names the port, any process holding it, and the user-data-dir that
+  process holds.
+
+
+OUTPUT AND EXIT CODES
+
+  Machine-readable output goes to stdout; diagnostics go to stderr.
+
+  Every verb prints one JSON document on stdout, with three exceptions:
+  `guide` and `help` print plain text, and `attach` prints JSON Lines, one
+  event per line.
+
+  Exit 0   success.
+  Exit 1   operational failure: the browser is gone, a CDP call failed, a
+           deadline passed, a profile is held, a UID no longer resolves.
+           Nothing is printed on stdout.
+  Exit 2   usage error: the invocation was malformed or refused before
+           anything happened. Nothing was sent, written or deleted.

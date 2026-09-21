@@ -53,6 +53,7 @@ import sys
 import tempfile
 import time
 from dataclasses import dataclass
+from importlib import resources
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -1493,225 +1494,16 @@ def cleanup(registry_path: str | None = None) -> list[str]:
 
 
 def guide_text() -> str:
-    """The bundled agent manual for the current (Phase 1) verb set."""
-    return _GUIDE
+    """The bundled agent manual, read from ``GUIDE.txt`` beside this module.
+
+    The manual is content, not code: at this length a string literal makes
+    every wording change a diff against the lifecycle layer, and the file is
+    the thing an editor can wrap and an agent can read directly. It ships as
+    package data, so an installed wheel carries it.
+    """
+    return resources.files(__package__).joinpath(GUIDE_FILENAME).read_text(encoding="utf-8")
 
 
-_GUIDE = """\
-browser-tools / bt -- registry-backed browser lifecycle
-
-The tool tracks named browser instances in a registry. Each instance is one
-running browser process, identified by a name derived from the working
-directory. Liveness is engine-aware: Chrome is process identity plus CDP port
-attribution; Camoufox is process identity plus user-data-dir hold. Never PID
-existence alone.
-
-NAMING THE INSTANCE
-
-  Every verb that drives a browser takes the instance ahead of the verb:
-
-    bt web-01 snapshot
-    bt web-01 frames select checkout
-    bt web-01 Page.navigate '{"url": "https://..."}'
-
-  A bare leading token is an instance name when the registry knows it, and
-  the verb otherwise, so `bt frames select checkout` needs no escaping.
-  INSTANCE may be omitted when exactly one instance is registered; with
-  several, every verb names the candidates rather than guessing. Naming the
-  instance twice is a usage error.
-
-LIFECYCLE VERBS
-
-  launch [--engine chrome|camoufox] [--profile NAME] [--channel NAME]
-         [--headless] [--port PORT] [--fingerprint FILE] [--no-window-border]
-         [-- BROWSER_ARGS]
-      Launch a browser and register it. Prints the new instance as JSON.
-      Vendored flags (--headless, --port, --fingerprint, --no-window-border,
-      and everything after --) go straight to the launcher. Policy flags
-      (--profile, --channel, --engine) are resolved to launcher parameters
-      first. --engine camoufox starts an anti-detect Camoufox instance; a
-      profile is held by at most one live instance at a time. launch takes
-      no positional argument: the instance name is assigned by the registry,
-      and any bare token before -- is a usage error (exit 2), because it
-      would otherwise be handed to the browser along with every flag after
-      it.
-
-  status [INSTANCE]
-      Show every registered instance with liveness, engine, profile, and page
-      targets. With INSTANCE, only that one. JSON on stdout.
-
-  stop [INSTANCE] [--target SPEC]
-      Stop a browser (Browser.close, then session-dir cleanup), or close one
-      tab with --target. INSTANCE may be omitted only when exactly one instance
-      is running.
-
-  cleanup
-      Remove stale registry entries and orphaned session directories. Live
-      instances are never touched.
-
-  profile list
-      List every named profile in the profile root with its name, its path,
-      and the live instance holding it (null when free). Needs no running
-      instance; an empty root lists nothing.
-
-  profile delete NAME
-      Remove one profile directory, and its login state with it. This is the
-      only way a profile goes away: cleanup never prunes one on age. A name
-      outside the permitted character set, or one whose resolved path leaves
-      the profile root, is a usage error (exit 2) and deletes nothing. A
-      profile a live instance holds is refused (exit 1) naming the holder;
-      stop it first.
-
-  profile migrate [--dry-run] [--back]
-      Move profiles still sitting in the old /tmp root into the durable one.
-      --dry-run reports what would move and moves nothing. --back reverses
-      the migration, and is the rollback for the root move: once the profiles
-      have moved on disk, reverting the code does not move them back.
-
-      A profile a live instance holds is refused, and a name that exists on
-      both sides is refused rather than merged. Neither stops the others; the
-      result reports each profile's outcome. The transfer is verified against
-      the source before the source is removed.
-
-  THE PROFILE ROOT
-
-      Profiles are durable storage, resolved in this order, with an empty
-      value falling through to the next:
-
-        1. $BROWSER_TOOLS_PROFILES_DIR
-        2. $XDG_DATA_HOME/browser-tools/profiles
-        3. ~/.local/share/browser-tools/profiles
-
-      It used to be /tmp/browser-tools-profiles, where the operating system
-      deleted every signed-in session at boot, silently. A profile still
-      there is listed with "legacy": true, and `launch --profile NAME` brings
-      that one forward before it launches. The registry stays in /tmp: a
-      cleared registry after a reboot is self-consistent, because no browser
-      survives one.
-
-  guide
-      Print this manual.
-
-CURATED VERBS
-
-  snapshot [--target SPEC]
-      The accessibility tree with a UID per node, for click and fill.
-
-  click --uid UID [--target SPEC]
-  fill --uid UID --text T [--target SPEC]
-      Act on a node a snapshot named. A UID is valid for the document that
-      produced it; after the page navigates, take a new snapshot.
-
-  wait-idle [--timeout-ms MS] [--idle-ms MS]
-  wait-stable [--timeout-ms MS] [--stable-ms MS]
-      Wait for network idle, or for the DOM to stop changing.
-
-  detect [--wait SECONDS | --no-wait]
-      Run interstitial detection against the current page.
-
-  console-list [--target SPEC | --url SUBSTRING] [--duration SECONDS]
-  network-list [--target SPEC | --url SUBSTRING] [--duration SECONDS]
-      Collect console messages, or network requests and responses, over a
-      short attach window (default 2 seconds).
-
-  frames list | frames select PATTERN | frames reset
-      Inspect and select page frames. PATTERN is a frame URL substring.
-
-  storage get [--key K]
-      Read the selected frame's storage. --key is a frame URL pattern to
-      select before reading, not a cookie or local-storage key.
-
-  screenshot [--path FILE] [--target SPEC | --url SUBSTRING]
-      Capture a full-page PNG. Without --path, the base64 data URI.
-
-  screencast --dir DIR [--duration SECONDS] [--format FMT] [--max-frames N]
-      Capture a screencast and write its frames plus a frames.json manifest
-      to DIR, in one invocation. Capture ends at whichever comes first: the
-      duration (default 5 seconds) or the frame cap (default 600). There is
-      no separate start and stop: the frame buffer belongs to the process
-      that captured it.
-
-  window-border [on|off]
-      Show, or persistently set, whether marked windows draw the colored
-      border and corner badge over the page (default on). They cover the
-      page's outer edge and top-left corner; 'off' removes them from every
-      running browser within a second and keeps them off for later launches.
-      The tab-title prefix stays either way. --no-window-border on launch
-      turns off all marking for that one launch.
-
-NEVER TAKE THE SCREEN
-
-  A person is working on this machine. A browser window that comes to the
-  front takes their keyboard focus and moves their window manager to it, and
-  the next call takes it again. The tool keeps windows in the background:
-
-  - launch opens its window in the background.
-  - Target.activateTarget and Page.bringToFront are refused (exit 2). No task
-    needs them.
-  - Target.createTarget always opens in the background; background:false is
-    refused (exit 2).
-  - Input sent to a background tab (a tab that is not the selected tab of its
-    window) fails (exit 1): Chrome drops it without an error.
-
-  Input and screenshots reach the selected tab of a window even when the
-  window is behind other windows or on another workspace. To work in a second
-  page, open it in its own window and target it:
-
-    bt Target.createTarget '{"url": "https://...", "newWindow": true}'
-    bt Input.dispatchMouseEvent '{...}' --target <targetId>
-
-  Or navigate the tab you already have with Page.navigate.
-
-RAW PROTOCOL
-
-  [INSTANCE] Domain.method '{...json params...}' [--target SPEC]
-      Send any CDP method the installed browser supports straight to it and
-      print the JSON result. No curated tool needs to exist for the method.
-      INSTANCE may be omitted only when exactly one instance is running.
-      Methods that raise the window are refused; see NEVER TAKE THE SCREEN.
-
-  help [INSTANCE] [Domain.method]
-      With a running instance, print the live CDP protocol schema read from
-      that browser. Without one, print static usage. A bare leading token is
-      resolved as an instance name if the registry knows it, else as a
-      Domain.method.
-
-EXTERNAL BROWSERS
-
-  --endpoint URL
-      Drive a browser this tool did not launch: one the person already has
-      open and logged in. It goes on the browser-driving verbs, per
-      invocation, and nothing is written to the registry.
-
-        bt snapshot --endpoint http://127.0.0.1:9222
-        bt Page.navigate '{"url": "https://..."}' --endpoint http://127.0.0.1:9222
-
-      Start the browser yourself with --remote-debugging-port=PORT, then pass
-      that port. There is no instance name, so every invocation carries the
-      flag, and status does not list the browser -- status reports the
-      registry, and an external browser has no entry in it. That absence is
-      deliberate: stop and cleanup act on registry entries, and an external
-      browser's user-data-dir is the person's real Chrome profile directory.
-
-      launch, status, stop, cleanup, guide and profile reject --endpoint
-      (exit 2), as does --endpoint beside --profile: a profile is a
-      launch-time identity and --endpoint launches nothing.
-
-      Loopback only. 127.0.0.1 and ::1 are accepted and nothing else, not
-      even localhost. A CDP endpoint is unauthenticated full control of a
-      logged-in browser, so a remote one is a takeover channel. Reach a
-      browser on another machine by forwarding it:
-
-        ssh -L 9222:127.0.0.1:9222 <host>
-
-      Browser.close and Browser.crash are refused over --endpoint (exit 2):
-      they would end every window and tab the person had open. Everything
-      else passes, Target.closeTarget for a single tab included. The refusals
-      under NEVER TAKE THE SCREEN apply unchanged.
-
-OUTPUT AND EXIT CODES
-
-  Machine-readable output is JSON on stdout; diagnostics go to stderr.
-  Exit 0 success, 1 operational failure (browser/CDP error, timeout), 2 usage
-  error.
-"""
+#: The manual's filename, beside this module. ``tests/test_guide.py`` reads it
+#: too, and the completeness check runs against whatever it holds.
+GUIDE_FILENAME = "GUIDE.txt"

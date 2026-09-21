@@ -162,11 +162,17 @@ class TestPhase5Packaging:
         assert "mcp" not in _metadata()["project"]["keywords"]
 
     def test_package_data_keeps_js_and_drops_the_front_assets(self) -> None:
-        """The Node session template and the attach script went with the front."""
+        """The Node session template and the attach script went with the front.
+
+        ``GUIDE.txt`` joined them in #100: an installed wheel that does not
+        carry the manual answers ``bt guide`` with nothing, and the manual is
+        the only documentation an agent reads.
+        """
         artifacts = _metadata()["tool"]["hatch"]["build"]["targets"]["wheel"]["artifacts"]
-        assert artifacts == ["src/browser_tools/*.js"], (
-            "detect_interstitial.js is still shipped; *.mjs and *.sh are not"
-        )
+        assert artifacts == [
+            "src/browser_tools/*.js",
+            "src/browser_tools/GUIDE.txt",
+        ], "detect_interstitial.js and GUIDE.txt ship; *.mjs and *.sh do not"
 
     def test_all_three_entry_points_survive(self) -> None:
         assert _metadata()["project"]["scripts"] == {

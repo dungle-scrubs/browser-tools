@@ -123,8 +123,9 @@ def refuse_browser_lifetime_method(method: str) -> None:
     if method in BROWSER_LIFETIME_METHODS:
         raise EndpointUsageError(
             f"{method} is refused over --endpoint: it would close every window "
-            "and tab of a browser this tool does not own. Close one tab with "
-            "--target SPEC, or quit the browser yourself."
+            "and tab of a browser this tool does not own. To close one tab: "
+            "Target.closeTarget '{\"targetId\": \"<id>\"}' --target SPEC. "
+            "To quit the browser, quit it yourself."
         )
 
 

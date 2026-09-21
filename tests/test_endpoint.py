@@ -92,6 +92,15 @@ class TestBrowserLifetimeRefusal:
             endpoint.refuse_browser_lifetime_method(method)
         assert "--target SPEC" in str(exc.value)
 
+    def test_the_refusal_names_the_remedy_the_manual_names(self):
+        """A remedy an agent reads in a diagnostic has to be the working one."""
+        from browser_tools import lifecycle
+
+        with pytest.raises(endpoint.EndpointUsageError) as exc:
+            endpoint.refuse_browser_lifetime_method("Browser.close")
+        assert "Target.closeTarget" in str(exc.value)
+        assert "Target.closeTarget" in lifecycle.guide_text()
+
     @pytest.mark.parametrize(
         "method",
         [

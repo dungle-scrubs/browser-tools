@@ -50,6 +50,12 @@ glossary rather than left to name code that does not exist.
 - **UID** - the handle a snapshot gives a node, used by `click` and `fill`
   to address it. Valid for the lifetime of the document that produced it.
 
+- **The Manual** - `bt guide`, the complete CLI surface and the only
+  documentation an agent reads before driving a browser. It lives in
+  `src/browser_tools/GUIDE.txt` and ships as package data.
+  `tests/test_guide.py` enumerates the verbs from the parser and fails the
+  build when one has no entry.
+
 ## Module names (architecture)
 
 - **CDPRuntime** - the deep half of the CDP layer: owns the background
