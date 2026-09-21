@@ -615,23 +615,43 @@ bytes, at the cost of a hang on every path that forgets to release. Nothing in
    Default-on becomes a separate, later change once separate-invocation UID
    routing, renderer swaps, slow children, detach-during-snapshot and wide
    pages all pass.
-2. **What does `frames list` print for an OOPIF?** The tree position is
-   settled. Whether the listing marks the process boundary is not.
-   Recommendation: mark it, because knowing a frame is out-of-process explains
-   why a UID from one snapshot addresses a different document. Version 1 gave
-   `postMessage` as the reason, which is wrong: `postMessage` works across
-   renderer processes.
-3. **Does `screencast` or `screenshot` change?** Neither is frame-scoped
-   today; both capture the page. Recommendation: no change, and the manual
-   says so.
-4. **What is the real cost on a wide page?** Unmeasured, and Decision 1's
-   bounds cannot be given values until it is. This is the first thing the
-   implementation phase does, before any of the design is called cheap.
-5. **What is the OOPIF readiness barrier?** `wait-idle` polls resource-entry
-   counts in the page session, so it says nothing about whether a child
-   session has attached and answered. A run that navigates and then reads a
-   child frame needs a barrier that waits for discovery, and this RFC does not
-   specify one.
+2. ~~**What does `frames list` print for an OOPIF?**~~ **Settled in Phase 1:
+   marked.** The row carries `[out-of-process]`, for the reason the
+   recommendation gave: knowing a frame is in another process explains why a
+   UID from one snapshot addresses a different document. A frame past a bound
+   is a second kind of row, `[unreachable]`, listed with its URL rather than
+   dropped. Version 1 gave `postMessage` as the reason, which is wrong:
+   `postMessage` works across renderer processes.
+3. ~~**Does `screencast` or `screenshot` change?**~~ **Settled in Phase 1: no
+   change**, and the manual says so under `--frames all`. Neither verb is
+   frame-scoped; both capture the page.
+4. ~~**What is the real cost on a wide page?**~~ **Answered in Phase 1.** On a
+   page holding twenty sibling Out-of-Process Frames, `frames list` is 109.2
+   ms by default and 119.7 ms with `--frames all`; with no cross-origin iframe
+   at all, 108.1 and 116.2. Mean of 9 runs each,
+   `docs/rfc/04_probes/wide_page_cost.sh`. Twenty Frame Sessions are tens of
+   milliseconds, so Decision 1's bounds are set above the measured shape:
+   `MAX_SESSIONS` 32, `MAX_DEPTH` 10.
+
+   Measuring it found a defect that was not RFC-04's. Ten identical
+   invocations reported 0, 8, 12 and 20 frames, because
+   `CDPRuntime.available` - what the caller polls to decide the invocation may
+   start - returned true before setup had finished. Every handler-routed verb
+   could read a half-built frame map. See the measurements file.
+5. **What is the OOPIF readiness barrier?** Narrowed by Phase 1, not settled.
+
+   Within one invocation there is now a barrier: discovery runs during
+   `_connect_cdp` and `available` does not go true until it has finished, so
+   every verb and every step of a run starts against a settled tree. That
+   covers the frames that existed when the invocation connected.
+
+   It does not cover a frame that appears mid-run. Those ride on
+   `Target.attachedToTarget` with nothing waiting for them. A `bt run` that
+   appended a cross-origin iframe and then ran `wait-idle` did find it, but
+   `wait-idle` polls resource-entry counts in the page session and says
+   nothing about whether a child session has attached and answered, so that
+   is an observation and not a guarantee. A step that waits for discovery
+   remains unspecified.
 
 ## Changes in this revision
 
@@ -648,6 +668,12 @@ until it does.
 **Step Run**, **Out-of-Process Frame**, **Frame Session** and **Spliced Frame
 Tree** land in `CONTEXT.md` with the first implementation phase, not with the
 acceptance, because the glossary should not name nouns no code uses yet.
+
+**Phase 1 shipped in #139**: attach, splice, list, select, and the
+`--frames all` flag, off by default. Open Questions 2, 3 and 4 are settled
+above, 5 is narrowed, and the three nouns are in `CONTEXT.md`. Routing
+(Decisions 4 and 5) and snapshot merging (`snapshot` across the boundary) are
+not built; a cross-origin iframe's `Iframe` node still has nothing under it.
 
 **Version 2** (2026-09-21) is the revision after a cross-family adversarial
 review by `gpt-6-astra@codex` against the version 1 snapshot at `2239955`.

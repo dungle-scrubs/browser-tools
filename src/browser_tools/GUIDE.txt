@@ -196,6 +196,9 @@ CURATED VERBS
       later work. What --frames all gives you today is the frame, by name,
       selectable, so `storage get`, `click` and `fill` can address it.
 
+      It does not change `screenshot` or `screencast` either. Neither is
+      frame-scoped; both capture the page, with or without the flag.
+
   storage get [--key K]
       The selected frame's storage. --key is a frame URL pattern to select
       before reading. It is NOT a cookie name or a local-storage key. Without
