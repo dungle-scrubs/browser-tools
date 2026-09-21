@@ -382,6 +382,42 @@ class TestTheManualStatesWhatDoesNotCarry:
 # --------------------------------------------------------------------------- #
 
 
+class TestTheSecondBinaryIsDocumented:
+    """`browser-tools-profiler` ships beside `bt` and the manual omitted it.
+
+    The manual opens by claiming to be everything a reader needs. It
+    described one of the two commands the install puts down, so CPU
+    profiling looked impossible when it is one command away.
+    """
+
+    def test_the_manual_names_it_in_the_opening(self, flat):
+        opening = flat[: flat.index("WHAT THIS IS FOR")]
+        assert "browser-tools-profiler" in opening
+
+    def test_there_is_a_section_for_it(self, flat):
+        assert "CPU PROFILING" in flat
+
+    @pytest.mark.parametrize("piece", ["timed", "watch", "--threshold", "--duration"])
+    def test_the_section_covers_its_surface(self, flat, piece):
+        section = flat[flat.index("CPU PROFILING"):]
+        assert piece in section
+
+    def test_it_says_the_port_is_not_an_instance_name(self, flat):
+        section = flat[flat.index("CPU PROFILING"):]
+        assert "takes a debug port, not an instance name" in section
+
+    def test_every_installed_console_script_is_documented(self):
+        """Read the entry points from pyproject, never from a list here."""
+        import tomllib
+        from pathlib import Path
+
+        pyproject = Path(__file__).resolve().parent.parent / "pyproject.toml"
+        scripts = tomllib.loads(pyproject.read_text())["project"]["scripts"]
+        manual = flatten(lifecycle.guide_text())
+        missing = [name for name in scripts if name not in manual]
+        assert missing == [], f"console scripts with no manual entry: {missing}"
+
+
 class TestGuidePrintsPlainText:
     def test_it_prints_plain_text_and_nothing_on_stderr(self):
         result = subprocess.run(
