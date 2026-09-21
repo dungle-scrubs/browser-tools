@@ -24,6 +24,8 @@ Browser automation, debugging, and anti-detect browsing CLI. Provides:
 - **Anything else CDP can do** - File upload, viewport emulation, cookies,
   PDF export and page management have no curated verb and need none; `bt
   guide` has a worked example of each
+- **CPU profiling** - `browser-tools-profiler`, a second command installed
+  alongside `bt`, with timed capture and threshold-triggered capture
 
 ## Quick Start
 

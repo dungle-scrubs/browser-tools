@@ -1,7 +1,10 @@
 browser-tools / bt -- the agent manual
 
-This is the whole CLI. Reading it is enough to drive a browser with this tool;
-nothing else needs to be read first. `bt guide` prints it.
+This is the whole of `bt`. Reading it is enough to drive a browser with this
+tool; nothing else needs to be read first. `bt guide` prints it.
+
+The install also puts down `browser-tools-profiler`, a separate command for
+CPU profiling. It is the last section here.
 
 The tool tracks named browser instances in a registry. Each instance is one
 running browser process, named after the directory it was launched from.
@@ -291,7 +294,8 @@ WHAT DOES NOT CARRY BETWEEN INVOCATIONS
   (exit 1). Any enable-then-collect pair split across two commands fails the
   same way. This is why console-list and network-list take a --duration and
   do their own enable inside one invocation, rather than offering a start
-  and a stop.
+  and a stop, and why CPU profiling is its own command rather than a verb
+  here. See CPU PROFILING at the end.
 
   A JavaScript dialog, and there is no way around this one. A dialog opened
   by one invocation is invisible to the next: Page.handleJavaScriptDialog
@@ -457,6 +461,32 @@ EXTERNAL BROWSERS
   dies mid-session shows up as a connection error on the next invocation,
   which names the port, any process holding it, and the user-data-dir that
   process holds.
+
+
+CPU PROFILING
+
+  `browser-tools-profiler` is installed next to `bt` and profiles the page's
+  JavaScript. It is a separate command because a profile is an
+  enable-start-stop sequence, and those cannot be split across `bt`
+  invocations; see WHAT DOES NOT CARRY BETWEEN INVOCATIONS.
+
+  It takes a debug port, not an instance name, so read the port out of
+  `bt status` or the JSON `bt launch` printed. The default is 9222, which is
+  whatever happens to be on that port rather than an instance you named, so
+  pass --port.
+
+    browser-tools-profiler --port PORT [--format text|json] timed
+        [--duration SECONDS]
+      Profile for a fixed window, 5 seconds by default, and print the
+      functions by self time.
+
+    browser-tools-profiler --port PORT [--format text|json] watch
+        [--threshold PERCENT] [--timeout SECONDS] [--window SECONDS]
+      Wait until CPU crosses the threshold (80 percent by default), then
+      capture for --window seconds. Gives up after --timeout.
+
+  --format json prints a JSON array of {name, url, line, selfTime,
+  hitCount}. --format text is the default and is for a person.
 
 
 OUTPUT AND EXIT CODES

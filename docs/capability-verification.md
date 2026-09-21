@@ -70,8 +70,13 @@ invocation, so the second command cannot see what the first did.
   which is why the upload recipe uses one.
 - **A domain enable.** `Profiler.enable` then `Profiler.start` as two commands
   fails with `Profiler is not enabled` (exit 1). The same work inside one
-  attached session returns a profile, so this is a property of the CLI's
-  one-session-per-invocation shape, not of the browser.
+  attached session returns a profile, so this is a property of `bt`'s
+  one-session-per-invocation shape, not of the browser. It does not mean CPU
+  profiling is unavailable: `browser-tools-profiler` is a second command the
+  install puts down beside `bt`, and it does the whole enable-start-stop
+  inside one process. Verified against a live browser:
+  `browser-tools-profiler --port 9223 --format json timed --duration 2`
+  returned a populated profile array.
 - **A JavaScript dialog.** `Page.handleJavaScriptDialog` from a second
   invocation fails with `No dialog is showing` (exit 1) even while the command
   that opened the dialog is still running. The unhandled dialog then blocks the
@@ -91,12 +96,25 @@ invocation, so the second command cannot see what the first did.
 
 ## A note on what this cost
 
-Two claims were drafted into the manual and removed after testing them. The
-first was a dialog-handling recipe; the second was the
-`addScriptToEvaluateOnNewDocument` remedy above. Both read as obviously correct
-and both fail. That is the reason this file exists: the manual is the only
-thing an agent reads before driving a browser, so a recipe in it that does not
-run is worse than no recipe at all.
+Three claims were drafted and corrected after testing them.
+
+Two were recipes that do not run: a dialog-handling recipe, and the
+`addScriptToEvaluateOnNewDocument` remedy above. Both read as obviously
+correct and both fail.
+
+The third was the opposite error, and it shipped before it was caught. This
+document and the README first said CPU profiling was unreachable, on the
+evidence that `profiler.py` has no CLI verb and that `Profiler.*` cannot be
+driven across two `bt` invocations. Both facts are true and the conclusion
+drawn from them was wrong: `pyproject.toml` declares a second console script,
+`browser-tools-profiler`, which works. Checking the verb list and the
+passthrough was not the same as checking the entry points. `tests/test_guide.py`
+now reads `[project.scripts]` and fails when a console script has no manual
+entry, so the same gap cannot reopen.
+
+That is the reason this file exists. The manual is the only thing an agent
+reads before driving a browser. A recipe in it that does not run is worse than
+no recipe, and a capability it denies is one nobody will try.
 
 ## Harnesses
 
