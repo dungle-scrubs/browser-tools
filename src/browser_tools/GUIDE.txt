@@ -6,6 +6,10 @@ tool; nothing else needs to be read first. `bt guide` prints it.
 The install also puts down `browser-tools-profiler`, a separate command for
 CPU profiling. It is the last section here.
 
+`bt --version` prints the installed version. Check it first when behaviour
+does not match this manual: an older copy earlier on PATH answers the same
+verbs and answers them differently.
+
 The tool tracks named browser instances in a registry. Each instance is one
 running browser process, named after the directory it was launched from.
 Liveness is engine-aware: Chrome is process identity plus CDP port

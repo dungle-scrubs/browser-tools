@@ -87,11 +87,35 @@ def _add_endpoint(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     return parser
 
 
+def _installed_version() -> str:
+    """The running build's version, read from the installed distribution.
+
+    Never a literal here. `__version__` was hardcoded once and read "0.1.0"
+    through two releases, which is the failure this flag exists to expose.
+    """
+    from importlib import metadata
+
+    try:
+        return metadata.version("browser-tools")
+    except metadata.PackageNotFoundError:  # a source checkout, never installed
+        return "0.0.0+unknown"
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the top-level parser and its lifecycle subcommands."""
     parser = argparse.ArgumentParser(
         prog=PROG,
         description="Registry-backed browser lifecycle (launch, status, stop, cleanup, guide).",
+    )
+    # Which build is on PATH is the first thing to establish when behaviour
+    # does not match the manual. A stale copy from an older install answers
+    # the same verbs and answers them differently, and without this the only
+    # way to tell was to read a UID and recognise the format.
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {_installed_version()}",
+        help="Print the installed version and exit",
     )
     sub = parser.add_subparsers(dest="command", metavar="VERB")
 

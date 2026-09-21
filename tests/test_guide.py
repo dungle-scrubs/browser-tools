@@ -418,6 +418,37 @@ class TestTheSecondBinaryIsDocumented:
         assert missing == [], f"console scripts with no manual entry: {missing}"
 
 
+class TestTheVersionFlagIsDocumented:
+    """`--version` exists so a stale build on PATH is one command to find.
+
+    A copy from an older install answers every verb and answers some of
+    them differently. Before this flag the only way to tell was to run a
+    verb and recognise the shape of its output.
+    """
+
+    def test_the_manual_mentions_it(self, flat):
+        assert "`bt --version` prints the installed version" in flat
+
+    def test_the_manual_says_why_to_check_it(self, flat):
+        assert "older copy earlier on PATH" in flat
+
+    def test_the_flag_prints_the_installed_version(self):
+        from importlib import metadata
+
+        result = subprocess.run(
+            [sys.executable, "-m", "browser_tools.cli", "--version"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == 0
+        assert metadata.version("browser-tools") in result.stdout
+
+    def test_it_is_not_a_verb_and_needs_no_verb_entry(self, phrases):
+        """A flag, so the verb enumeration must not demand a section for it."""
+        assert "--version" not in phrases
+
+
 class TestGuidePrintsPlainText:
     def test_it_prints_plain_text_and_nothing_on_stderr(self):
         result = subprocess.run(
