@@ -1,7 +1,17 @@
-"""E2E tests — launches real Camoufox browser. Requires `camoufox fetch`.
+"""CamoufoxSession's tool surface, against a mocked browser.
 
-Run with: pytest tests/test_e2e_camoufox.py -v
-Skip with: pytest tests/ --ignore=tests/test_e2e_camoufox.py
+The name says e2e and this launches nothing. ``tests/parity/conftest.py``
+patches ``camoufox_session.Camoufox``, so every test here runs against a
+mock and the module completes in about a second. It was excluded from CI on
+the belief that it needed a real browser; it does not, and the exclusion is
+gone.
+
+What it does cover is ``CamoufoxSession``'s ``call_tool`` contract. That
+class is a test oracle for the ARIA parity baseline, not a product surface:
+``launch --engine camoufox`` goes through ``lifecycle`` into
+``camoufox_runner`` and never touches it. A real launch is covered by
+``test_camoufox_live_launch.py``, which skips when the browser is not
+fetched.
 """
 
 from __future__ import annotations

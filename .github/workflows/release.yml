@@ -26,7 +26,7 @@ jobs:
       - run: uv sync
 
       - name: Run tests
-        run: uv run pytest tests/ -q --tb=short --ignore=tests/parity/test_e2e_camoufox.py
+        run: uv run pytest tests/ -q --tb=short
 
       - name: Build package
         run: uv build
