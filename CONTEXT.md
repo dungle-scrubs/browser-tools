@@ -95,12 +95,18 @@ glossary rather than left to name code that does not exist.
 
 - **Frame Session** - the CDP session attached to one Out-of-Process
   Frame's target, below the page session and owned by `frame_sessions`.
-  It enables `Page` and `Runtime` on that target, reads its frame tree, and
-  is the session every command against a frame in that process goes to. A
-  frame the map holds names the Frame Session answering for it, or none,
-  which means the page session. Bounded at 32 sessions and 10 levels of
-  nesting; a frame past either bound is listed `[unreachable]`, never
-  dropped in silence.
+  It enables `Page` and `Runtime` on that target and reads its frame tree,
+  which is what puts the frame in the listing. A frame the map holds names
+  the Frame Session answering for it, or none, which means the page
+  session. Bounded at 32 sessions and 10 levels of nesting; a frame past
+  either bound is listed `[unreachable]`, never dropped in silence.
+
+  It is not yet the session commands go to. The execution-context map is
+  keyed by context id alone, and context ids are per-session, so a child's
+  contexts cannot be recorded without colliding with the page's. Until
+  that is fixed, selecting an Out-of-Process Frame gets you the selection
+  and nothing that reads through it: `storage get` returns cookies only
+  and `snapshot` shows the `Iframe` node empty.
 
 - **Spliced Frame Tree** - the single tree `frames list` prints, built by
   attaching each Frame Session's own frame tree under the parent frame its
