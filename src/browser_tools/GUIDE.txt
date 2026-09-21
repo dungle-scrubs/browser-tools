@@ -10,6 +10,34 @@ attribution, Camoufox is process identity plus a user-data-dir hold. Never PID
 existence alone.
 
 
+WHAT THIS IS FOR
+
+  Driving a real browser: one with logins, extensions, and whatever state a
+  site keeps. Reach for it when the browser is the point.
+
+  It fits:
+
+  - Work behind a login. `launch --profile NAME` keeps the session, so you
+    log in by hand once and every later run is already signed in.
+  - Pages that resist automation. Camoufox is an anti-detect engine, and
+    `detect` says whether a challenge page is what you are looking at.
+  - Reading what a page renders rather than what its HTML says. `snapshot`
+    is the accessibility tree, so it sees what a screen reader sees, after
+    the JavaScript has run.
+  - Watching a page work: console messages, network traffic, CDP events,
+    screenshots, screencasts.
+  - A browser the person already has open and logged in, through --endpoint.
+
+  It is not an HTTP client. Fetching a URL and parsing the body is faster
+  with curl. Use this when the page has to actually run.
+
+  Two shapes of work, and they cost very differently. Each invocation opens
+  its own connection and session, which costs about 70 to 85 ms before any
+  browser work. One verb at a time is fine. A long chain of them pays that
+  every step, and some things cannot be split across two invocations at all:
+  see WHAT DOES NOT CARRY BETWEEN INVOCATIONS.
+
+
 NAMING THE INSTANCE
 
   Every verb that drives a browser takes the instance ahead of the verb:
@@ -181,6 +209,107 @@ RAW PROTOCOL
       that browser: every domain, one domain's commands and events, or one
       method's full signature. With zero or several live instances, or an
       unreachable one, it prints static usage instead. Plain text, not JSON.
+
+
+NO CURATED VERB? SEND THE PROTOCOL
+
+  The curated verbs cover the common path. Everything else the browser can
+  do is one CDP call away and needs no new verb. The passthrough prints the
+  method's result exactly as the browser returned it, with nothing wrapped
+  around it.
+
+  Each recipe here was run against Chrome 153 before it was written down.
+
+  UPLOAD A FILE. Snapshot the page, find the file input, and pass the number
+  after the dash in its UID as backendNodeId:
+
+    bt snapshot
+      [uid=2F0B815AF686-32] button "Choose File" = 'No file chosen'
+    bt DOM.setFileInputFiles '{"files": ["/abs/path"], "backendNodeId": 32}'
+
+  A DOM nodeId from DOM.querySelector will NOT work across invocations; see
+  the next section. The backendNodeId inside a UID will.
+
+  TYPE KEYSTROKES. `fill --uid` is the normal path. Use these when the field
+  needs real key events, such as a key handler or a contenteditable:
+
+    bt Input.insertText '{"text": "hello"}'
+    bt Input.dispatchKeyEvent '{"type": "keyDown", "key": "Enter"}'
+
+  SET THE VIEWPORT, or emulate a phone:
+
+    bt Emulation.setDeviceMetricsOverride '{"width": 390, "height": 844,
+       "deviceScaleFactor": 3, "mobile": true}'
+
+  The override outlives the invocation that set it. A later
+  Emulation.clearDeviceMetricsOverride does NOT undo it, because only the
+  session that set an override can clear it. Set the size you want back.
+
+  READ AND SET COOKIES:
+
+    bt Network.getCookies '{"urls": ["https://example.com/"]}'
+    bt Network.setCookie '{"name": "k", "value": "v",
+       "domain": "example.com", "path": "/"}'
+
+  SAVE THE PAGE AS PDF. The result carries base64 in `data`:
+
+    bt Page.printToPDF '{}'
+
+  WORK WITH SEVERAL PAGES:
+
+    bt Target.getTargets '{}' --target 1
+    bt Target.createTarget '{"url": "https://...", "newWindow": true}'
+    bt Target.closeTarget '{"targetId": "<id>"}' --target 1
+
+  Target.* is browser-level, but it is sent over a page session, so once a
+  second page exists these calls need --target to say which page to send
+  over. `status` lists the pages and their ids.
+
+  DRAG AND DROP is Input.dispatchDragEvent, one call per dragEnter, dragOver
+  and drop. `bt help Input.dispatchDragEvent` prints its signature.
+
+  For anything not listed, `bt help Domain.method` reads the signature live
+  from the browser you are driving, so the parameters are the ones that
+  browser accepts rather than the ones some other version documented.
+
+
+WHAT DOES NOT CARRY BETWEEN INVOCATIONS
+
+  Each invocation opens its own session, works, and detaches. Page state
+  stays behind: the page you navigated is still loaded, cookies are still
+  set, a viewport override is still in force. Session state does not, and
+  four things an agent reaches for are session state. Each fails loudly
+  rather than quietly doing nothing.
+
+  A DOM nodeId. DOM.getDocument and DOM.querySelector mint node ids owned by
+  the session that asked. One reused in the next invocation fails with
+  "Could not find node with given id" (exit 1). Use a snapshot UID's
+  backendNodeId, which is stable for the life of the document.
+
+  A domain you enabled. `Profiler.enable` in one invocation is gone by the
+  next, so a following `Profiler.start` fails with "Profiler is not enabled"
+  (exit 1). Any enable-then-collect pair split across two commands fails the
+  same way. This is why console-list and network-list take a --duration and
+  do their own enable inside one invocation, rather than offering a start
+  and a stop.
+
+  A JavaScript dialog, and there is no way around this one. A dialog opened
+  by one invocation is invisible to the next: Page.handleJavaScriptDialog
+  fails with "No dialog is showing" (exit 1), even while the command that
+  opened it is still running. The unhandled dialog then blocks the page and
+  later commands against it hang. Navigating away can clear it; when that
+  hangs too, `stop` the instance and `launch` again.
+
+  Page.addScriptToEvaluateOnNewDocument does not rescue this. Registering
+  window.alert=()=>{} works when the same invocation also navigates, and
+  does nothing when a later invocation navigates, because the registration
+  belongs to the session that made it. Measured both ways. So a page that
+  raises dialogs cannot be driven through them one command at a time.
+
+  A selected frame. `frames select` binds to the process that ran it, so a
+  later `storage get` does not see it. That is what `storage get --key` is
+  for, and --key is the only way to read a frame's storage from a separate
+  invocation.
 
 
 SELECTING A PAGE
