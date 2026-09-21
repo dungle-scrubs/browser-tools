@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from typing import Any
 
 from . import curated, events, lifecycle, list_verbs, passthrough, user_settings
 from .lifecycle import LifecycleError
@@ -126,11 +127,19 @@ def build_parser() -> argparse.ArgumentParser:
         default=lifecycle.DEFAULT_ENGINE,
         help="Browser engine (default: chrome)",
     )
-    launch.add_argument("--profile", metavar="NAME", help="Named profile to record for this instance")
-    launch.add_argument("--channel", metavar="NAME", help="Chrome release channel (stable/beta/dev/canary)")
+    launch.add_argument(
+        "--profile", metavar="NAME", help="Named profile to record for this instance"
+    )
+    launch.add_argument(
+        "--channel", metavar="NAME", help="Chrome release channel (stable/beta/dev/canary)"
+    )
     launch.add_argument("--headless", action="store_true", help="Run without a visible window")
-    launch.add_argument("--port", type=int, metavar="PORT", help="CDP port (default: auto-allocate)")
-    launch.add_argument("--fingerprint", metavar="FILE", help="Fingerprint profile file (launch flags only)")
+    launch.add_argument(
+        "--port", type=int, metavar="PORT", help="CDP port (default: auto-allocate)"
+    )
+    launch.add_argument(
+        "--fingerprint", metavar="FILE", help="Fingerprint profile file (launch flags only)"
+    )
     launch.add_argument(
         "--no-window-border",
         action="store_true",
@@ -150,7 +159,9 @@ def build_parser() -> argparse.ArgumentParser:
     status.add_argument("instance", nargs="?", metavar="INSTANCE", help="Limit to one instance")
 
     stop = sub.add_parser("stop", help="Stop a browser or close one tab")
-    stop.add_argument("instance", nargs="?", metavar="INSTANCE", help="Instance to stop (omit if only one)")
+    stop.add_argument(
+        "instance", nargs="?", metavar="INSTANCE", help="Instance to stop (omit if only one)"
+    )
     stop.add_argument("--target", metavar="SPEC", help="Close a single tab instead of the browser")
 
     sub.add_parser("cleanup", help="Remove stale registry entries and session dirs")
@@ -164,11 +175,13 @@ def build_parser() -> argparse.ArgumentParser:
         "migrate", help="Move profiles left in the old /tmp root into durable storage"
     )
     profile_migrate.add_argument(
-        "--back", action="store_true",
+        "--back",
+        action="store_true",
         help="Reverse the migration (the rollback for the root move)",
     )
     profile_migrate.add_argument(
-        "--dry-run", action="store_true",
+        "--dry-run",
+        action="store_true",
         help="Report what would move, and move nothing",
     )
     sub.add_parser("guide", help="Print the bundled agent manual")
@@ -206,13 +219,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional instance name followed by one or more +Domain.event subscriptions",
     )
     attach.add_argument("--target", metavar="SPEC", help="Select the page target (index or id)")
-    attach.add_argument("--url", metavar="SUBSTRING", help="Select the page target by URL substring")
+    attach.add_argument(
+        "--url", metavar="SUBSTRING", help="Select the page target by URL substring"
+    )
     attach.set_defaults(instance=None)
     _add_endpoint(attach)
 
     wait = sub.add_parser("wait", help="Block until one matching CDP event fires")
     wait.add_argument("instance", nargs="?", metavar="INSTANCE", help="Instance (omit if only one)")
-    wait.add_argument("--event", required=True, metavar="Domain.event", help="CDP event to wait for")
+    wait.add_argument(
+        "--event", required=True, metavar="Domain.event", help="CDP event to wait for"
+    )
     wait.add_argument("--match", metavar="SUBSTRING", help="Substring the event JSON must contain")
     wait.add_argument(
         "--timeout",
@@ -228,9 +245,15 @@ def build_parser() -> argparse.ArgumentParser:
     console_list = sub.add_parser(
         "console-list", help="Collect console messages over a short attach window"
     )
-    console_list.add_argument("instance", nargs="?", metavar="INSTANCE", help="Instance (omit if only one)")
-    console_list.add_argument("--target", metavar="SPEC", help="Select the page target (index or id)")
-    console_list.add_argument("--url", metavar="SUBSTRING", help="Select the page target by URL substring")
+    console_list.add_argument(
+        "instance", nargs="?", metavar="INSTANCE", help="Instance (omit if only one)"
+    )
+    console_list.add_argument(
+        "--target", metavar="SPEC", help="Select the page target (index or id)"
+    )
+    console_list.add_argument(
+        "--url", metavar="SUBSTRING", help="Select the page target by URL substring"
+    )
     console_list.add_argument(
         "--duration",
         type=float,
@@ -243,9 +266,15 @@ def build_parser() -> argparse.ArgumentParser:
     network_list = sub.add_parser(
         "network-list", help="Collect network requests/responses over a short attach window"
     )
-    network_list.add_argument("instance", nargs="?", metavar="INSTANCE", help="Instance (omit if only one)")
-    network_list.add_argument("--target", metavar="SPEC", help="Select the page target (index or id)")
-    network_list.add_argument("--url", metavar="SUBSTRING", help="Select the page target by URL substring")
+    network_list.add_argument(
+        "instance", nargs="?", metavar="INSTANCE", help="Instance (omit if only one)"
+    )
+    network_list.add_argument(
+        "--target", metavar="SPEC", help="Select the page target (index or id)"
+    )
+    network_list.add_argument(
+        "--url", metavar="SUBSTRING", help="Select the page target by URL substring"
+    )
     network_list.add_argument(
         "--duration",
         type=float,
@@ -273,49 +302,77 @@ def _add_curated_verbs(
     accepts the bare verb (the skill drift test parses ``VERB`` alone).
     """
     snapshot = sub.add_parser("snapshot", help="Native UID accessibility tree")
-    snapshot.add_argument("instance", nargs="?", metavar="INSTANCE", help="Instance (omit if only one)")
-    snapshot.add_argument("--target", metavar="SPEC", help="Select the page target (1-based index or id)")
+    snapshot.add_argument(
+        "instance", nargs="?", metavar="INSTANCE", help="Instance (omit if only one)"
+    )
+    snapshot.add_argument(
+        "--target", metavar="SPEC", help="Select the page target (1-based index or id)"
+    )
     _add_endpoint(snapshot)
 
     click = sub.add_parser("click", help="Native UID click")
-    click.add_argument("instance", nargs="?", metavar="INSTANCE", help="Instance (omit if only one)")
+    click.add_argument(
+        "instance", nargs="?", metavar="INSTANCE", help="Instance (omit if only one)"
+    )
     click.add_argument("--uid", metavar="N", help="UID from a prior snapshot")
-    click.add_argument("--target", metavar="SPEC", help="Select the page target (1-based index or id)")
+    click.add_argument(
+        "--target", metavar="SPEC", help="Select the page target (1-based index or id)"
+    )
     _add_endpoint(click)
 
     fill = sub.add_parser("fill", help="Native UID fill")
     fill.add_argument("instance", nargs="?", metavar="INSTANCE", help="Instance (omit if only one)")
     fill.add_argument("--uid", metavar="N", help="UID from a prior snapshot")
     fill.add_argument("--text", metavar="T", help="Text to fill")
-    fill.add_argument("--target", metavar="SPEC", help="Select the page target (1-based index or id)")
+    fill.add_argument(
+        "--target", metavar="SPEC", help="Select the page target (1-based index or id)"
+    )
     _add_endpoint(fill)
 
     wait_idle = sub.add_parser("wait-idle", help="Wait for network idle")
-    wait_idle.add_argument("instance", nargs="?", metavar="INSTANCE", help="Instance (omit if only one)")
     wait_idle.add_argument(
-        "--timeout-ms", type=int, default=curated.DEFAULT_WAIT_TIMEOUT_MS, metavar="MS",
+        "instance", nargs="?", metavar="INSTANCE", help="Instance (omit if only one)"
+    )
+    wait_idle.add_argument(
+        "--timeout-ms",
+        type=int,
+        default=curated.DEFAULT_WAIT_TIMEOUT_MS,
+        metavar="MS",
         help="Overall deadline in ms (default: 5000)",
     )
     wait_idle.add_argument(
-        "--idle-ms", type=int, default=curated.DEFAULT_IDLE_MS, metavar="MS",
+        "--idle-ms",
+        type=int,
+        default=curated.DEFAULT_IDLE_MS,
+        metavar="MS",
         help="Quiet window in ms (default: 500)",
     )
     _add_endpoint(wait_idle)
 
     wait_stable = sub.add_parser("wait-stable", help="Wait for DOM quiescence")
-    wait_stable.add_argument("instance", nargs="?", metavar="INSTANCE", help="Instance (omit if only one)")
     wait_stable.add_argument(
-        "--timeout-ms", type=int, default=curated.DEFAULT_WAIT_TIMEOUT_MS, metavar="MS",
+        "instance", nargs="?", metavar="INSTANCE", help="Instance (omit if only one)"
+    )
+    wait_stable.add_argument(
+        "--timeout-ms",
+        type=int,
+        default=curated.DEFAULT_WAIT_TIMEOUT_MS,
+        metavar="MS",
         help="Overall deadline in ms (default: 5000)",
     )
     wait_stable.add_argument(
-        "--stable-ms", type=int, default=curated.DEFAULT_STABLE_MS, metavar="MS",
+        "--stable-ms",
+        type=int,
+        default=curated.DEFAULT_STABLE_MS,
+        metavar="MS",
         help="Quiescence window in ms (default: 300)",
     )
     _add_endpoint(wait_stable)
 
     detect = sub.add_parser("detect", help="Run interstitial detection against the current page")
-    detect.add_argument("instance", nargs="?", metavar="INSTANCE", help="Instance (omit if only one)")
+    detect.add_argument(
+        "instance", nargs="?", metavar="INSTANCE", help="Instance (omit if only one)"
+    )
     _add_endpoint(detect)
     detect_wait = detect.add_mutually_exclusive_group()
     detect_wait.add_argument(
@@ -355,24 +412,40 @@ def _add_curated_verbs(
     _add_endpoint(sg)
 
     screenshot = sub.add_parser("screenshot", help="Capture a page screenshot")
-    screenshot.add_argument("instance", nargs="?", metavar="INSTANCE", help="Instance (omit if only one)")
-    screenshot.add_argument("--path", metavar="FILE", help="Write the PNG to a file instead of stdout")
+    screenshot.add_argument(
+        "instance", nargs="?", metavar="INSTANCE", help="Instance (omit if only one)"
+    )
+    screenshot.add_argument(
+        "--path", metavar="FILE", help="Write the PNG to a file instead of stdout"
+    )
     screenshot.add_argument("--target", metavar="SPEC", help="Select the page target (index or id)")
-    screenshot.add_argument("--url", metavar="SUBSTRING", help="Select the page target by URL substring")
+    screenshot.add_argument(
+        "--url", metavar="SUBSTRING", help="Select the page target by URL substring"
+    )
     _add_endpoint(screenshot)
 
     screencast = sub.add_parser(
         "screencast", help="Capture a bounded screencast and write its frames"
     )
-    screencast.add_argument("--dir", dest="dir", metavar="DIR", help="Directory to write frames into")
     screencast.add_argument(
-        "--duration", type=float, default=curated.DEFAULT_SCREENCAST_DURATION_SECONDS,
-        metavar="SECONDS", help="How long to capture for (default: 5)",
+        "--dir", dest="dir", metavar="DIR", help="Directory to write frames into"
     )
-    screencast.add_argument("--format", dest="format", default="jpeg", metavar="FMT", help="jpeg or png (default: jpeg)")
     screencast.add_argument(
-        "--max-frames", type=int, default=curated.DEFAULT_SCREENCAST_MAX_FRAMES,
-        metavar="N", help="Frame cap; reaching it ends the capture (default: 600)",
+        "--duration",
+        type=float,
+        default=curated.DEFAULT_SCREENCAST_DURATION_SECONDS,
+        metavar="SECONDS",
+        help="How long to capture for (default: 5)",
+    )
+    screencast.add_argument(
+        "--format", dest="format", default="jpeg", metavar="FMT", help="jpeg or png (default: jpeg)"
+    )
+    screencast.add_argument(
+        "--max-frames",
+        type=int,
+        default=curated.DEFAULT_SCREENCAST_MAX_FRAMES,
+        metavar="N",
+        help="Frame cap; reaching it ends the capture (default: 600)",
     )
     # `screencast start` / `screencast stop` were one verb pair that could not
     # work: the frame buffer is process-local, so the stop process never saw
@@ -401,9 +474,7 @@ def _run_profile(args: argparse.Namespace, registry_path: str | None) -> int:
             )
         )
         return EXIT_OK
-    raise PassthroughUsageError(
-        "profile takes one sub-action: list, delete NAME, or migrate"
-    )
+    raise PassthroughUsageError("profile takes one sub-action: list, delete NAME, or migrate")
 
 
 def _one_instance(leading: str | None, inline: str | None) -> str | None:
@@ -587,9 +658,7 @@ def _run(args: argparse.Namespace) -> int:
     if args.command == "help":
         instance, query = passthrough.resolve_help_args(args.args, registry_path=registry_path)
         instance = _one_instance(getattr(args, "instance", None), instance)
-        passthrough.run_help(
-            instance, query, registry_path=registry_path, endpoint=args.endpoint
-        )
+        passthrough.run_help(instance, query, registry_path=registry_path, endpoint=args.endpoint)
         return EXIT_OK
 
     if args.command == "attach":
@@ -606,45 +675,20 @@ def _run(args: argparse.Namespace) -> int:
         return EXIT_OK
 
     if args.command == "wait":
-        event = events.wait(
-            instance=args.instance,
-            event=args.event,
-            match=args.match,
-            timeout=args.timeout,
-            target=args.target,
-            url=args.url,
-            registry_path=registry_path,
-            endpoint=args.endpoint,
-        )
-        _print_json(event)
+        _print_json(step_envelope(args, registry_path))
         return EXIT_OK
 
     if args.command == "console-list":
-        messages = list_verbs.console_list(
-            instance=args.instance,
-            target=args.target,
-            url=args.url,
-            duration=args.duration,
-            registry_path=registry_path,
-            endpoint=args.endpoint,
-        )
-        _print_json(messages)
+        _print_json(step_envelope(args, registry_path))
         return EXIT_OK
 
     if args.command == "network-list":
-        requests = list_verbs.network_list(
-            instance=args.instance,
-            target=args.target,
-            url=args.url,
-            duration=args.duration,
-            registry_path=registry_path,
-            endpoint=args.endpoint,
-        )
-        _print_json(requests)
+        _print_json(step_envelope(args, registry_path))
         return EXIT_OK
 
     if args.command in _CURATED_COMMANDS:
-        return _run_curated(args, registry_path)
+        _print_json(step_envelope(args, registry_path))
+        return EXIT_OK
 
     # No verb given: usage.
     return EXIT_USAGE
@@ -667,7 +711,64 @@ _CURATED_COMMANDS = frozenset(
 )
 
 
-def _run_curated(args: argparse.Namespace, registry_path: str | None) -> int:
+def step_envelope(
+    args: argparse.Namespace,
+    registry_path: str | None,
+    handler: Any | None = None,
+) -> Any:
+    """The JSON document one step-capable verb produces.
+
+    ``_run`` prints what this returns. A Step Run collects it into the Run
+    Document instead, so a step's ``result`` is byte-identical to what the
+    same step prints alone. That is what makes a Run Document composable
+    with what a caller already parses.
+
+    One dispatch, not two. A Step Run with its own table would be a second
+    place to add a verb and a second place to get it wrong, and RFC-03 rules
+    that out for the parser and the preconditions for the same reason.
+
+    ``handler`` is the run's open session. Every verb below takes it and
+    runs over it; passed ``None`` each opens its own, which is what a bare
+    invocation does.
+    """
+    command = args.command
+
+    if command == "wait":
+        return events.wait(
+            instance=args.instance,
+            event=args.event,
+            match=args.match,
+            timeout=args.timeout,
+            target=args.target,
+            url=args.url,
+            registry_path=registry_path,
+            endpoint=args.endpoint,
+            handler=handler,
+        )
+
+    if command in ("console-list", "network-list"):
+        collect = list_verbs.console_list if command == "console-list" else list_verbs.network_list
+        return collect(
+            instance=args.instance,
+            target=args.target,
+            url=args.url,
+            duration=args.duration,
+            registry_path=registry_path,
+            endpoint=args.endpoint,
+            handler=handler,
+        )
+
+    if command in _CURATED_COMMANDS:
+        return _curated_envelope(args, registry_path, handler)
+
+    raise PassthroughUsageError(f"{command} cannot be a step")
+
+
+def _curated_envelope(
+    args: argparse.Namespace,
+    registry_path: str | None,
+    handler: Any | None = None,
+) -> dict[str, Any]:
     """Dispatch one curated verb to its ``curated`` implementation.
 
     Each branch calls the same implementation the matching MCP tool uses.
@@ -676,152 +777,131 @@ def _run_curated(args: argparse.Namespace, registry_path: str | None) -> int:
     (exit 1), handled by the caller.
     """
     if args.command == "snapshot":
-        _print_json(
-            curated.snapshot(
-                instance=args.instance,
-                target=args.target,
-                registry_path=registry_path,
-                endpoint=args.endpoint,
-            )
+        return curated.snapshot(
+            instance=args.instance,
+            target=args.target,
+            registry_path=registry_path,
+            endpoint=args.endpoint,
+            handler=handler,
         )
-        return EXIT_OK
 
     if args.command == "click":
-        _print_json(
-            curated.click(
-                instance=args.instance,
-                uid=args.uid,
-                target=args.target,
-                registry_path=registry_path,
-                endpoint=args.endpoint,
-            )
+        return curated.click(
+            instance=args.instance,
+            uid=args.uid,
+            target=args.target,
+            registry_path=registry_path,
+            endpoint=args.endpoint,
+            handler=handler,
         )
-        return EXIT_OK
 
     if args.command == "fill":
-        _print_json(
-            curated.fill(
-                instance=args.instance,
-                uid=args.uid,
-                text=args.text,
-                target=args.target,
-                registry_path=registry_path,
-                endpoint=args.endpoint,
-            )
+        return curated.fill(
+            instance=args.instance,
+            uid=args.uid,
+            text=args.text,
+            target=args.target,
+            registry_path=registry_path,
+            endpoint=args.endpoint,
+            handler=handler,
         )
-        return EXIT_OK
 
     if args.command == "wait-idle":
-        _print_json(
-            curated.wait_idle(
-                instance=args.instance,
-                timeout_ms=args.timeout_ms,
-                idle_ms=args.idle_ms,
-                registry_path=registry_path,
-                endpoint=args.endpoint,
-            )
+        return curated.wait_idle(
+            instance=args.instance,
+            timeout_ms=args.timeout_ms,
+            idle_ms=args.idle_ms,
+            registry_path=registry_path,
+            endpoint=args.endpoint,
+            handler=handler,
         )
-        return EXIT_OK
 
     if args.command == "wait-stable":
-        _print_json(
-            curated.wait_stable(
-                instance=args.instance,
-                timeout_ms=args.timeout_ms,
-                stable_ms=args.stable_ms,
-                registry_path=registry_path,
-                endpoint=args.endpoint,
-            )
+        return curated.wait_stable(
+            instance=args.instance,
+            timeout_ms=args.timeout_ms,
+            stable_ms=args.stable_ms,
+            registry_path=registry_path,
+            endpoint=args.endpoint,
+            handler=handler,
         )
-        return EXIT_OK
 
     if args.command == "detect":
         wait_seconds = 0.0 if args.no_wait else args.wait
-        _print_json(
-            curated.detect(
-                instance=args.instance,
-                registry_path=registry_path,
-                endpoint=args.endpoint,
-                wait_seconds=wait_seconds,
-            )
+        return curated.detect(
+            instance=args.instance,
+            registry_path=registry_path,
+            endpoint=args.endpoint,
+            wait_seconds=wait_seconds,
         )
-        return EXIT_OK
 
     if args.command == "frames":
-        return _run_frames(args, registry_path)
+        return _frames_envelope(args, registry_path, handler)
 
     if args.command == "storage":
-        _print_json(
-            curated.storage_get(
-                instance=args.instance,
-                key=args.key,
-                registry_path=registry_path,
-                endpoint=args.endpoint,
-            )
+        return curated.storage_get(
+            instance=args.instance,
+            key=args.key,
+            registry_path=registry_path,
+            endpoint=args.endpoint,
+            handler=handler,
         )
-        return EXIT_OK
 
     if args.command == "screenshot":
-        _print_json(
-            curated.screenshot(
-                instance=args.instance,
-                path=args.path,
-                target=args.target,
-                url=args.url,
-                registry_path=registry_path,
-                endpoint=args.endpoint,
-            )
+        return curated.screenshot(
+            instance=args.instance,
+            path=args.path,
+            target=args.target,
+            url=args.url,
+            registry_path=registry_path,
+            endpoint=args.endpoint,
+            handler=handler,
         )
-        return EXIT_OK
 
     if args.command == "screencast":
-        _print_json(
-            curated.screencast(
-                instance=args.instance,
-                out_dir=args.dir,
-                duration=args.duration,
-                fmt=args.format,
-                max_frames=args.max_frames,
-                registry_path=registry_path,
-                endpoint=args.endpoint,
-            )
+        return curated.screencast(
+            instance=args.instance,
+            out_dir=args.dir,
+            duration=args.duration,
+            fmt=args.format,
+            max_frames=args.max_frames,
+            registry_path=registry_path,
+            endpoint=args.endpoint,
+            handler=handler,
         )
-        return EXIT_OK
 
-    return EXIT_USAGE
+    raise PassthroughUsageError(f"{args.command} is not a curated verb")
 
 
-def _run_frames(args: argparse.Namespace, registry_path: str | None) -> int:
-    """Dispatch ``frames list|select|reset``."""
+def _frames_envelope(
+    args: argparse.Namespace,
+    registry_path: str | None,
+    handler: Any | None = None,
+) -> dict[str, Any]:
+    """Dispatch ``frames list|select|reset`` and return its document."""
     action = getattr(args, "frames_action", None)
     if action == "list":
-        _print_json(
-            curated.frames_list(
-                instance=args.instance,
-                registry_path=registry_path,
-                endpoint=args.endpoint,
-            )
+        return curated.frames_list(
+            instance=args.instance,
+            registry_path=registry_path,
+            endpoint=args.endpoint,
+            handler=handler,
         )
-        return EXIT_OK
     if action == "select":
-        _print_json(
-            curated.frames_select(
-                instance=args.instance,
-                pattern=args.pattern,
-                registry_path=registry_path,
-                endpoint=args.endpoint,
-            )
+        return curated.frames_select(
+            instance=args.instance,
+            pattern=args.pattern,
+            registry_path=registry_path,
+            endpoint=args.endpoint,
+            handler=handler,
         )
-        return EXIT_OK
     if action == "reset":
-        _print_json(
-            curated.frames_reset(
-                instance=args.instance,
-                registry_path=registry_path,
-                endpoint=args.endpoint,
-            )
+        return curated.frames_reset(
+            instance=args.instance,
+            registry_path=registry_path,
+            endpoint=args.endpoint,
+            handler=handler,
         )
-        return EXIT_OK
     raise PassthroughUsageError("frames takes one sub-action: list, select, or reset")
 
 
@@ -929,11 +1009,7 @@ def main(argv: list[str] | None = None) -> int:
     # itself, because the raw-protocol line never reaches argparse.
     probe, endpoint = passthrough.strip_endpoint_flag(raw_argv)
     leading_instance: str | None = None
-    if (
-        probe
-        and probe[0] not in _KNOWN_VERBS
-        and probe[0] not in ("-h", "--help")
-    ):
+    if probe and probe[0] not in _KNOWN_VERBS and probe[0] not in ("-h", "--help"):
         registry_path = lifecycle.registry_path_from_env()
         probe, leading_instance = _split_leading_instance(probe, registry_path)
         if leading_instance is None and passthrough.is_passthrough_head(
