@@ -5,7 +5,7 @@ type: refactor
 status: Accepted
 author: Kevin Frilot
 date: 2026-08-21
-version: 6
+version: 7
 ---
 
 # RFC-01: Merge chrome-agent core into browser-tools
@@ -101,13 +101,45 @@ The approved merge plan's module disposition table predates recent refactors on 
 - One-shot CDP round trip measured by upstream at 50 to 80 ms (upstream's number, not re-measured). Attach mode streams isolated event subscriptions as JSON lines.
 - No AI or ML inference of any kind. Anti-detection is launch-flag spoofing only.
 
-### State at version 6 (`main` at `30c6815`)
+### State at version 7 (`main` at `9dd1790`)
 
-Phases 0 to 3 have landed and Phase 4 has landed in part. The merged CLI front, the vendored core, the native snapshot engine, the event verbs, the focus guard, window marking, and the supervisor are all shipped. The default install is Node-free and depends on `websockets>=16.0` only, with `camoufox` and `profiling` extras. The tool-proxy `browser-tools` app is retired, and the session-adapter dispatch path is deleted (version 5). The transitional `--engine mcp` flag is gone; `--engine` now takes `chrome` or `camoufox`.
+**Every phase has landed. This RFC is fully built, and nothing in the Rollout
+section is outstanding.** The section below is kept as written at version 6,
+because the phase specifications are the record of what was built and the
+review of each step was made against them. What changed is the status, and
+the status is recorded here rather than by editing the phase text.
+
+| Phase | State | Landed by |
+|---|---|---|
+| 0, vendor the core | landed | before version 6 |
+| 1, lifecycle cutover | landed | before version 6 |
+| 2, native snapshot | landed | before version 6 |
+| 3, daemon demotion and events | landed | before version 6 |
+| 4, packaging and surface retirement | landed | the two outstanding items below closed in Phase 5 |
+| 5a, retire the MCP front | landed | #103, #104 |
+| 5b, supervisor retirement preserves profiles | landed | #101 |
+| 5c, move the profile root | landed | #111, with #102 hardening the deletion paths |
+| 5d, UID scheme | landed | #107 |
+| 5e, external endpoints | landed | #108 |
+| 5f, profile verbs | landed | #109 |
+| 5g, complete the guide | landed | #112 |
+| Defects 3 and 4, `stop --target` and the silent tab-close failure | landed | #106 |
+
+The version 6 grammar normalization (#110) landed alongside these and is not a
+phase of this RFC.
+
+Both items version 6 listed as outstanding into Phase 5 are closed.
+`pyproject.toml` carries no `mcp` keyword, and its `artifacts` list is down to
+`src/browser_tools/*.js` and `src/browser_tools/GUIDE.txt`, so neither
+`persistent-session-template.mjs` nor `attach_chrome.sh` ships.
+
+### State at version 6 (`main` at `30c6815`), as written then
+
+Phases 0 to 3 had landed and Phase 4 had landed in part. The merged CLI front, the vendored core, the native snapshot engine, the event verbs, the focus guard, window marking, and the supervisor were all shipped. The default install was Node-free and depended on `websockets>=16.0` only, with `camoufox` and `profiling` extras. The tool-proxy `browser-tools` app was retired, and the session-adapter dispatch path deleted (version 5). The transitional `--engine mcp` flag was gone; `--engine` took `chrome` or `camoufox`.
 
 Baseline for every count in this revision: 946 passed, 4 skipped, 950 collected; ruff clean; pyright 0 errors.
 
-What Phase 5 still finds in the tree:
+What Phase 5 found in the tree, all since removed:
 
 - **The MCP front and the persistent-session stack behind it**: 22 source files (5,751 lines) and 20 test files (5,531 lines), including `mcp_daemon.py` (591), `persistent_browser.py` (830), `browser_session.py` (559), `daemon_supervisor.py` (405), `camoufox_session.py` (401), `session_store.py` (343) and `core/session.py` (241). An import-closure analysis with `cli` and `profiler` as roots reaches none of them.
 - **The Node assets**: `persistent-session-template.mjs` and `attach_chrome.sh` still ship as package data, and `pyproject.toml:16` still carries the `mcp` keyword.
@@ -449,6 +481,20 @@ Version 6 resolved five recorded disagreements between the shipped code and vers
 10. **Machine-readable output: machine-made.** The JSON-on-stdout rule keeps three documented exceptions: `help` and `guide` print plain text, and `attach` prints JSON Lines. All three were deliberate in the code and none is machine-readable as one JSON document.
 
 ## Changes in this revision
+
+**Version 7** (2026-09-21) records that the RFC is fully built. Version 6
+described Phase 5 as pending with seven steps and listed the MCP front, the
+persistent-session stack and two Node assets as still in the tree. All seven
+steps landed, both packaging items closed, and the two defects that depended on
+no step landed with them. A reader of version 6 would conclude the MCP front
+still shipped.
+
+No normative text changed. The phase specifications are left exactly as they
+were written, because each step was reviewed against them and rewriting them
+now would destroy that record. The state section carries the completion table
+and names the pull request that landed each step.
+
+
 
 **Version 6** (2026-09-20): renders the six decisions of wayfinder map [#82](https://github.com/dungle-scrubs/browser-tools/issues/82), each settled on its own closed ticket, and pins correct behavior for four defects the map found. One line per change:
 
