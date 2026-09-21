@@ -899,6 +899,7 @@ def _curated_envelope(
             registry_path=registry_path,
             endpoint=args.endpoint,
             wait_seconds=wait_seconds,
+            handler=handler,
         )
 
     if args.command == "frames":

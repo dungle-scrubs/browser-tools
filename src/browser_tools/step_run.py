@@ -25,7 +25,10 @@ from pathlib import Path
 from typing import Any
 
 from . import curated, passthrough, step_list
+from .events import WaitTimeout
 from .lifecycle import LifecycleError
+from .one_shot import cli_cdp_errors
+from .passthrough import HiddenTargetError
 
 #: ``bt run -`` reads the Step List from stdin.
 STDIN_SOURCE = "-"
@@ -50,8 +53,16 @@ def read_source(source: str) -> str:
     except OSError as exc:
         reason = exc.strerror or str(exc)
         raise step_list.StepListError(f"cannot read the step list at '{source}': {reason}") from exc
+    except UnicodeDecodeError as exc:
+        # `bt run /usr/bin/python` is a plausible slip, and it exited 1 with a
+        # traceback. A file that is not text is a malformed step list, which
+        # is exit 2: nothing was sent.
+        raise step_list.StepListError(
+            f"the step list at '{source}' is not UTF-8 text: {exc.reason} at byte {exc.start}"
+        ) from exc
 
 
+@cli_cdp_errors
 def _one_step(step: step_list.Step, handler: Any, registry_path: str | None) -> Any:
     """Run one validated step over the run's session and return its document.
 
@@ -59,13 +70,24 @@ def _one_step(step: step_list.Step, handler: Any, registry_path: str | None) -> 
     ``passthrough.send``, because ``send`` opens a connection of its own and
     the run already holds one. The hidden-tab refusal travels inside
     ``send_on_session``, so a step cannot reach the browser around it.
+
+    ``@cli_cdp_errors`` and the ``HiddenTargetError`` conversion below are the
+    other half of what `passthrough.send` does around that same call. Without
+    them a raw step's ``CDPError`` or ``ConnectionError`` left the engine
+    uncaught: the process died with a traceback, printed no Run Document, and
+    so told the caller nothing about the steps that had already run. A raw
+    step now fails the way the same line fails as a bare invocation, which is
+    exit 1 with a reason.
     """
     from . import cli
 
     if step.is_passthrough:
         method, params = step.as_method()
         cdp, session_id = handler.require_session()
-        return handler.submit(passthrough.send_on_session(cdp, session_id, method, params))
+        try:
+            return handler.submit(passthrough.send_on_session(cdp, session_id, method, params))
+        except HiddenTargetError as exc:
+            raise LifecycleError(str(exc)) from exc
 
     return cli.step_envelope(step.as_verb(), registry_path, handler=handler)
 
@@ -107,37 +129,82 @@ def execute(
     completed = 0
     status = STATUS_OK
 
+    try:
+        completed, status = _drive(steps, handler, registry_path, timeout, deadline, entries)
+    finally:
+        # In a `finally`, because the run does not own this handler. A caller
+        # that supplied one still holds it after an exception the loop does
+        # not catch, and a deadline left armed on it would refuse that
+        # caller's next call for a run that is already over.
+        handler.set_deadline(None)
+
+    document = {
+        "run": {"steps": len(steps), "completed": completed, "status": status},
+        "steps": entries,
+    }
+    return document, status == STATUS_OK
+
+
+def _drive(
+    steps: list[step_list.Step],
+    handler: Any,
+    registry_path: str | None,
+    timeout: float | None,
+    deadline: float | None,
+    entries: list[dict[str, Any]],
+) -> tuple[int, str]:
+    """The loop itself. Appends to ``entries`` as it goes, so a caller that
+    catches an exception from here still has every step attempted so far."""
+    completed = 0
+
+    def overran() -> bool:
+        return deadline is not None and time.monotonic() >= deadline
+
     for step in steps:
+        if overran():
+            # The run is over and this step has not started. It gets no
+            # entry: a step that never reached the browser must not appear,
+            # or a caller reading the last entry blames the wrong step.
+            return completed, STATUS_TIMEOUT
+
         entry: dict[str, Any] = {"index": step.number, "step": step.text}
         try:
-            if deadline is not None and time.monotonic() >= deadline:
-                raise TimeoutError("the run's deadline passed")
             result = _one_step(step, handler, registry_path)
         except (TimeoutError, LifecycleError) as exc:
             # The exception type does not say which of the two happened. A
             # step cut off by the run's deadline surfaces as whatever its own
             # layer raises: `wait` raises TimeoutError straight out, while a
             # curated verb's tool call turns it into an error envelope and so
-            # into LifecycleError. The clock is the only reliable test, and
-            # asking it here is what keeps `timeout` and `failed` apart.
-            timed_out = deadline is not None and time.monotonic() >= deadline
+            # into LifecycleError. The clock is the only reliable test for
+            # those, and asking it here is what keeps `timeout` and `failed`
+            # apart. A `WaitTimeout` is the exception: only a step's own wait
+            # raises it, so it is the step's deadline however the clock reads.
+            timed_out = overran() and not isinstance(exc, WaitTimeout)
             status = STATUS_TIMEOUT if timed_out else STATUS_FAILED
             entry["status"] = status
             entry["error"] = _why(exc, timeout if timed_out else None)
             entries.append(entry)
-            break
-        else:
-            entry["status"] = STATUS_OK
-            entry["result"] = result
-            entries.append(entry)
-            completed += 1
+            return completed, status
 
-    handler.set_deadline(None)
-    document = {
-        "run": {"steps": len(steps), "completed": completed, "status": status},
-        "steps": entries,
-    }
-    return document, status == STATUS_OK
+        entry["result"] = result
+        entries.append(entry)
+
+        if overran():
+            # The step returned, but the deadline passed while it was
+            # running, so what it returned may be a part of what was asked
+            # for: a `screencast` clamped to the deadline writes the frames it
+            # got. The result is kept, because the step did that work and
+            # nothing rolls back, and the entry says `timeout` so the caller
+            # knows not to read it as a whole answer. It is not counted in
+            # `completed`, which is the steps that finished inside the budget.
+            entry["status"] = STATUS_TIMEOUT
+            entry["error"] = f"the run's {timeout}s deadline passed while this step ran"
+            return completed, STATUS_TIMEOUT
+
+        entry["status"] = STATUS_OK
+        completed += 1
+
+    return completed, STATUS_OK
 
 
 def describe_failure(document: dict[str, Any]) -> str | None:
@@ -174,7 +241,9 @@ def run(
     cannot be reached at all - which is before step 1, so there is no
     document to print either.
     """
-    steps = step_list.validate(read_source(source), registry_path=registry_path)
+    steps = step_list.validate(
+        read_source(source), registry_path=registry_path, endpoint=endpoint
+    )
     with curated.run_session(instance, target, url, registry_path, endpoint) as handler:
         return execute(steps, handler, registry_path, timeout)
 

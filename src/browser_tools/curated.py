@@ -454,7 +454,13 @@ def detect(
     if wait_seconds is not None:
         max_retries = max(0, math.ceil(wait_seconds / INTERSTITIAL_RETRY_DELAY_SECONDS))
     with _handler_for(handler, instance, None, registry_path, endpoint) as handler:
-        result = handler.run_post_navigation_detection(max_retries)
+        try:
+            result = handler.run_post_navigation_detection(max_retries)
+        except TimeoutError as exc:
+            # Exit 1 either way, but the reason has to be the real one: alone
+            # this is detection outrunning its own budget, and inside a run it
+            # is the run's deadline, which the engine reads off the clock.
+            raise LifecycleError("interstitial detection did not finish in time") from exc
     if result is None:
         raise LifecycleError("interstitial detection unavailable (no CDP session)")
     detections = result.get("detections", [])

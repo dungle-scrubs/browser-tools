@@ -33,6 +33,7 @@ import shlex
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from . import endpoint as endpoint_module
 from . import lifecycle, passthrough
 from .usage import UsageError
 
@@ -257,13 +258,22 @@ def _check_nothing_was_retargeted(args: argparse.Namespace, line: int) -> None:
             raise _refuse_invocation_flag(flag, line)
 
 
-def _validate_passthrough(argv: list[str], line: int) -> tuple[str, dict[str, Any] | None]:
+def _validate_passthrough(
+    argv: list[str], line: int, endpoint: str | None = None
+) -> tuple[str, dict[str, Any] | None]:
     """Check a ``Domain.method '{...}'`` step and return its method and params.
 
     The focus refusals are checked here rather than at the step, because they
     can be checked here: the method name and the params are both on the line.
     RFC-03 puts them in the exit-2 class for that reason, so a Step List
     containing one runs nothing at all.
+
+    ``endpoint`` is the run's, not the step's. RFC-03 reasoned that the
+    ``Browser.close`` and ``Browser.crash`` refusals were unreachable inside a
+    run because a step cannot carry ``--endpoint``. That was wrong: the run
+    carries it, and every step is attached to that external browser. Without
+    this, ``bt run steps --endpoint URL`` with ``Browser.close`` on a line
+    closed a browser the tool does not own, where the bare invocation refuses.
     """
     if len(argv) > 2:
         raise _at(line, f"'{argv[0]}' takes at most one JSON params argument")
@@ -279,6 +289,12 @@ def _validate_passthrough(argv: list[str], line: int) -> tuple[str, dict[str, An
             raise _at(line, "params must be a JSON object")
         params = decoded
 
+    if endpoint is not None:
+        try:
+            endpoint_module.refuse_browser_lifetime_method(method)
+        except UsageError as exc:
+            raise _at(line, str(exc)) from exc
+
     try:
         # The return value is the point, not just the refusal: for
         # `Target.createTarget` it adds `background: true`, which is what keeps
@@ -291,7 +307,9 @@ def _validate_passthrough(argv: list[str], line: int) -> tuple[str, dict[str, An
     return method, params
 
 
-def validate(text: str, registry_path: str | None = None) -> list[Step]:
+def validate(
+    text: str, registry_path: str | None = None, endpoint: str | None = None
+) -> list[Step]:
     """Parse a Step List and return its steps, or raise ``StepListError``.
 
     The registry is read once, here, and the whole run uses the result. It is
@@ -335,7 +353,7 @@ def validate(text: str, registry_path: str | None = None) -> list[Step]:
 
         if lifecycle.looks_like_domain_method(head):
             _check_no_invocation_flags(argv, line)
-            method, params = _validate_passthrough(argv, line)
+            method, params = _validate_passthrough(argv, line, endpoint)
             steps.append(
                 Step(
                     number=number,

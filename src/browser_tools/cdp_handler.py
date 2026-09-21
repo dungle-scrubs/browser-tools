@@ -301,6 +301,14 @@ assert set(_CDP_HANDLERS) == CDP_TOOLS, (
 #: not enough to carry on working past the deadline the caller set.
 DEADLINE_GRACE_SECONDS = 5.0
 
+#: The least any one call gets once even the grace is spent. A call handed
+#: zero fails before it is sent, which defeats the grace; a call handed this
+#: can still send a `Page.stopScreencast` and hear back.
+TEARDOWN_FLOOR_SECONDS = 0.25
+
+#: How long to wait on the one `Runtime.evaluate` behind the focus guard.
+VISIBILITY_READ_TIMEOUT_SECONDS = 5.0
+
 
 class CDPRuntime:
     """Owns the CDP background thread, event loop, WebSocket connection, frame
@@ -322,6 +330,7 @@ class CDPRuntime:
     # caller's own timeout.
     _target_by: str | None = None
     _deadline: float | None = None
+    _grace_until: float | None = None
 
     def __init__(
         self,
@@ -365,6 +374,7 @@ class CDPRuntime:
         # `--timeout` reaches the step in flight instead of only being
         # checked between steps.
         self._deadline: float | None = None
+        self._grace_until: float | None = None
         # Screencast capture state machine (Page.startScreencast buffer, ack,
         # write-to-dir). Owned here so the screencast tool handlers stay
         # two-line delegators.
@@ -390,6 +400,7 @@ class CDPRuntime:
     def set_deadline(self, deadline: float | None) -> None:
         """Bound every later wait on this runtime by one monotonic instant."""
         self._deadline = deadline
+        self._grace_until = None
 
     @property
     def deadline(self) -> float | None:
@@ -419,10 +430,21 @@ class CDPRuntime:
         """
         if self._deadline is None:
             return timeout
-        remaining = self._deadline - time.monotonic()
-        if remaining <= 0:
-            return DEADLINE_GRACE_SECONDS
-        return remaining if timeout is None else min(timeout, remaining)
+        now = time.monotonic()
+        remaining = self._deadline - now
+        if remaining > 0:
+            return remaining if timeout is None else min(timeout, remaining)
+
+        # One budget for the whole unwind, opened by the first call after the
+        # deadline. Handing every call a fresh `DEADLINE_GRACE_SECONDS` would
+        # bound no call and the run together: a step making four calls while
+        # it unwinds could run four graces past a deadline the caller set.
+        if self._grace_until is None:
+            self._grace_until = now + DEADLINE_GRACE_SECONDS
+        left = self._grace_until - now
+        # Never zero. A call given no time at all fails before it is sent, and
+        # then the teardown this grace exists for does not happen either.
+        return max(left, TEARDOWN_FLOOR_SECONDS)
 
     def submit(self, coro: Any, timeout: float | None = None) -> Any:
         """Run one coroutine on this runtime's loop and return its result.
@@ -654,7 +676,9 @@ class CDPRuntime:
             self._await_paint_ready_async(timeout_ms), self._loop
         )
         try:
-            return future.result(timeout=(timeout_ms / 1000.0) + 2.0)
+            return future.result(
+                timeout=self.bounded_timeout((timeout_ms / 1000.0) + 2.0)
+            )
         except Exception:
             logger.debug("await_paint_ready timed out or failed", exc_info=True)
             return False
@@ -705,7 +729,9 @@ class CDPRuntime:
             )
 
         try:
-            result = asyncio.run_coroutine_threadsafe(_read(), loop).result(timeout=5)
+            result = asyncio.run_coroutine_threadsafe(_read(), loop).result(
+                timeout=self.bounded_timeout(VISIBILITY_READ_TIMEOUT_SECONDS)
+            )
         except Exception:
             logger.debug("page_visibility_state failed", exc_info=True)
             return None
@@ -739,7 +765,15 @@ class CDPRuntime:
 
         future = asyncio.run_coroutine_threadsafe(_run(), self._loop)
         try:
-            return future.result(timeout=detect_total_timeout(max_retries))
+            return future.result(
+                timeout=self.bounded_timeout(detect_total_timeout(max_retries))
+            )
+        except TimeoutError:
+            # Not swallowed into None. None means "no session to detect on",
+            # and reporting a run that ran out of time as a missing session
+            # sends the caller looking for a browser that is right there.
+            future.cancel()
+            raise
         except Exception:
             logger.debug("run_post_navigation_detection failed", exc_info=True)
             return None

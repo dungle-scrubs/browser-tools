@@ -19,6 +19,7 @@ comparing text would not notice.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import time
 from typing import Any
@@ -290,7 +291,7 @@ class TestTheRunDeadline:
         """`--timeout 0` matches `wait --timeout 0`: no deadline, not an instant one."""
         _outcomes(monkeypatch, [{}])
         handler = FakeHandler()
-        document, ok = step_run.execute([_step(1)], handler, timeout=0)
+        _, ok = step_run.execute([_step(1)], handler, timeout=0)
         assert handler.deadlines[0] is None
         assert ok is True, "a zero timeout killed the run instead of meaning 'no deadline'"
 
@@ -687,3 +688,461 @@ class TestACallThatTimesOutSaysSomething:
         text = response["result"]["content"][0]["text"]
         assert response["result"]["isError"] is True
         assert "screencast_stop" in text and "in time" in text, text
+
+
+class TestTheRunDoesNotOwnTheHandler:
+    """`execute` takes a handler it did not open, so it must leave no state on it."""
+
+    def test_an_uncaught_exception_still_disarms_the_deadline(self, monkeypatch):
+        def explode(step, handler, registry_path):
+            raise RuntimeError("a defect the engine does not catch")
+
+        monkeypatch.setattr(step_run, "_one_step", explode)
+        handler = FakeHandler()
+        with pytest.raises(RuntimeError):
+            step_run.execute([_step(1)], handler, timeout=30)
+        assert handler.deadlines[-1] is None, (
+            "the run left its deadline armed on a handler its caller still "
+            "holds, so that caller's next call is bounded by a run that is over"
+        )
+
+    def test_the_run_never_closes_the_handler(self, monkeypatch):
+        closed: list[bool] = []
+        handler = FakeHandler()
+        handler.stop = lambda: closed.append(True)  # pyright: ignore[reportAttributeAccessIssue]
+        _outcomes(monkeypatch, [{}, LifecycleError("x")])
+        step_run.execute([_step(1), _step(2)], handler)
+        assert closed == [], "the engine closed a session it did not open"
+
+
+class _OpenedItsOwnSession(BaseException):
+    """Raised by the seam a step must not reach. Not an `Exception`, on purpose."""
+
+
+class TestNoStepOpensItsOwnSession:
+    """The guard for the defect the reviewer found in `detect`.
+
+    `step_envelope` grew a `handler=` argument per verb, and one branch was
+    written without it. The verb then resolved its own instance, opened its
+    own connection, and lost the run's `--endpoint` and `--target`: a run
+    pointed at one browser silently drove another. Reachability was already
+    guarded; this guards that the run's session is the one that gets used.
+    """
+
+    @pytest.mark.parametrize("verb", sorted(step_list.STEP_VERBS))
+    def test_a_step_never_opens_a_connection(self, verb, monkeypatch):
+        from browser_tools import cli, curated
+
+        def refuse(*args, **kwargs):
+            # Not an `Exception`: the call below suppresses those, because a
+            # verb objecting to its own arguments is fine and only the
+            # connection matters here. An `AssertionError` would be swallowed
+            # with them, and this test passed against the very defect it names.
+            raise _OpenedItsOwnSession(
+                f"'{verb}' opened its own session instead of using the run's, "
+                "so the run's --endpoint and --target did not reach it"
+            )
+
+        monkeypatch.setattr(curated, "_cdp_handler_session", refuse)
+        monkeypatch.setattr(curated, "_resolve_port", refuse)
+        monkeypatch.setattr("browser_tools.lifecycle.registry_path_from_env", lambda: None)
+
+        args = argparse.Namespace(
+            command=verb,
+            instance=None,
+            target=None,
+            url=None,
+            endpoint=None,
+            uid="AB-1",
+            text="x",
+            timeout=1,
+            timeout_ms=100,
+            event="X.y",
+            match=None,
+            duration=0.01,
+            path=None,
+            dir="/tmp/unused",
+            format="jpeg",
+            max_frames=1,
+            wait=None,
+            no_wait=True,
+            frames_action="list",
+            storage_action="get",
+            key=None,
+            removed_action=None,
+        )
+        handler = _FullFakeHandler()
+        with contextlib.suppress(Exception):
+            cli.step_envelope(args, None, handler=handler)
+
+
+class _FullFakeHandler(FakeHandler):
+    """Enough of `CDPHandler` for every curated verb to run over it."""
+
+    def __init__(self):
+        super().__init__()
+        self.deadline = None
+        self.screencast_frame_count = 0
+        self.stopped = 0
+
+    def stop(self):
+        self.stopped += 1
+
+    def call_tool(self, name, arguments):
+        from browser_tools.mcp_response import make_text
+
+        self.log.append(("tool", name))
+        return make_text("Cookies (0):" if name == "get_storage" else "ok")
+
+    def call_native(self, name, arguments):
+        from browser_tools.mcp_response import make_text
+
+        self.log.append(("native", name))
+        return make_text("[uid=AB-1] RootWebArea")
+
+    def run_post_navigation_detection(self, max_retries=None):
+        self.log.append(("detect", max_retries))
+        return {"detections": [], "auto_retried": False, "retries_used": 0}
+
+
+class TestTheRunOwnsTheSessionItOpened:
+    """Two mutations survived the first round of tests: both are ownership."""
+
+    def test_a_step_never_closes_the_runs_session(self, monkeypatch):
+        """A borrowed handler closed after step 1 leaves step 2 nothing to use."""
+        from browser_tools import cli
+
+        handler = _FullFakeHandler()
+        for _ in range(3):
+            cli.step_envelope(
+                argparse.Namespace(
+                    command="snapshot", instance=None, target=None, url=None, endpoint=None
+                ),
+                None,
+                handler=handler,
+            )
+        assert handler.stopped == 0, (
+            "a curated verb closed the session the run handed it, so the next "
+            "step would reconnect or fail"
+        )
+
+    def test_the_run_closes_the_session_it_opened_itself(self, monkeypatch):
+        """And the owner does close it, on the way out."""
+        from browser_tools import curated
+
+        handler = _FullFakeHandler()
+        closed: list[int] = []
+
+        import contextlib as _ctx
+
+        @_ctx.contextmanager
+        def fake_cdp_session(port, spec=None, by=None, external=False):
+            try:
+                yield handler
+            finally:
+                handler.stopped += 1
+                closed.append(handler.stopped)
+
+        monkeypatch.setattr(curated, "_cdp_handler_session", fake_cdp_session)
+        monkeypatch.setattr(curated, "_resolve_port", lambda i, r, e: 9222)
+        with curated.run_session(None, None, None, None, None) as opened:
+            assert opened is handler
+        assert closed == [1], "the run left the session it opened open"
+
+
+class TestWhatARawStepRaises:
+    """A raw step failed in ways the engine did not catch: no document at all.
+
+    `passthrough.send` wraps the same call in `@cli_cdp_errors` and converts
+    `HiddenTargetError`. `send_on_session` has neither, so a `CDPError` from a
+    bad method name killed the process with a traceback and printed nothing -
+    the caller lost the record of every step that had already run.
+    """
+
+    def _run_raw(self, monkeypatch, exc):
+        from browser_tools import passthrough
+
+        async def boom(cdp, session_id, method, params):
+            raise exc
+
+        monkeypatch.setattr(passthrough, "send_on_session", boom)
+        handler = _FullFakeHandler()
+        handler.submit = lambda coro, timeout=None: _drain(coro)
+        return step_run.execute([_step(1), _raw_step(2), _step(3)], handler)
+
+    def test_a_cdp_error_becomes_a_step_failure(self, monkeypatch):
+        from browser_tools.core.errors import CDPError
+
+        document, ok = self._run_raw(monkeypatch, CDPError(-32601, "method not found"))
+        assert ok is False
+        assert document["run"]["status"] == "failed"
+        assert document["steps"][0]["status"] == "ok", "the completed step lost its record"
+        assert "method not found" in document["steps"][1]["error"]
+        assert len(document["steps"]) == 2, "step 3 ran after a failure"
+
+    def test_a_connection_error_becomes_a_step_failure(self, monkeypatch):
+        document, ok = self._run_raw(monkeypatch, ConnectionError("websocket closed"))
+        assert ok is False
+        assert "websocket closed" in document["steps"][1]["error"]
+
+    def test_a_hidden_tab_refusal_becomes_a_step_failure(self, monkeypatch):
+        from browser_tools.passthrough import HiddenTargetError
+
+        document, ok = self._run_raw(monkeypatch, HiddenTargetError("the tab is in the background"))
+        assert ok is False
+        assert "background" in document["steps"][1]["error"]
+
+
+class TestTheRunsEndpointReachesTheRefusals:
+    """RFC-03 called these unreachable inside a run. They were not.
+
+    A step cannot carry `--endpoint`, which is what the RFC reasoned from.
+    But the run carries it, and every step is attached to that external
+    browser, so `Browser.close` on a line closed a browser `bt` does not own
+    where the bare invocation refuses.
+    """
+
+    @pytest.mark.parametrize("method", ["Browser.close", "Browser.crash"])
+    def test_a_lifetime_method_is_refused_under_the_runs_endpoint(self, method, monkeypatch):
+        monkeypatch.setattr("browser_tools.lifecycle.read_instances", lambda registry_path=None: [])
+        with pytest.raises(step_list.StepListError) as exc:
+            step_list.validate(f"{method}\n", endpoint="http://127.0.0.1:9222")
+        assert "refused over --endpoint" in str(exc.value)
+        assert "line 1" in str(exc.value)
+
+    @pytest.mark.parametrize("method", ["Browser.close", "Browser.crash"])
+    def test_it_is_allowed_against_a_browser_the_tool_owns(self, method, monkeypatch):
+        monkeypatch.setattr("browser_tools.lifecycle.read_instances", lambda registry_path=None: [])
+        steps = step_list.validate(f"{method}\n", endpoint=None)
+        assert steps[0].as_method()[0] == method
+
+    def test_the_refusal_happens_before_any_step_runs(self, monkeypatch, tmp_path):
+        from browser_tools import curated
+
+        def refuse(*args, **kwargs):
+            raise AssertionError("the run connected before refusing the lifetime method")
+
+        monkeypatch.setattr(curated, "run_session", refuse)
+        monkeypatch.setattr("browser_tools.lifecycle.read_instances", lambda registry_path=None: [])
+        source = tmp_path / "steps.txt"
+        source.write_text("snapshot\nBrowser.close\n")
+        with pytest.raises(step_list.StepListError):
+            step_run.run(
+                instance=None,
+                source=str(source),
+                endpoint="http://127.0.0.1:9222",
+                registry_path=None,
+            )
+
+
+class TestARunThatOverranIsNeverOk:
+    """A run that blew its `--timeout` exited 0 when the last step absorbed it.
+
+    `screencast --duration 3` under `--timeout 0.05` clamped its capture,
+    returned normally, and the loop ended with nothing left to check the
+    clock against. `run.status` read "ok" and the exit code was 0, for a run
+    that had already passed the deadline the caller set.
+    """
+
+    def test_the_last_step_absorbing_the_deadline_still_fails_the_run(self, monkeypatch):
+        def slow_but_successful(step, handler, registry_path):
+            time.sleep(0.05)
+            return {"frames": 1}
+
+        monkeypatch.setattr(step_run, "_one_step", slow_but_successful)
+        document, ok = step_run.execute([_step(1, "screencast --dir d")], FakeHandler(), timeout=0.02)
+        assert ok is False, "a run that passed its deadline reported success"
+        assert document["run"]["status"] == "timeout"
+
+    def test_the_interrupted_step_keeps_its_result_and_says_it_was_cut(self, monkeypatch):
+        """Nothing rolls back: the frames it did capture are real output."""
+
+        def slow_but_successful(step, handler, registry_path):
+            time.sleep(0.05)
+            return {"frames": 1}
+
+        monkeypatch.setattr(step_run, "_one_step", slow_but_successful)
+        document, _ = step_run.execute([_step(1)], FakeHandler(), timeout=0.02)
+        entry = document["steps"][0]
+        assert entry["result"] == {"frames": 1}, "the work the step did was discarded"
+        assert entry["status"] == "timeout", (
+            "a partial result was labelled ok, so a caller reads it as the whole answer"
+        )
+        assert document["run"]["completed"] == 0, (
+            "a step cut off by the deadline counted as completed"
+        )
+
+    def test_a_step_after_it_gets_no_entry_at_all(self, monkeypatch):
+        """The timeout must not be attributed to a step that never started."""
+        calls: list[int] = []
+
+        def slow_first(step, handler, registry_path):
+            calls.append(step.number)
+            if step.number == 1:
+                time.sleep(0.05)
+            return {}
+
+        monkeypatch.setattr(step_run, "_one_step", slow_first)
+        document, _ = step_run.execute(
+            [_step(1, "screencast --dir d"), _step(2, "frames reset")],
+            FakeHandler(),
+            timeout=0.02,
+        )
+        assert calls == [1], "the second step ran past the deadline"
+        assert [entry["index"] for entry in document["steps"]] == [1], (
+            "a step that never started has an entry, and it is the one the "
+            "timeout is pinned to"
+        )
+
+
+class TestTheGraceIsOneBudgetForTheWholeUnwind:
+    """Per call, four teardown calls would each buy another five seconds."""
+
+    def test_the_budget_shrinks_across_calls(self):
+        from browser_tools.cdp_handler import DEADLINE_GRACE_SECONDS, CDPRuntime
+
+        runtime = CDPRuntime(None)
+        runtime.set_deadline(time.monotonic() - 1)
+        first = runtime.bounded_timeout(30) or 0
+        time.sleep(0.05)
+        second = runtime.bounded_timeout(30) or 0
+        assert second < first, (
+            f"every call got its own grace ({first} then {second}), so a step "
+            "making several can run arbitrarily far past the deadline"
+        )
+        assert first <= DEADLINE_GRACE_SECONDS
+
+    def test_a_spent_budget_still_leaves_enough_to_send_one_call(self):
+        from browser_tools.cdp_handler import TEARDOWN_FLOOR_SECONDS, CDPRuntime
+
+        runtime = CDPRuntime(None)
+        runtime.set_deadline(time.monotonic() - 1)
+        runtime._grace_until = time.monotonic() - 1  # the grace is gone too
+        assert runtime.bounded_timeout(30) == TEARDOWN_FLOOR_SECONDS, (
+            "a call handed zero fails before it is sent, so the teardown the "
+            "grace exists for does not happen either"
+        )
+
+    def test_a_new_deadline_opens_a_new_budget(self):
+        from browser_tools.cdp_handler import CDPRuntime
+
+        runtime = CDPRuntime(None)
+        runtime.set_deadline(time.monotonic() - 1)
+        runtime.bounded_timeout(30)
+        assert runtime._grace_until is not None
+        runtime.set_deadline(None)
+        assert runtime._grace_until is None, "a finished run left its grace behind"
+
+
+class TestEveryRuntimeWaitIsBounded:
+    """A wait that does not call `bounded_timeout` is a hole in `--timeout`.
+
+    The reviewer's surviving mutation: removing the bound from the runtime's
+    waits changed nothing any test could see. These name the waits.
+    """
+
+    def test_no_result_call_takes_a_raw_timeout(self):
+        """Parsed, not grepped: these calls wrap, and a line-local search
+        read a wrapped one as having no timeout argument at all."""
+        import ast
+        from pathlib import Path as _Path
+
+        source = _Path("src/browser_tools/cdp_handler.py")
+        tree = ast.parse(source.read_text())
+        unbounded: list[str] = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            if not (isinstance(node.func, ast.Attribute) and node.func.attr == "result"):
+                continue
+            argument = next((kw.value for kw in node.keywords if kw.arg == "timeout"), None)
+            if argument is None:
+                continue
+            text = ast.unparse(argument)
+            # `submit` computes the bound one line up and passes it as `bound`.
+            if "bounded_timeout" in text or text == "bound":
+                continue
+            unbounded.append(f"line {node.lineno}: .result(timeout={text})")
+        assert not unbounded, (
+            f"these waits ignore the run's deadline: {unbounded}. A step using "
+            "one runs past --timeout without the run noticing."
+        )
+
+    def test_the_focus_guard_reads_visibility_under_the_deadline(self):
+        """The guard above proves the call is bounded. This names the wait,
+        so a rename that drops the bound is a failure here too."""
+        from browser_tools.cdp_handler import VISIBILITY_READ_TIMEOUT_SECONDS, CDPRuntime
+
+        runtime = CDPRuntime(None)
+        runtime.set_deadline(time.monotonic() + 0.5)
+        bound = runtime.bounded_timeout(VISIBILITY_READ_TIMEOUT_SECONDS) or 0
+        assert bound < VISIBILITY_READ_TIMEOUT_SECONDS, (
+            "the focus guard's five-second visibility read outlives a run "
+            "with less than five seconds left"
+        )
+
+
+class TestAStepsOwnWaitIsNeverTheRunsTimeout:
+    """`WaitTimeout` is raised only by a step's own deadline, whatever the clock says."""
+
+    def test_a_wait_timeout_at_the_deadline_is_still_a_failure(self, monkeypatch):
+        from browser_tools.events import WaitTimeout
+
+        def own_deadline(step, handler, registry_path):
+            time.sleep(0.05)
+            raise WaitTimeout("timed out after 0.999s waiting for Page.loadEventFired")
+
+        monkeypatch.setattr(step_run, "_one_step", own_deadline)
+        document, _ = step_run.execute([_step(1, "wait --event X.y")], FakeHandler(), timeout=0.02)
+        assert document["run"]["status"] == "failed", (
+            "the step's own wait expiring was reported as the run timing out, "
+            "which tells the caller to raise --timeout when the step's own "
+            "--timeout is what expired"
+        )
+        assert "Page.loadEventFired" in document["steps"][0]["error"]
+
+
+class TestAFileThatIsNotText:
+    def test_a_binary_step_list_is_a_usage_error(self, tmp_path):
+        source = tmp_path / "binary.steps"
+        source.write_bytes(b"\xcf\xfa\xed\xfe\x00\x00")
+        with pytest.raises(step_list.StepListError) as exc:
+            step_run.read_source(str(source))
+        assert "not UTF-8" in str(exc.value)
+
+    def test_it_exits_two_and_prints_nothing(self, monkeypatch, tmp_path, capsys):
+        from browser_tools import cli
+
+        source = tmp_path / "binary.steps"
+        source.write_bytes(b"\xcf\xfa\xed\xfe\x00\x00")
+        monkeypatch.setattr("browser_tools.lifecycle.registry_path_from_env", lambda: None)
+        assert cli.main(["run", str(source)]) == 2
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert "not UTF-8" in captured.err
+
+
+class TestADeadlineAlreadyPastRunsNothing:
+    """`execute` can be handed a deadline that has already gone.
+
+    A tiny `--timeout` against a connection that took longer to open than the
+    budget arrives here with no time left. The pre-step check is what stops
+    step 1 from running anyway, and it is reachable only in this case: after
+    a successful step the post-step check has already returned.
+    """
+
+    def test_no_step_runs(self, monkeypatch):
+        calls = _outcomes(monkeypatch, [{}, {}])
+        handler = FakeHandler()
+        document, ok = step_run.execute([_step(1), _step(2)], handler, timeout=-1)
+        assert calls == [], "a step reached the browser after the run was already over"
+        assert ok is False
+        assert document["run"] == {"steps": 2, "completed": 0, "status": "timeout"}
+
+    def test_and_no_step_gets_an_entry(self, monkeypatch):
+        _outcomes(monkeypatch, [{}, {}])
+        document, _ = step_run.execute([_step(1), _step(2)], FakeHandler(), timeout=-1)
+        assert document["steps"] == [], (
+            "a step that never started has an entry, so the caller cannot tell "
+            "what reached the browser from what did not"
+        )
