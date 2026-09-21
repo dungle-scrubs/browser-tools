@@ -199,7 +199,29 @@ class TestSubmittingToTheRuntimesLoop:
     def test_submitting_before_the_runtime_runs_is_an_error(self):
         from browser_tools.cdp_handler import CDPRuntime
 
+        async def body():
+            return None
+
+        with pytest.raises(RuntimeError):
+            CDPRuntime(None).submit(body())
+
+    @pytest.mark.parametrize("loop_state", ["absent", "closed"])
+    def test_a_coroutine_that_never_ran_is_closed(self, loop_state, recwarn):
+        """Otherwise it warns on stderr while a run reports why it failed.
+
+        `run_coroutine_threadsafe` takes ownership only when it schedules.
+        On either failure path nothing awaits the coroutine, and Python says
+        so at collection time, in the middle of the run's diagnostics.
+        """
+        import gc
+
+        from browser_tools.cdp_handler import CDPRuntime
+
         runtime = CDPRuntime(None)
+        if loop_state == "closed":
+            loop = asyncio.new_event_loop()
+            loop.close()
+            runtime._loop = loop
 
         async def body():
             return None
@@ -207,7 +229,13 @@ class TestSubmittingToTheRuntimesLoop:
         coro = body()
         with pytest.raises(RuntimeError):
             runtime.submit(coro)
-        coro.close()
+
+        assert coro.cr_frame is None, "the coroutine was left open"
+        del coro
+        gc.collect()
+        assert not [
+            w for w in recwarn.list if "never awaited" in str(w.message)
+        ], "an un-awaited coroutine warning reached the caller"
 
     def test_the_session_is_none_before_it_connects(self):
         from browser_tools.cdp_handler import CDPRuntime

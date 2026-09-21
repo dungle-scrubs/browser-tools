@@ -364,9 +364,18 @@ class CDPRuntime:
         this for the One-Shot Session verbs, which are coroutines over the
         session this runtime already holds.
         """
-        if self._loop is None:
-            raise RuntimeError("the CDP runtime is not running")
-        return asyncio.run_coroutine_threadsafe(coro, self._loop).result(timeout=timeout)
+        try:
+            if self._loop is None:
+                raise RuntimeError("the CDP runtime is not running")
+            future = asyncio.run_coroutine_threadsafe(coro, self._loop)
+        except BaseException:
+            # Nothing took ownership of the coroutine, so nothing will ever
+            # await it. Left alone it emits "coroutine was never awaited" on
+            # stderr, at the exact moment a run is already reporting why it
+            # failed.
+            coro.close()
+            raise
+        return future.result(timeout=timeout)
 
     @property
     def mode(self) -> str:
