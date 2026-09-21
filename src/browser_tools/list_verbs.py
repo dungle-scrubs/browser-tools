@@ -69,6 +69,7 @@ async def collect_on_session(
     session_id: str,
     events: list[str],
     duration: float,
+    keep: frozenset[str] = frozenset(),
 ) -> list[dict[str, Any]]:
     """Collect every subscribed event over one CDP session for ``duration`` seconds.
 
@@ -99,7 +100,7 @@ async def collect_on_session(
         # `console-list` in one run still gets a first enable (RFC-03,
         # "Domain-enable state"). Events delivered during the enable are
         # already buffered.
-        async with domains_enabled(cdp, session_id, (e.split(".")[0] for e in events)):
+        async with domains_enabled(cdp, session_id, (e.split(".")[0] for e in events), keep):
             if duration > 0:
                 await asyncio.sleep(duration)
             return list(collected)
@@ -135,7 +136,7 @@ def _run_collection(
         # window inside the run's one connection instead of opening a second.
         cdp, session_id = handler.require_session()
         return handler.submit(
-            collect_on_session(cdp, session_id, events, duration),
+            collect_on_session(cdp, session_id, events, duration, handler.caller_enabled),
             timeout=duration + _COLLECTION_GRACE_SECONDS,
         )
 

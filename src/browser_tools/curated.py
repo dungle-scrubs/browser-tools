@@ -542,11 +542,19 @@ def storage_get(
 
     ``get_frame_storage`` reads the *selected* frame, and frame selection does
     not survive between one-shot CLI processes. ``--key`` names the frame to
-    read (a URL pattern), selected within this one invocation before the read;
-    omitting it surfaces the tool's own "No frame selected" error (exit 1).
+    read (a URL pattern), selected for this read alone; omitting it surfaces
+    the tool's own "No frame selected" error (exit 1).
+
+    The selection is borrowed and given back, because inside a Step Run it is
+    shared with every later step. See
+    :meth:`CDPHandler.borrowed_frame_selection`.
     """
-    with _handler_for(handler, instance, None, registry_path, endpoint) as handler:
+    with (
+        _handler_for(handler, instance, None, registry_path, endpoint) as handler,
+        contextlib.ExitStack() as scope,
+    ):
         if key:
+            scope.enter_context(handler.borrowed_frame_selection())
             _tool_or_raise(handler, "select_frame", {"url_pattern": key})
         text = _tool_or_raise(handler, "get_frame_storage", {})
     return {"storage": text}

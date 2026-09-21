@@ -48,14 +48,20 @@ class FakeCore:
     def __init__(self) -> None:
         self._connected = True
         self.subscribed: list[str] = []
+        #: Every command and subscription in the order it happened, so a test
+        #: can assert that a subscription preceded the enable that replays to
+        #: it rather than only that both occurred.
+        self.timeline: list[str] = []
 
     async def send(self, method, params=None, session_id=None, timeout=None):
+        self.timeline.append(method)
         if method == "Page.getFrameTree":
             return {"frameTree": {"frame": {"id": "F1", "url": "about:blank"}}}
         return {}
 
     def on(self, event, callback, session_id=None):
         self.subscribed.append(event)
+        self.timeline.append(f"on:{event}")
 
     def off(self, event, callback): ...
 
@@ -167,16 +173,49 @@ class TestAnOrdinaryFailureReadsLikeOne:
 
 
 class TestTheFrameEventsAreStillWired:
-    """The five subscriptions must survive every change above."""
+    """The subscriptions must survive every change above.
+
+    Seven now, not five. `Page.navigatedWithinDocument` because a single-page
+    app changes its URL without loading a document, and
+    `Runtime.executionContextsCleared` because without it every frame keeps a
+    context id that no longer exists.
+    """
 
     @pytest.mark.asyncio
-    async def test_all_five_are_registered(self, seam):
+    async def test_every_frame_event_is_registered(self, seam):
         runtime = CDPRuntime("http://127.0.0.1:9222")
         await _connect(runtime)
         assert set(runtime.client._client.subscribed) == {
             "Page.frameAttached",
             "Page.frameDetached",
             "Page.frameNavigated",
+            "Page.navigatedWithinDocument",
             "Runtime.executionContextCreated",
             "Runtime.executionContextDestroyed",
+            "Runtime.executionContextsCleared",
         }
+
+    @pytest.mark.asyncio
+    async def test_the_runtime_replay_lands_on_a_registered_handler(self, seam):
+        """`Runtime.enable` replays the contexts that already exist.
+
+        Enabling before subscribing threw that replay away, so every frame
+        kept `execution_context_id = None` and `storage get` returned cookies
+        only, with no localStorage or sessionStorage, and exit 0.
+        """
+        runtime = CDPRuntime("http://127.0.0.1:9222")
+        await _connect(runtime)
+        timeline = runtime.client._client.timeline
+        assert timeline.index("on:Runtime.executionContextCreated") < timeline.index(
+            "Runtime.enable"
+        ), (
+            "Runtime was enabled before its context handler was registered, so "
+            "the replay went nowhere and every frame kept no context id"
+        )
+        assert timeline.index("Page.getFrameTree") < timeline.index("Runtime.enable"), (
+            "Runtime was enabled before the frame tree existed, so the replayed "
+            "contexts had no frame to be filed against"
+        )
+        assert timeline.index("on:Page.frameNavigated") < timeline.index("Page.enable"), (
+            "Page was enabled before its handlers were registered"
+        )

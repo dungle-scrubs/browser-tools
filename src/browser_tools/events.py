@@ -319,6 +319,7 @@ async def wait_on_session(
     event: str,
     match: str | None,
     timeout: float,
+    keep: frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
     """Block on one CDP session for a matching event; SUBSCRIBE-FIRST.
 
@@ -352,7 +353,7 @@ async def wait_on_session(
         # Enabled for this wait and disabled after it, so the next step that
         # wants this domain still gets a first enable (RFC-03, "Domain-enable
         # state"). Events delivered during the enable are already buffered.
-        async with domains_enabled(cdp, session_id, [event.split(".")[0]]):
+        async with domains_enabled(cdp, session_id, [event.split(".")[0]], keep):
             deadline = None if timeout == 0 else time.monotonic() + timeout
             while True:
                 if deadline is None:
@@ -409,7 +410,7 @@ def wait(
         # `--timeout` is what bounds an otherwise unbounded step.
         cdp, session_id = handler.require_session()
         return handler.submit(
-            wait_on_session(cdp, session_id, event, match, timeout),
+            wait_on_session(cdp, session_id, event, match, timeout, handler.caller_enabled),
             timeout=None if timeout == 0 else timeout + _WAIT_GRACE_SECONDS,
         )
 

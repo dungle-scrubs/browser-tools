@@ -64,7 +64,7 @@ RUN_OWNED_DOMAINS = frozenset({"Page", "Runtime"})
 
 @contextlib.asynccontextmanager
 async def domains_enabled(
-    cdp: Any, session_id: str, domains: Iterable[str]
+    cdp: Any, session_id: str, domains: Iterable[str], keep: Iterable[str] = ()
 ) -> AsyncGenerator[None]:
     """Enable each domain for the body, then disable what this body turned on.
 
@@ -81,12 +81,24 @@ async def domains_enabled(
     code path is worth more than that millisecond: a rule that only applied
     inside a run would be a second behaviour to keep correct.
 
-    Two things are deliberately not undone here. Domains in
-    :data:`RUN_OWNED_DOMAINS`, per the rule above. And a domain the caller
-    enabled by hand in a raw passthrough step, which never reaches this
-    function: an enable the caller typed is that step's whole output, and
-    undoing it would make the step a no-op. A caller who turns a domain on by
-    hand turns it off by hand.
+    Three things are deliberately not undone here. Domains in
+    :data:`RUN_OWNED_DOMAINS`, per the rule above. Domains named in ``keep``,
+    which are the ones the caller turned on by hand in a raw step: an enable
+    the caller typed is that step's whole output, and undoing it would make
+    the step a no-op. And a domain whose enable failed, since there is
+    nothing to undo.
+
+    ``keep`` exists because CDP cannot answer the question this function
+    would otherwise have to ask. A second ``Network.enable`` succeeds exactly
+    like a first one, so the reply says nothing about who turned the domain
+    on. Without ``keep``, a `network-list` step after a raw `Network.enable`
+    step disabled the caller's domain on its way out.
+
+    That makes the two rules collide, and the precedence is stated rather
+    than left implicit: **the caller's enable wins**. The cost is that a
+    curated step after a hand-written enable does not get a first enable on
+    that domain, which is the same exception `Page` and `Runtime` already
+    carry. The alternative costs the caller a step that silently did nothing.
 
     Failures either way are suppressed. Some domains have no ``enable`` at
     all, which is why the enable path already ignored ``CDPError``; the
@@ -96,6 +108,7 @@ async def domains_enabled(
     would instead fail a step whose work had already succeeded, and from a
     ``finally``, where it would mask whatever the body raised.
     """
+    mine_to_undo = RUN_OWNED_DOMAINS | frozenset(keep)
     turned_on: list[str] = []
     try:
         for domain in dict.fromkeys(domains):
@@ -104,7 +117,7 @@ async def domains_enabled(
             except CDPError:
                 # No enable for this domain, so nothing to undo either.
                 continue
-            if domain not in RUN_OWNED_DOMAINS:
+            if domain not in mine_to_undo:
                 turned_on.append(domain)
         yield
     finally:
