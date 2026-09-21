@@ -132,13 +132,9 @@ def _handler_for(
 
     Every curated verb opens its own connection when called alone. Inside a
     Step Run the session is opened once and shared, so the run passes the
-    handler in and this yields it untouched: the run owns it and the run
-    closes it.
-
-    The alternative was a second entry point per verb, and RFC-03 rules that
-    out for the parser and the preconditions for the same reason it matters
-    here. One implementation per verb cannot drift from itself, so a step
-    behaves inside a run exactly as it does outside one.
+    handler in and this yields it untouched. Ownership decides teardown: a
+    handler passed in is never closed here, including when the body raises,
+    because the next step still needs it.
     """
     if handler is not None:
         yield handler
@@ -630,9 +626,12 @@ def screenshot(
     url: str | None = None,
     registry_path: str | None = None,
     endpoint: str | None = None,
-    handler: CDPHandler | None = None,
 ) -> dict[str, Any]:
     """Capture a page screenshot (frozen ``take_screenshot``, CDP-native form).
+
+    Takes no ``handler``: this verb runs over a One-Shot Session, not over a
+    ``CDPHandler``. A Step Run reaches it through
+    :func:`capture_on_session` on the session it already holds.
 
     ``--path`` writes the PNG to a file; without it the base64 ``data:`` URI is
     returned. ``--target``/``--url`` pick the page target, as on the passthrough

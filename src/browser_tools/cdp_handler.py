@@ -19,6 +19,14 @@ from .core.attach import AmbiguousTargetError, TargetNotFoundError
 
 logger = logging.getLogger(__name__)
 
+
+def _running_loop() -> asyncio.AbstractEventLoop | None:
+    """The loop on this thread, or None when this thread runs no loop."""
+    try:
+        return asyncio.get_running_loop()
+    except RuntimeError:
+        return None
+
 #: Connection failures that are outcomes rather than defects: no browser on
 #: the port, and a target spec that names no page or more than one. They get a
 #: one-line message; everything else keeps its traceback.
@@ -367,6 +375,10 @@ class CDPRuntime:
         try:
             if self._loop is None:
                 raise RuntimeError("the CDP runtime is not running")
+            if _running_loop() is self._loop:
+                # The loop would have to run this coroutine and wait for it at
+                # the same time. It cannot, so the wait never ends.
+                raise RuntimeError("submit was called from the runtime's own loop")
             future = asyncio.run_coroutine_threadsafe(coro, self._loop)
         except BaseException:
             # Nothing took ownership of the coroutine, so nothing will ever
@@ -375,7 +387,17 @@ class CDPRuntime:
             # failed.
             coro.close()
             raise
-        return future.result(timeout=timeout)
+
+        try:
+            return future.result(timeout=timeout)
+        except BaseException:
+            # The wait ended; the coroutine did not. Abandoning it leaves work
+            # running on the session the next step is about to use, and on the
+            # one teardown is about to close. Cancelling reaches the coroutine
+            # and runs its cleanup. What it already sent to the browser was
+            # sent; this stops what has not happened yet.
+            future.cancel()
+            raise
 
     @property
     def mode(self) -> str:

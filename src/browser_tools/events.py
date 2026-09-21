@@ -343,14 +343,19 @@ async def wait_on_session(
     # below, so the handler is live before any event can be delivered.
     cdp.on(event=event, callback=handler, session_id=session_id)
 
-    domain = event.split(".")[0]
-    with contextlib.suppress(CDPError):
-        # Some domains have no enable; a CDP error here must not abort the
-        # wait. Events delivered during this await are already buffered.
-        await cdp.send(method=f"{domain}.enable", session_id=session_id)
-
-    deadline = None if timeout == 0 else time.monotonic() + timeout
+    # The cleanup scope opens here, not after the enable. `suppress` catches
+    # `CDPError` and nothing else, so a dropped connection during the enable
+    # leaves this function by an exception. Outside a Step Run the process
+    # ends and the leaked subscription with it; on a shared session it stays
+    # registered and keeps pushing into a queue nobody reads.
     try:
+        domain = event.split(".")[0]
+        with contextlib.suppress(CDPError):
+            # Some domains have no enable; a CDP error here must not abort the
+            # wait. Events delivered during this await are already buffered.
+            await cdp.send(method=f"{domain}.enable", session_id=session_id)
+
+        deadline = None if timeout == 0 else time.monotonic() + timeout
         while True:
             if deadline is None:
                 item = await buffer.get()
