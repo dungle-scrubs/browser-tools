@@ -195,6 +195,31 @@ class TestTheInvocationOwnsSomeFlags:
             validate("snapshot --target=1\n")
         assert "--target" in str(caught.value)
 
+    @pytest.mark.parametrize(
+        ("step", "flag"),
+        [
+            ("snapshot --targ 1", "--target"),
+            ("snapshot --t 1", "--target"),
+            ("snapshot --end http://127.0.0.1:9222", "--endpoint"),
+            ("console-list --u example", "--url"),
+        ],
+    )
+    def test_an_abbreviated_flag_is_caught_too(self, step, flag, no_instances):
+        """`argparse` accepts any unambiguous prefix of a long option.
+
+        A scan of the raw tokens sees `--targ` and finds nothing to refuse,
+        while `argparse` sets `target` from it. The step would then drive a
+        different page, or with `--end`, a different browser.
+        """
+        with pytest.raises(StepListError) as caught:
+            validate(step + "\n")
+        assert flag in str(caught.value)
+
+    def test_an_abbreviated_flag_on_a_passthrough_step_is_caught(self, no_instances):
+        """No argparse here, so the arity rule is what catches it."""
+        with pytest.raises(StepListError):
+            validate("Page.navigate '{}' --targ 1\n")
+
     def test_a_step_may_not_name_an_instance(self, one_instance):
         with pytest.raises(StepListError) as caught:
             validate("only-01 snapshot\n")

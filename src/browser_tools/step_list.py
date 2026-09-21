@@ -185,15 +185,43 @@ def _check_not_an_instance(argv: list[str], line: int, known: set[str]) -> None:
         )
 
 
+def _refuse_invocation_flag(flag: str, line: int) -> StepListError:
+    return _at(
+        line,
+        f"a step must not carry {flag}: "
+        "the run opens one connection to one page, before step 1",
+    )
+
+
 def _check_no_invocation_flags(argv: list[str], line: int) -> None:
+    """Reject the flags the invocation owns, before the step is parsed.
+
+    Scanning tokens catches only what the caller typed in full. It is here
+    for the passthrough step, which never reaches ``argparse``, and for a
+    message that names the flag as written. The authoritative check for a
+    curated verb is ``_check_nothing_was_retargeted`` below, on the parsed
+    result.
+    """
     for token in argv:
         flag = token.split("=", 1)[0]
         if flag in INVOCATION_FLAGS:
-            raise _at(
-                line,
-                f"a step must not carry {flag}: "
-                "the run opens one connection to one page, before step 1",
-            )
+            raise _refuse_invocation_flag(flag, line)
+
+
+def _check_nothing_was_retargeted(args: argparse.Namespace, line: int) -> None:
+    """Reject an invocation flag by what ``argparse`` produced, not by spelling.
+
+    ``argparse`` accepts any unambiguous prefix of a long option, so
+    ``--targ 1`` sets ``target`` and ``--end URL`` sets ``endpoint`` while a
+    scan for the full flag name sees neither. Left to the scan alone, a step
+    could silently drive a different page, or a different browser.
+
+    Reading the namespace is immune to the spelling: whatever the caller
+    wrote, this is what the step would have used.
+    """
+    for attribute, flag in (("target", "--target"), ("url", "--url"), ("endpoint", "--endpoint")):
+        if getattr(args, attribute, None) is not None:
+            raise _refuse_invocation_flag(flag, line)
 
 
 def _validate_passthrough(argv: list[str], line: int) -> tuple[str, dict[str, Any] | None]:
@@ -255,6 +283,7 @@ def validate(text: str, registry_path: str | None = None) -> list[Step]:
 
         if head in STEP_VERBS:
             args = _parse_with_cli_parser(argv, line)
+            _check_nothing_was_retargeted(args, line)
             if getattr(args, "instance", None) is not None:
                 raise _at(
                     line,
