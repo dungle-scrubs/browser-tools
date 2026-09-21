@@ -12,6 +12,7 @@ the CLI path no longer exist (#92). Submodule imports
 
 from __future__ import annotations
 
+from importlib import metadata as _metadata
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -24,7 +25,14 @@ __all__ = [
     "FrameManager",
     "__version__",
 ]
-__version__ = "0.1.0"
+# Read from the installed distribution rather than hardcoded here. A second
+# copy of the version has to be remembered at release time, and was not: this
+# line read "0.1.0" through the 0.2.0 and 0.3.0 releases. The fallback covers
+# a source tree that was never installed, where no distribution exists to ask.
+try:
+    __version__ = _metadata.version("browser-tools")
+except _metadata.PackageNotFoundError:  # running from a source checkout
+    __version__ = "0.0.0+unknown"
 
 # Re-exported name -> submodule that defines it. Kept out of module import time
 # so ``websockets`` loads on first access, not on ``import browser_tools``.
