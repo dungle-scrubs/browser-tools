@@ -199,13 +199,17 @@ class TestCamoufoxRegistration:
         assert row["engine"] == "camoufox"
         assert row["targets"] == []
 
-    def test_unbound_camoufox_gets_ephemeral_dir(self, registry_path, monkeypatch):
+    def test_unbound_camoufox_gets_ephemeral_dir(self, registry_path, monkeypatch, tmp_path):
+        """And it is outside the profile root, which is now durable (#81)."""
+        ephemeral = tmp_path / "ephemeral"
+        monkeypatch.setattr(lifecycle, "EPHEMERAL_ROOT", str(ephemeral))
         monkeypatch.setattr(
             lifecycle, "_spawn_camoufox_process", lambda user_data_dir, headless: (6262, "tok")
         )
         inst = lifecycle.launch(engine="camoufox", registry_path=registry_path)
         assert inst.profile is None
-        assert ".ephemeral" in inst.user_data_dir
+        assert inst.user_data_dir.startswith(str(ephemeral))
+        assert not Path(inst.user_data_dir).is_relative_to(lifecycle.profiles_root())
 
 
 # ---------------------------------------------------------------------------

@@ -13,6 +13,15 @@ glossary rather than left to name code that does not exist.
   a name derived from the working directory. Liveness is engine-aware:
   Chrome is process identity plus CDP port attribution, Camoufox is process
   identity plus a user-data-dir hold. Never PID existence alone.
+- **Profile Root** - the durable directory holding every named profile,
+  resolved as `$BROWSER_TOOLS_PROFILES_DIR`, else
+  `$XDG_DATA_HOME/browser-tools/profiles`, else
+  `~/.local/share/browser-tools/profiles`, with an empty value falling through.
+  It was `/tmp/browser-tools-profiles` until RFC-01 v6, where the operating
+  system deleted every login at boot. The registry stays in `/tmp`; a cleared
+  registry after a reboot is self-consistent, because no browser survives one.
+  Unbound Camoufox session dirs live outside the root, so nothing throwaway
+  lands in durable storage.
 - **Named Profile** - a login-bearing user-data-dir selected by
   `launch --profile NAME`, living under the profile root and reused across
   restarts. Unaffected by headed/headless switches, viewport, or the
