@@ -426,3 +426,70 @@ class TestTheFramesOfThePageYouLeft:
         assert manager.get_selected_frame() is None, (
             "the selection still points into the page we navigated away from"
         )
+
+
+class TestAStepCannotTurnOffWhatTheRunOwns:
+    """The RFC's "a caller undoes their own enable" rule does not cover this.
+
+    `Page.disable` is not undoing an enable the caller wrote. It turns off a
+    domain the run owns, and the run never learns anything again. Measured
+    before the refusal, against a real browser, with a run whose step 2 was
+    `Page.disable '{}'`:
+
+    - step 3 navigated to a page with no iframe;
+    - step 5 `frames list` reported the page the run had left, iframe and all;
+    - step 6 `storage get` read a frame that no longer existed and succeeded;
+    - the run exited 0.
+
+    Nothing failed, so nothing told the caller. That is the failure the rest
+    of this module exists to prevent, reachable in one line.
+    """
+
+    @pytest.mark.parametrize("domain", sorted(RUN_OWNED_DOMAINS))
+    def test_disabling_a_run_owned_domain_is_refused(self, domain, monkeypatch):
+        from browser_tools import step_list
+
+        monkeypatch.setattr("browser_tools.lifecycle.read_instances", lambda registry_path=None: [])
+        with pytest.raises(step_list.StepListError) as exc:
+            step_list.validate(f"snapshot\n{domain}.disable\n")
+        assert "line 2" in str(exc.value)
+        assert "cannot be a step" in str(exc.value)
+
+    @pytest.mark.parametrize("domain", sorted(RUN_OWNED_DOMAINS))
+    def test_the_refusal_names_a_remedy_that_works(self, domain, monkeypatch):
+        """RFC-01: every refusal names a remedy, and the remedy must work."""
+        from browser_tools import step_list
+
+        monkeypatch.setattr("browser_tools.lifecycle.read_instances", lambda registry_path=None: [])
+        with pytest.raises(step_list.StepListError) as exc:
+            step_list.validate(f"{domain}.disable\n")
+        assert "on its own, outside a run" in str(exc.value)
+
+    def test_nothing_runs_when_a_step_list_contains_one(self, monkeypatch, tmp_path):
+        from browser_tools import curated, step_list, step_run
+
+        def refuse(*args, **kwargs):
+            raise AssertionError("the run connected before refusing Page.disable")
+
+        monkeypatch.setattr(curated, "run_session", refuse)
+        monkeypatch.setattr("browser_tools.lifecycle.read_instances", lambda registry_path=None: [])
+        source = tmp_path / "steps.txt"
+        source.write_text("snapshot\nPage.disable\nsnapshot\n")
+        with pytest.raises(step_list.StepListError):
+            step_run.run(instance=None, source=str(source), registry_path=None)
+
+    @pytest.mark.parametrize("domain", sorted(RUN_OWNED_DOMAINS))
+    def test_enabling_one_by_hand_is_still_allowed(self, domain, monkeypatch):
+        """Only the disable is refused. A redundant enable harms nothing."""
+        from browser_tools import step_list
+
+        monkeypatch.setattr("browser_tools.lifecycle.read_instances", lambda registry_path=None: [])
+        steps = step_list.validate(f"{domain}.enable\n")
+        assert steps[0].as_method()[0] == f"{domain}.enable"
+
+    def test_another_domain_may_be_disabled_by_hand(self):
+        """A domain the caller turned on is the caller's to turn off."""
+        from browser_tools import step_list
+
+        steps = step_list.validate("Network.disable\n")
+        assert steps[0].as_method()[0] == "Network.disable"

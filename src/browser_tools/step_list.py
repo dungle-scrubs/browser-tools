@@ -35,6 +35,7 @@ from typing import TYPE_CHECKING, Any
 
 from . import endpoint as endpoint_module
 from . import lifecycle, passthrough
+from .one_shot import RUN_OWNED_DOMAINS
 from .usage import UsageError
 
 if TYPE_CHECKING:
@@ -294,6 +295,18 @@ def _validate_passthrough(
             endpoint_module.refuse_browser_lifetime_method(method)
         except UsageError as exc:
             raise _at(line, str(exc)) from exc
+
+    domain, _, call = method.partition(".")
+    if call == "disable" and domain in RUN_OWNED_DOMAINS:
+        raise _at(
+            line,
+            f"{method} cannot be a step: a run keeps {domain} enabled throughout "
+            "to track frames, and turning it off breaks every step after this "
+            "one without failing any of them. Measured: with Page disabled, a "
+            "navigation went unseen, 'frames list' reported the page the run "
+            f"had left, and 'storage get' read a frame that no longer existed "
+            f"and exited 0. Run '{method}' on its own, outside a run.",
+        )
 
     try:
         # The return value is the point, not just the refusal: for

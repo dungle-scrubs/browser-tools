@@ -244,7 +244,10 @@ RUNNING MANY STEPS IN ONE INVOCATION
 
       A raw step you write yourself is yours to undo. `Network.enable {}`
       stays on until a later step turns it off; the rule above covers only the
-      domains a verb turns on for you.
+      domains a verb turns on for you. The two exceptions are the run's own:
+      `Page.disable` and `Runtime.disable` are usage errors as steps (exit 2),
+      because turning either off breaks every step after it without failing
+      any of them. Run either on its own, outside a run.
 
       UIDS ARE UNCHANGED. A UID is still valid until the page navigates, no
       longer and no shorter. One process does not extend it. Because no step can
