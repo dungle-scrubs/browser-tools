@@ -33,6 +33,7 @@ import shlex
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from . import endpoint as endpoint_module
 from . import lifecycle, passthrough
 from .usage import UsageError
 
@@ -81,6 +82,10 @@ EXCLUDED_VERBS: dict[str, str] = {
     "window-border": "it does not drive the attached browser",
     "guide": "it does not drive the attached browser",
     "help": "it does not drive the attached browser",
+    "run": (
+        "a Step List is data, not code: a run inside a run would be nesting, "
+        "and nesting is control flow. Put the steps in one list"
+    ),
 }
 
 #: Flags the invocation owns. A step carrying one is a usage error: the
@@ -109,9 +114,35 @@ class Step:
     #: The passthrough step's params, already parsed from JSON.
     params: dict[str, Any] | None = None
 
+    def __post_init__(self) -> None:
+        """Exactly one of ``args`` and ``method`` is set.
+
+        A step is a curated verb or a raw CDP method, never both and never
+        neither. Checked here so the two accessors below can promise what
+        they return, instead of every caller re-testing it and one of them
+        getting it wrong.
+        """
+        if (self.args is None) == (self.method is None):
+            raise ValueError(
+                f"step {self.number} must carry either a parsed verb or a CDP method, "
+                f"not {'both' if self.args is not None else 'neither'}"
+            )
+
     @property
     def is_passthrough(self) -> bool:
         return self.method is not None
+
+    def as_verb(self) -> argparse.Namespace:
+        """The parsed namespace, for a curated step."""
+        if self.args is None:
+            raise ValueError(f"step {self.number} is a raw CDP step, not a verb")
+        return self.args
+
+    def as_method(self) -> tuple[str, dict[str, Any] | None]:
+        """``(method, params)``, for a raw CDP step."""
+        if self.method is None:
+            raise ValueError(f"step {self.number} is a verb, not a raw CDP step")
+        return self.method, self.params
 
 
 class StepListError(UsageError):
@@ -227,13 +258,22 @@ def _check_nothing_was_retargeted(args: argparse.Namespace, line: int) -> None:
             raise _refuse_invocation_flag(flag, line)
 
 
-def _validate_passthrough(argv: list[str], line: int) -> tuple[str, dict[str, Any] | None]:
+def _validate_passthrough(
+    argv: list[str], line: int, endpoint: str | None = None
+) -> tuple[str, dict[str, Any] | None]:
     """Check a ``Domain.method '{...}'`` step and return its method and params.
 
     The focus refusals are checked here rather than at the step, because they
     can be checked here: the method name and the params are both on the line.
     RFC-03 puts them in the exit-2 class for that reason, so a Step List
     containing one runs nothing at all.
+
+    ``endpoint`` is the run's, not the step's. RFC-03 reasoned that the
+    ``Browser.close`` and ``Browser.crash`` refusals were unreachable inside a
+    run because a step cannot carry ``--endpoint``. That was wrong: the run
+    carries it, and every step is attached to that external browser. Without
+    this, ``bt run steps --endpoint URL`` with ``Browser.close`` on a line
+    closed a browser the tool does not own, where the bare invocation refuses.
     """
     if len(argv) > 2:
         raise _at(line, f"'{argv[0]}' takes at most one JSON params argument")
@@ -249,6 +289,12 @@ def _validate_passthrough(argv: list[str], line: int) -> tuple[str, dict[str, An
             raise _at(line, "params must be a JSON object")
         params = decoded
 
+    if endpoint is not None:
+        try:
+            endpoint_module.refuse_browser_lifetime_method(method)
+        except UsageError as exc:
+            raise _at(line, str(exc)) from exc
+
     try:
         # The return value is the point, not just the refusal: for
         # `Target.createTarget` it adds `background: true`, which is what keeps
@@ -261,7 +307,9 @@ def _validate_passthrough(argv: list[str], line: int) -> tuple[str, dict[str, An
     return method, params
 
 
-def validate(text: str, registry_path: str | None = None) -> list[Step]:
+def validate(
+    text: str, registry_path: str | None = None, endpoint: str | None = None
+) -> list[Step]:
     """Parse a Step List and return its steps, or raise ``StepListError``.
 
     The registry is read once, here, and the whole run uses the result. It is
@@ -305,7 +353,7 @@ def validate(text: str, registry_path: str | None = None) -> list[Step]:
 
         if lifecycle.looks_like_domain_method(head):
             _check_no_invocation_flags(argv, line)
-            method, params = _validate_passthrough(argv, line)
+            method, params = _validate_passthrough(argv, line, endpoint)
             steps.append(
                 Step(
                     number=number,

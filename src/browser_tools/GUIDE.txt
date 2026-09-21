@@ -179,6 +179,78 @@ CURATED VERBS
       frames.
 
 
+RUNNING MANY STEPS IN ONE INVOCATION
+
+  run FILE [--timeout SECONDS]
+  run -    [--timeout SECONDS]
+      Run an ordered list of steps against one browser, in one invocation, over
+      one CDP connection. FILE is the list; `-` reads it from stdin. Takes
+      [INSTANCE] and --endpoint URL as above, and --target SPEC or --url
+      SUBSTRING to pick the page the whole run drives.
+
+      One step per line, each line a verb phrase exactly as you would type it
+      after the instance name. Blank lines and lines starting with # are
+      ignored. Lines are split the way a shell splits them, so quoting works as
+      it does at the prompt.
+
+          # select the checkout frame once, then read it twice
+          frames select checkout
+          storage get
+          Page.getNavigationHistory '{}'
+          snapshot
+
+      This is not a scripting language. There are no variables, no conditions,
+      no loops, and no way for one step to use another step's output. A run does
+      what the same commands would do one after another; it cannot decide
+      anything. Where you need a decision, read the output and run again.
+
+      A STEP IS A VERB, NOT AN INVOCATION. Steps may be: snapshot, click, fill,
+      wait-idle, wait-stable, wait, detect, console-list, network-list, frames,
+      storage get, screenshot, screencast, and any raw Domain.method. A step may
+      NOT name an instance, --endpoint, --target or --url: those belong to the
+      run, which resolves them once. attach is not a step (it runs until stdin
+      ends, so nothing could follow it), and neither are launch, status, stop,
+      cleanup, profile, window-border, guide, help or run itself. Any of these
+      in a step list is a usage error (exit 2).
+
+      FRAME SELECTION LASTS. `frames select` in one step governs the steps after
+      it, so `storage get` with no --key works inside a run.
+
+      EVERYTHING ELSE BEHAVES AS IT WOULD ALONE. A step inside a run does what
+      the same command does on its own.
+
+      UIDS ARE UNCHANGED. A UID is still valid until the page navigates, no
+      longer and no shorter. One process does not extend it. Because no step can
+      read another step's output, every UID in a step list is one you put there
+      from a snapshot you already read.
+
+      IT STOPS AT THE FIRST FAILURE, and nothing rolls back. A step that has run
+      has already reached the browser. Steps after the failure do not run.
+
+      --timeout SECONDS bounds the whole run; without it there is no whole-run
+      deadline, because every step already bounds itself. Use it when a step
+      opts out of its own bound, as `wait --timeout 0` does.
+
+      OUTPUT. One JSON document, on success and on failure alike: a `run` object
+      with the step count, how many completed, and the status; and a `steps`
+      array with one entry per step attempted, each carrying the JSON that step
+      would have printed alone. Steps never reached are absent.
+
+      READ IT IN THIS ORDER: the exit code, then `run.status`, then the steps.
+      A failed run still contains successful step entries, and each of those
+      carries exactly what that step prints on its own. If you parse the steps
+      without checking the exit code first, a run that died at step 7 reads
+      like a run that finished.
+
+      Exit 0   every step succeeded.
+      Exit 1   a step failed, or the run timed out. The document is still
+               printed, so you can see what already ran. This is the one verb
+               that prints on stdout when it exits 1.
+      Exit 2   the step list was malformed, or a step named an instance,
+               --endpoint, --target or --url. The whole list is checked before
+               the first step runs, so nothing ran.
+
+
 EVENT VERBS
 
   attach [INSTANCE] +Domain.event [+Domain.event ...]
@@ -504,6 +576,7 @@ OUTPUT AND EXIT CODES
   Exit 0   success.
   Exit 1   operational failure: the browser is gone, a CDP call failed, a
            deadline passed, a profile is held, a UID no longer resolves.
-           Nothing is printed on stdout.
+           Nothing is printed on stdout, except by `run`, which prints its
+           run document so you can see which steps already ran.
   Exit 2   usage error: the invocation was malformed or refused before
            anything happened. Nothing was sent, written or deleted.

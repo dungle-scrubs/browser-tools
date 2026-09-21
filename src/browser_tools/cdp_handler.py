@@ -11,6 +11,7 @@ import asyncio
 import base64
 import logging
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -295,6 +296,20 @@ assert set(_CDP_HANDLERS) == CDP_TOOLS, (
 )
 
 
+#: What a CDP call gets once a Step Run's deadline has passed. Enough for a
+#: step to undo what it started (stop a screencast, disable a domain), and
+#: not enough to carry on working past the deadline the caller set.
+DEADLINE_GRACE_SECONDS = 5.0
+
+#: The least any one call gets once even the grace is spent. A call handed
+#: zero fails before it is sent, which defeats the grace; a call handed this
+#: can still send a `Page.stopScreencast` and hear back.
+TEARDOWN_FLOOR_SECONDS = 0.25
+
+#: How long to wait on the one `Runtime.evaluate` behind the focus guard.
+VISIBILITY_READ_TIMEOUT_SECONDS = 5.0
+
+
 class CDPRuntime:
     """Owns the CDP background thread, event loop, WebSocket connection, frame
     manager, screencast recorder, and the thread-safe marshal methods the Daemon
@@ -308,12 +323,22 @@ class CDPRuntime:
     instead of sharing one class.
     """
 
+    # Declared on the class, not only in `__init__`, so every runtime reaching
+    # `bounded_timeout` has them. Tests build a runtime with `__new__` to drive
+    # one method without a browser behind it, and a bound that is only an
+    # instance attribute raises `AttributeError` there instead of returning the
+    # caller's own timeout.
+    _target_by: str | None = None
+    _deadline: float | None = None
+    _grace_until: float | None = None
+
     def __init__(
         self,
         browser_url: str | None,
         mode: str = "full",
         stealth: bool = False,
         target_spec: str | None = None,
+        target_by: str | None = None,
     ) -> None:
         """Initialize the CDP runtime.
 
@@ -334,6 +359,7 @@ class CDPRuntime:
         self._mode = mode
         self._stealth = stealth
         self._target_spec = target_spec
+        self._target_by = target_by
         self._loop: asyncio.AbstractEventLoop | None = None
         self._ready = threading.Event()
         self._stop_event: asyncio.Event | None = None
@@ -343,6 +369,12 @@ class CDPRuntime:
         # a Step Run shares it (RFC-03), so it cannot be scoped to one command.
         self._sessions: Any = None
         self._connect_error: str | None = None
+        # A Step Run's whole-run deadline, as a monotonic instant. Every wait
+        # on this runtime clamps to what is left of it, so the run's
+        # `--timeout` reaches the step in flight instead of only being
+        # checked between steps.
+        self._deadline: float | None = None
+        self._grace_until: float | None = None
         # Screencast capture state machine (Page.startScreencast buffer, ack,
         # write-to-dir). Owned here so the screencast tool handlers stay
         # two-line delegators.
@@ -365,6 +397,55 @@ class CDPRuntime:
             return None
         return self._cdp_client.raw, self._cdp_client.session_id
 
+    def set_deadline(self, deadline: float | None) -> None:
+        """Bound every later wait on this runtime by one monotonic instant."""
+        self._deadline = deadline
+        self._grace_until = None
+
+    @property
+    def deadline(self) -> float | None:
+        """The run's deadline, for a step that waits without a call in flight.
+
+        `bounded_timeout` can only shorten a wait that is waiting on CDP. A
+        step that polls locally, as the screencast capture does, has nothing
+        in flight to cut, so it reads the deadline and clamps its own.
+        """
+        return self._deadline
+
+    def bounded_timeout(self, timeout: float | None) -> float | None:
+        """``timeout`` clamped to what is left of the run's deadline.
+
+        A deadline bounds work, not teardown. Once it has passed, the call
+        being made is a step unwinding - and refusing that call leaves the
+        browser in whatever state the step was halfway through. A
+        `screencast` cut off at the deadline would never reach
+        `Page.stopScreencast`, so the capture it started would go on running
+        on a page nobody is watching. So a passed deadline returns a small
+        fixed budget rather than raising.
+
+        The run still stops, and not because of this method: the call that
+        was in flight when the deadline passed is cut short by its own
+        clamped bound, and `step_run.execute` checks the clock before it
+        starts each step.
+        """
+        if self._deadline is None:
+            return timeout
+        now = time.monotonic()
+        remaining = self._deadline - now
+        if remaining > 0:
+            return remaining if timeout is None else min(timeout, remaining)
+
+        # One budget for the whole unwind, opened by the first call after the
+        # deadline. Handing every call a fresh `DEADLINE_GRACE_SECONDS` would
+        # bound no call and the run together: a step making four calls while
+        # it unwinds could run four graces past a deadline the caller set.
+        if self._grace_until is None:
+            self._grace_until = now + DEADLINE_GRACE_SECONDS
+        left = self._grace_until - now
+        # Never zero. A call given no time at all fails before it is sent, and
+        # then the teardown this grace exists for does not happen either.
+        return max(left, TEARDOWN_FLOOR_SECONDS)
+
     def submit(self, coro: Any, timeout: float | None = None) -> Any:
         """Run one coroutine on this runtime's loop and return its result.
 
@@ -380,6 +461,7 @@ class CDPRuntime:
                 # The loop would have to run this coroutine and wait for it at
                 # the same time. It cannot, so the wait never ends.
                 raise RuntimeError("submit was called from the runtime's own loop")
+            bound = self.bounded_timeout(timeout)
             future = asyncio.run_coroutine_threadsafe(coro, self._loop)
         except BaseException:
             # Nothing took ownership of the coroutine, so nothing will ever
@@ -390,7 +472,7 @@ class CDPRuntime:
             raise
 
         try:
-            return future.result(timeout=timeout)
+            return future.result(timeout=bound)
         except BaseException:
             # The wait ended; the coroutine did not. Abandoning it leaves work
             # running on the session the next step is about to use, and on the
@@ -494,6 +576,8 @@ class CDPRuntime:
         ``--target`` to escape with. Both paths sort page targets by target
         ID, so index 1 is the page ``pages[0]`` was.
         """
+        if self._target_by is not None:
+            return self._target_spec or "", self._target_by
         if self._target_spec is None:
             return "1", "index"
         return self._target_spec, ("index" if self._target_spec.isdigit() else "id")
@@ -592,7 +676,9 @@ class CDPRuntime:
             self._await_paint_ready_async(timeout_ms), self._loop
         )
         try:
-            return future.result(timeout=(timeout_ms / 1000.0) + 2.0)
+            return future.result(
+                timeout=self.bounded_timeout((timeout_ms / 1000.0) + 2.0)
+            )
         except Exception:
             logger.debug("await_paint_ready timed out or failed", exc_info=True)
             return False
@@ -643,7 +729,9 @@ class CDPRuntime:
             )
 
         try:
-            result = asyncio.run_coroutine_threadsafe(_read(), loop).result(timeout=5)
+            result = asyncio.run_coroutine_threadsafe(_read(), loop).result(
+                timeout=self.bounded_timeout(VISIBILITY_READ_TIMEOUT_SECONDS)
+            )
         except Exception:
             logger.debug("page_visibility_state failed", exc_info=True)
             return None
@@ -677,7 +765,15 @@ class CDPRuntime:
 
         future = asyncio.run_coroutine_threadsafe(_run(), self._loop)
         try:
-            return future.result(timeout=detect_total_timeout(max_retries))
+            return future.result(
+                timeout=self.bounded_timeout(detect_total_timeout(max_retries))
+            )
+        except TimeoutError:
+            # Not swallowed into None. None means "no session to detect on",
+            # and reporting a run that ran out of time as a missing session
+            # sends the caller looking for a browser that is right there.
+            future.cancel()
+            raise
         except Exception:
             logger.debug("run_post_navigation_detection failed", exc_info=True)
             return None
@@ -700,6 +796,7 @@ class CDPHandler:
         mode: str = "full",
         stealth: bool = False,
         target_spec: str | None = None,
+        target_by: str | None = None,
     ) -> None:
         """Initialize the handler registry over a fresh CDP runtime.
 
@@ -710,7 +807,9 @@ class CDPHandler:
                 :class:`CDPRuntime`. No JavaScript is injected.
             target_spec: Which page to attach to; see :class:`CDPRuntime`.
         """
-        self._rt = CDPRuntime(browser_url, mode, stealth=stealth, target_spec=target_spec)
+        self._rt = CDPRuntime(
+            browser_url, mode, stealth=stealth, target_spec=target_spec, target_by=target_by
+        )
         # Tool name -> bound handler. Built from the class-level _CDP_HANDLERS
         # table, which is parity-checked against tool_registry.CDP_TOOLS above.
         self._handlers: dict[str, Any] = {
@@ -740,6 +839,15 @@ class CDPHandler:
     def session(self) -> tuple[Any, str] | None:
         """The runtime's ``(client, sessionId)``, or None before it connects."""
         return self._rt.session
+
+    def set_deadline(self, deadline: float | None) -> None:
+        """Bound every later wait on this handler; see :meth:`CDPRuntime.set_deadline`."""
+        self._rt.set_deadline(deadline)
+
+    @property
+    def deadline(self) -> float | None:
+        """The run's deadline; see :attr:`CDPRuntime.deadline`."""
+        return self._rt.deadline
 
     def require_session(self) -> tuple[Any, str]:
         """The runtime's ``(client, sessionId)``, or a refusal saying why not.
@@ -835,11 +943,13 @@ class CDPHandler:
 
         future = asyncio.run_coroutine_threadsafe(self._dispatch_tool(name, arguments), self._loop)
         try:
-            return future.result(timeout=REQUEST_TIMEOUT_SECONDS)
+            return future.result(timeout=self._rt.bounded_timeout(REQUEST_TIMEOUT_SECONDS))
         except Exception as exc:
             logger.warning("call_tool(%s) error: %s", name, exc)
             future.cancel()
-            return make_error(str(exc))
+            # A bare TimeoutError stringifies to "", which would reach the
+            # caller as the word "Error" and nothing else.
+            return make_error(str(exc) or f"{name} did not answer in time")
 
     def call_native(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         """Execute a native snapshot/UID tool on the CDP loop (thread-safe).
@@ -864,11 +974,13 @@ class CDPHandler:
             self._dispatch_native(name, arguments), self._loop
         )
         try:
-            return future.result(timeout=REQUEST_TIMEOUT_SECONDS)
+            return future.result(timeout=self._rt.bounded_timeout(REQUEST_TIMEOUT_SECONDS))
         except Exception as exc:
             logger.warning("call_native(%s) error: %s", name, exc)
             future.cancel()
-            return make_error(str(exc))
+            # A bare TimeoutError stringifies to "", which would reach the
+            # caller as the word "Error" and nothing else.
+            return make_error(str(exc) or f"{name} did not answer in time")
 
     def mark_native_navigation(self) -> None:
         """Invalidate the native snapshot's UIDs after a navigation.

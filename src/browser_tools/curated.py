@@ -120,6 +120,44 @@ def _resolve_port(
 # ---------------------------------------------------------------------------
 
 
+def target_selector(target: str | None, url: str | None) -> tuple[str | None, str | None]:
+    """``(spec, by)`` for :class:`CDPHandler`, from ``--target`` / ``--url``.
+
+    One derivation, because two would drift: `--target 1` is an index and
+    `--target A1B2` is an id, and a caller that got that test wrong would
+    attach to the wrong page rather than fail. Raises ``UsageError`` (exit 2)
+    when both name the page, since they fill the same slot.
+    """
+    if target is not None and url is not None:
+        raise UsageError("cannot specify both --target and --url")
+    if target is not None:
+        return target, ("index" if target.isdigit() else "id")
+    if url is not None:
+        return url, "url"
+    return None, None
+
+
+@contextlib.contextmanager
+def run_session(
+    instance: str | None,
+    target: str | None,
+    url: str | None,
+    registry_path: str | None,
+    endpoint: str | None,
+) -> Generator[CDPHandler]:
+    """The one session a Step Run holds for all of its steps.
+
+    A run resolves the instance and the page once, before step 1, so this is
+    the only place either is read. Every step then runs over what this
+    yields; nothing below opens a second connection.
+    """
+    spec, by = target_selector(target, url)
+    port = _resolve_port(instance, registry_path, endpoint)
+    with _cdp_handler_session(port, spec, by, external=endpoint is not None) as handler:
+        yield handler
+
+
+
 @contextlib.contextmanager
 def _handler_for(
     handler: CDPHandler | None,
@@ -146,7 +184,11 @@ def _handler_for(
 
 @contextlib.contextmanager
 def _cdp_handler_session(
-    port: int, target_spec: str | None = None, *, external: bool = False
+    port: int,
+    target_spec: str | None = None,
+    target_by: str | None = None,
+    *,
+    external: bool = False,
 ) -> Generator[CDPHandler]:
     """Yield a connected one-shot :class:`CDPHandler`, then tear it down.
 
@@ -165,7 +207,9 @@ def _cdp_handler_session(
     there is no registry entry to compare against and no ``bt status`` row to
     look the browser up in (#97).
     """
-    handler = CDPHandler(f"http://127.0.0.1:{port}", mode="full", target_spec=target_spec)
+    handler = CDPHandler(
+        f"http://127.0.0.1:{port}", mode="full", target_spec=target_spec, target_by=target_by
+    )
     thread = threading.Thread(target=handler.run, name="curated-cdp", daemon=True)
     thread.start()
     deadline = time.monotonic() + HANDLER_CONNECT_TIMEOUT_SECONDS
@@ -410,7 +454,13 @@ def detect(
     if wait_seconds is not None:
         max_retries = max(0, math.ceil(wait_seconds / INTERSTITIAL_RETRY_DELAY_SECONDS))
     with _handler_for(handler, instance, None, registry_path, endpoint) as handler:
-        result = handler.run_post_navigation_detection(max_retries)
+        try:
+            result = handler.run_post_navigation_detection(max_retries)
+        except TimeoutError as exc:
+            # Exit 1 either way, but the reason has to be the real one: alone
+            # this is detection outrunning its own budget, and inside a run it
+            # is the run's deadline, which the engine reads off the clock.
+            raise LifecycleError("interstitial detection did not finish in time") from exc
     if result is None:
         raise LifecycleError("interstitial detection unavailable (no CDP session)")
     detections = result.get("detections", [])
@@ -563,8 +613,17 @@ def _capture_for(handler: CDPHandler, duration: float, max_frames: int) -> int:
     Returns as soon as the buffer is full rather than waiting out ``duration``:
     once ``max_frames`` is reached the recorder stops acking, so CDP flow
     control pauses the stream and no further frame can arrive.
+
+    Inside a Step Run it also stops at the run's deadline. This loop waits in
+    the calling thread with nothing in flight, so it is the one wait
+    ``bounded_timeout`` cannot reach, and without this a `--timeout 3` run
+    would sit through a `--duration 20` capture. The frames already buffered
+    are kept and written: the capture did happen, and a run that stops does
+    not undo what its steps already did.
     """
     deadline = time.monotonic() + duration
+    if handler.deadline is not None:
+        deadline = min(deadline, handler.deadline)
     while time.monotonic() < deadline:
         if handler.screencast_frame_count >= max_frames:
             break
@@ -641,24 +700,14 @@ def screenshot(
     line. Target-resolution and CDP failures become ``LifecycleError`` (exit 1),
     via ``@cli_cdp_errors``.
     """
-    if target is not None and url is not None:
-        raise UsageError("cannot specify both --target and --url")
+    target_selector(target, url)  # refuses --target with --url, before anything opens
 
     if handler is not None:
         cdp, session_id = handler.require_session()
         data = handler.submit(capture_on_session(cdp, session_id))
     else:
         port = _resolve_port(instance, registry_path, endpoint)
-
-        spec: str | None = None
-        target_by: str | None = None
-        if target is not None:
-            spec = target
-            target_by = "index" if target.isdigit() else "id"
-        elif url is not None:
-            spec = url
-            target_by = "url"
-
+        spec, target_by = target_selector(target, url)
         data = asyncio.run(
             _capture_screenshot(port, spec, target_by, external=endpoint is not None)
         )
