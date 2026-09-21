@@ -1,53 +1,30 @@
 """The handler's client, backed by an attached Target session.
 
-RFC-03 requires a Step Run to hold one browser-level CDP connection with one
-flattened ``Target`` session, and requires the run's **CDPRuntime, and
-therefore its frame manager, to be built over that attached session** rather
-than over a page-level WebSocket. That is a change to how ``CDPHandler``
-connects, and the RFC states it as a contract requirement without phasing.
-This module is the first phase of meeting it.
+RFC-03 requires the run's **CDPRuntime**, and therefore its frame manager, to
+sit on one flattened ``Target`` session of one browser-level CDP connection.
+``AttachedSessionClient`` is what puts it there: it presents
+``cdp_client.CDPClient``'s surface over ``core.cdp_client.CDPClient``, so what
+a caller sends is unchanged and where it is sent changes.
 
-Why an adapter rather than a rewrite
-------------------------------------
-Two clients exist and they are not interchangeable:
+Three properties the callers depend on, none of which the core client gives
+on its own:
 
-- ``cdp_client.CDPClient`` opens a **page-level** socket, sends with no
-  ``sessionId``, and registers event handlers with no session filter. The
-  handler and everything under it use this one.
-- ``core.cdp_client.CDPClient`` opens a **browser-level** socket and carries a
-  ``sessionId`` on every send and every event. ``one_shot_page_session`` uses
-  this one.
+- **Session scope.** Every send carries the session, and every subscription
+  filters on it. A browser-level connection sees every attached target's
+  events; ``core/cdp_client.py`` delivers one only when the subscriber's
+  filter session matches.
+- **A bounded command.** The core client defaults to no deadline. ``send``
+  asks it for 30 seconds, the bound the page-level client always applied. The
+  bound is passed down, not wrapped around the call: only the core ``send``
+  knows the message id, so only it can retire the pending entry when the wait
+  ends early. A ``wait_for`` out here leaves the entry behind, and the late
+  response lands on a cancelled future and kills the receive loop.
+- **One exception type.** ``cdp_handler`` and ``screencast`` catch
+  ``cdp_client.CDPError``. The core client raises ``core.errors.CDPError``, an
+  unrelated class, and a bare ``ConnectionError``. Both are translated.
 
-The difference is not cosmetic. ``core/cdp_client.py`` dispatches an event to
-a callback only when the callback's filter session is ``None`` or equal to the
-event's ``sessionId``, so a page-level connection and a session-filtered
-subscriber never meet.
-
-Converging them by threading a ``session_id`` through the handler would touch
-about forty call sites across ``cdp_handler``, ``frame_manager``,
-``screencast``, ``curated`` and ``interstitial``, in one change, with no
-intermediate state that runs. This class instead presents the page-level
-client's surface over the browser-level one, so the call sites do not move and
-the transport underneath them does. What each caller sends is unchanged; where
-it is sent changes.
-
-What this preserves deliberately
---------------------------------
-- **The command timeout.** ``core.cdp_client.CDPClient.send`` defaults to no
-  deadline, so a command Chrome never answers hangs forever. The page-level
-  client bounds every command at 30 seconds. ``send`` here asks the core
-  client for that bound on every command.
-
-  The bound is passed down rather than applied with a ``wait_for`` around the
-  call, and that is not a style choice. Only the core client's ``send`` knows
-  the message id, so only it can retire the pending entry when the wait ends
-  early. A ``wait_for`` out here leaves the entry behind, and the late
-  response then lands on a cancelled future and takes the receive loop with
-  it.
-- **The exception type.** ``cdp_handler`` and ``screencast`` both catch
-  ``cdp_client.CDPError``. The core client raises ``core.errors.CDPError``,
-  an unrelated class, and a ``ConnectionError`` when the socket is gone. Both
-  are translated, so every existing ``except CDPError`` still fires.
+Ownership: ``one_shot_page_session`` opens the connection and the session and
+closes both. This object closes neither.
 """
 
 from __future__ import annotations
@@ -63,26 +40,20 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-#: Matches ``cdp_client.CDPClient``'s default. A command that never returns is
-#: a hung invocation, and the page-level client has always bounded it.
+#: Matches ``cdp_client.CDPClient``'s default.
 DEFAULT_TIMEOUT_SECONDS = 30.0
 
 
 class AttachedSessionClient:
-    """``cdp_client.CDPClient``'s surface over one attached Target session.
-
-    Wraps a connected ``core.cdp_client.CDPClient`` and the ``sessionId`` of a
-    flattened ``Target`` session on it. Every send carries that session, and
-    every event subscription filters on it.
-
-    The lifetime of the connection and the session belongs to whoever opened
-    them, which is ``one_shot_page_session``. This object never closes either.
-    """
+    """``cdp_client.CDPClient``'s surface over one attached Target session."""
 
     def __init__(self, client: CoreCDPClient, session_id: str) -> None:
         self._client = client
         self._session_id = session_id
         self._closed = False
+        # Every handler this client registered, in order, so `off` can hand
+        # the core client back the same object it was given. See `off`.
+        self._subscriptions: list[tuple[str, Any]] = []
 
     @property
     def session_id(self) -> str:
@@ -91,12 +62,7 @@ class AttachedSessionClient:
 
     @property
     def connected(self) -> bool:
-        """Whether the underlying connection is usable.
-
-        ``CDPHandler.available`` reads this, and ``curated`` polls that to
-        decide the handler came up, so it has to mean the same thing it did
-        on the page-level client.
-        """
+        """Whether the underlying connection is usable."""
         return not self._closed and bool(getattr(self._client, "_connected", False))
 
     async def send(
@@ -107,10 +73,8 @@ class AttachedSessionClient:
     ) -> dict[str, Any]:
         """Send one command over the attached session and return its result.
 
-        Signature and return shape match ``cdp_client.CDPClient.send``, so the
-        call sites do not change. ``CDPError`` is raised for a protocol error,
-        a lost connection, and a timeout, because that is the one exception
-        those call sites catch.
+        Raises ``CDPError`` for a protocol error, a lost connection and a
+        timeout alike.
         """
         if self._closed:
             raise CDPError("Not connected to Chrome CDP")
@@ -130,25 +94,30 @@ class AttachedSessionClient:
             raise CDPError(f"Failed to send CDP command: {exc}") from exc
 
     def on(self, event: str, handler: Any) -> None:
-        """Subscribe to an event on this session only.
-
-        The session filter is the whole point: without it a subscriber on a
-        browser-level connection would also see the same event from every
-        other attached target.
-        """
+        """Subscribe to an event on this session only."""
+        self._subscriptions.append((event, handler))
         self._client.on(event, handler, session_id=self._session_id)
 
     def off(self, event: str, handler: Any) -> None:
-        """Unsubscribe. A handler that was never registered is ignored."""
+        """Unsubscribe. A handler that was never registered is ignored.
+
+        Matching is by equality, which is what the page-level client did and
+        what callers rely on. The core client matches by identity, and
+        ``obj.method`` builds a fresh bound method on every access: equal to
+        the one registered, never the same object. ``ScreencastRecorder``
+        subscribes with ``self.on_frame`` and unsubscribes with
+        ``self.on_frame``, so identity matching would leave the subscription
+        in place and a reused recorder would double every frame.
+        """
+        for index, (registered_event, registered) in enumerate(self._subscriptions):
+            if registered_event == event and registered == handler:
+                del self._subscriptions[index]
+                self._client.off(event, registered)
+                return
         self._client.off(event, handler)
 
     async def disconnect(self) -> None:
-        """Mark this client unusable without touching the connection.
-
-        The connection and the session are owned by the context manager that
-        opened them. Closing them here would detach a session that manager is
-        about to detach again, and close a socket it still holds.
-        """
+        """Mark this client unusable. The connection is not ours to close."""
         self._closed = True
 
 

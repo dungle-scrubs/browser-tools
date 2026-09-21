@@ -186,28 +186,58 @@ class TestLifetimeBelongsToTheSeam:
         assert client.connected is False
 
 
-class TestTheTargetSpecIsTranslated:
-    """The regression this change shipped once and a live run caught.
+class TestOffMatchesTheWayCallersExpect:
+    """The core client matches by identity; the page-level client did not.
 
-    `one_shot_page_session` dispatches on `target_by` and raises
-    `ValueError: Unknown target_by: None` when a spec is given without one.
-    The page-level path derived it from the spec, so `--target 1` and
-    `--target <id>` both worked; passing None broke every `--target`.
+    `ScreencastRecorder.start` subscribes with `self.on_frame` and `stop`
+    unsubscribes with `self.on_frame`. Those are two bound-method objects:
+    equal, never identical. Under identity matching the subscription would
+    survive its own removal.
     """
 
-    @pytest.mark.parametrize(
-        ("spec", "expected"),
-        [(None, None), ("1", "index"), ("12", "index"), ("B343DD76", "id")],
-    )
-    def test_the_handler_derives_target_by_the_same_way(self, spec, expected):
-        derived = None if spec is None else ("index" if spec.isdigit() else "id")
-        assert derived == expected
+    def test_a_bound_method_is_equal_but_not_identical(self):
+        class Recorder:
+            def on_frame(self, params): ...
 
-    def test_the_page_level_path_used_that_rule(self):
-        """Pinned against the source it was copied from, not from memory."""
-        from pathlib import Path
+        recorder = Recorder()
+        assert recorder.on_frame == recorder.on_frame
+        assert recorder.on_frame is not recorder.on_frame
 
-        import browser_tools
+    def test_off_removes_a_freshly_bound_method(self, client, core):
+        class Recorder:
+            def on_frame(self, params): ...
 
-        source = (Path(browser_tools.__file__).parent / "cdp_client.py").read_text()
-        assert 'target_by="index" if target_spec.isdigit() else "id"' in source
+        recorder = Recorder()
+        client.on("Page.screencastFrame", recorder.on_frame)
+        client.off("Page.screencastFrame", recorder.on_frame)
+
+        assert core.removed, "off passed nothing to the core client"
+        removed_event, removed_handler = core.removed[0]
+        registered_handler = core.subscriptions[0][1]
+        assert removed_event == "Page.screencastFrame"
+        assert removed_handler is registered_handler, (
+            "off handed the core client a different object than on did, "
+            "so identity matching would not remove it"
+        )
+
+    def test_a_handler_never_registered_is_passed_through(self, client, core):
+        def stranger(_params): ...
+
+        client.off("Page.frameNavigated", stranger)
+        assert core.removed == [("Page.frameNavigated", stranger)]
+
+    def test_the_same_handler_can_be_removed_once_per_registration(self, client, core):
+        def handler(_params): ...
+
+        client.on("Page.loadEventFired", handler)
+        client.on("Page.loadEventFired", handler)
+        client.off("Page.loadEventFired", handler)
+        client.off("Page.loadEventFired", handler)
+        assert len(core.removed) == 2
+
+
+# What the runtime asks the One-Shot Session for, including how a missing
+# target spec is translated, is pinned in tests/test_handler_transport.py
+# against the real `CDPRuntime`. An earlier version of that check lived here
+# and recomputed the expression in the test body, so it would have passed
+# against any implementation.

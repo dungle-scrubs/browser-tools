@@ -15,7 +15,18 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .core.attach import AmbiguousTargetError, TargetNotFoundError
+
 logger = logging.getLogger(__name__)
+
+#: Connection failures that are outcomes rather than defects: no browser on
+#: the port, and a target spec that names no page or more than one. They get a
+#: one-line message; everything else keeps its traceback.
+_EXPECTED_CONNECT_FAILURES = (
+    ConnectionError,
+    AmbiguousTargetError,
+    TargetNotFoundError,
+)
 
 try:
     from .cdp_constants import (
@@ -319,10 +330,10 @@ class CDPRuntime:
         self._stop_event: asyncio.Event | None = None
         self._cdp_client: Any = None
         self._frame_manager: Any = None
-        # Holds the One-Shot Session open for the whole runtime. The session
-        # is what every step of a Step Run shares (RFC-03), so it cannot be a
-        # context manager scoped to one command.
+        # Holds the One-Shot Session open for the whole runtime: every step of
+        # a Step Run shares it (RFC-03), so it cannot be scoped to one command.
         self._sessions: Any = None
+        self._connect_error: str | None = None
         # Screencast capture state machine (Page.startScreencast buffer, ack,
         # write-to-dir). Owned here so the screencast tool handlers stay
         # two-line delegators.
@@ -332,6 +343,11 @@ class CDPRuntime:
     def available(self) -> bool:
         """Whether the CDP client is connected and ready."""
         return self._cdp_client is not None and self._cdp_client.connected
+
+    @property
+    def connect_error(self) -> str | None:
+        """Why the connection failed, once it has. ``None`` until then."""
+        return self._connect_error
 
     @property
     def mode(self) -> str:
@@ -390,60 +406,83 @@ class CDPRuntime:
         self._frame_manager = FrameManager()
         self._sessions = _contextlib.AsyncExitStack()
 
-        if self._browser_url:
-            await self._connect_cdp()
+        try:
+            if self._browser_url:
+                await self._connect_cdp()
 
-        self._ready.set()
+            self._ready.set()
 
-        # Wait until stopped
-        if self._stop_event:
-            await self._stop_event.wait()
+            if self._stop_event:
+                await self._stop_event.wait()
+        finally:
+            # `finally`, not a straight line, because cancellation would
+            # otherwise skip the detach and leave the session attached and the
+            # socket open. CancelledError is a BaseException, so the suppress
+            # below does not catch it either.
+            if self._cdp_client:
+                await self._cdp_client.disconnect()
+            # Detaches the Target session and closes the browser-level socket.
+            # Best-effort: a browser that died first must not turn teardown
+            # into a traceback on a command that already returned its result.
+            with _contextlib.suppress(Exception):
+                await self._sessions.aclose()
 
-        if self._cdp_client:
-            await self._cdp_client.disconnect()
-        # Detaches the Target session and closes the browser-level socket.
-        # Best-effort: a browser that died first must not turn teardown into
-        # a traceback on a command that already returned its result.
-        with _contextlib.suppress(Exception):
-            await self._sessions.aclose()
+    def _target_selector(self) -> tuple[str, str]:
+        """Translate this runtime's target spec for the One-Shot Session.
+
+        Returns ``(target_spec, target_by)``, both always set. The seam
+        dispatches on ``target_by`` and rejects ``None``, so a spec cannot
+        travel without one.
+
+        No spec means the first page, and it has to be said explicitly.
+        ``resolve_page_ws_url`` answered a missing spec with ``pages[0]``;
+        ``resolve_target`` answers it with ``AmbiguousTargetError`` unless
+        exactly one page exists. Passing the absence straight through would
+        break every handler-routed verb the moment a second tab or a popup
+        is open, and ``frames``, ``storage`` and ``detect`` have no
+        ``--target`` to escape with. Both paths sort page targets by target
+        ID, so index 1 is the page ``pages[0]`` was.
+        """
+        if self._target_spec is None:
+            return "1", "index"
+        return self._target_spec, ("index" if self._target_spec.isdigit() else "id")
 
     async def _connect_cdp(self) -> None:
         """Attach a Target session and build the runtime over it.
 
-        The transport is the One-Shot Session: one browser-level connection
-        plus one flattened ``Target`` session, which RFC-03 requires the
-        runtime and its frame manager to sit on. It is entered on
-        ``self._sessions`` rather than with ``async with``, because the
-        session has to outlive this function and live as long as the runtime.
-
-        ``one_shot_page_session`` is reused rather than reimplemented, so
-        target resolution stays in one place. Both transports already sorted
-        page targets by target ID, so ``--target N`` still names the page it
-        named before.
+        Entered on ``self._sessions`` rather than with ``async with``: the
+        session has to outlive this function and last as long as the runtime.
         """
+        from urllib.parse import urlparse
+
+        from .attached_session import AttachedSessionClient
+        from .one_shot import one_shot_page_session
+
+        browser_url: str = self._browser_url  # type: ignore[assignment]  # guarded by if-self._browser_url
+        port = urlparse(browser_url).port
+        if port is None:
+            self._connect_error = f"no port in browser url {browser_url}"
+            logger.error("%s", self._connect_error)
+            return
+
+        target_spec, target_by = self._target_selector()
         try:
-            from urllib.parse import urlparse
-
-            from .attached_session import AttachedSessionClient
-            from .one_shot import one_shot_page_session
-
-            browser_url: str = self._browser_url  # type: ignore[assignment]  # guarded by if-self._browser_url
-            port = urlparse(browser_url).port
-            if port is None:
-                logger.error("no port in browser url %s", browser_url)
-                return
-
-            # `target_by` is not optional when a spec is given: the seam
-            # dispatches on it and rejects None. The page-level path derived
-            # it the same way (`cdp_client._resolve_among`), so --target 3
-            # and --target B343DD76 keep meaning what they meant.
-            target_by = None
-            if self._target_spec is not None:
-                target_by = "index" if self._target_spec.isdigit() else "id"
-
             cdp, session_id = await self._sessions.enter_async_context(
-                one_shot_page_session(port, self._target_spec, target_by)
+                one_shot_page_session(port, target_spec, target_by)
             )
+        except _EXPECTED_CONNECT_FAILURES as exc:
+            # A browser that is not there, or a target spec that names no
+            # page, is an ordinary outcome. The caller reports it from
+            # `connect_error`, so logging it again here would print it twice.
+            self._connect_error = str(exc)
+            logger.debug("CDP connection failed for %s: %s", browser_url, exc)
+            return
+        except Exception as exc:
+            self._connect_error = str(exc)
+            logger.exception("CDP connection failed for %s", browser_url)
+            return
+
+        try:
             self._cdp_client = AttachedSessionClient(cdp, session_id)
 
             # Enable Page domain for frame events
@@ -467,8 +506,9 @@ class CDPRuntime:
                 "Runtime.executionContextDestroyed",
                 self._frame_manager.handle_execution_context_destroyed,
             )
-        except Exception:
-            logger.exception("CDP connection failed for %s", self._browser_url)
+        except Exception as exc:
+            self._connect_error = str(exc)
+            logger.exception("CDP session setup failed for %s", self._browser_url)
             self._cdp_client = None
 
     def stop(self) -> None:
@@ -641,6 +681,11 @@ class CDPHandler:
         return self._rt.available
 
     @property
+    def connect_error(self) -> str | None:
+        """Why the runtime's connection failed, once it has."""
+        return self._rt.connect_error
+
+    @property
     def mode(self) -> str:
         """Current access mode ('full' or 'inspect')."""
         return self._rt.mode
@@ -740,7 +785,9 @@ class CDPHandler:
         if not self._loop or not self._loop.is_running():
             return make_error("CDP handler not initialized")
 
-        future = asyncio.run_coroutine_threadsafe(self._dispatch_native(name, arguments), self._loop)
+        future = asyncio.run_coroutine_threadsafe(
+            self._dispatch_native(name, arguments), self._loop
+        )
         try:
             return future.result(timeout=REQUEST_TIMEOUT_SECONDS)
         except Exception as exc:
@@ -772,14 +819,14 @@ class CDPHandler:
         if name in ("click", "fill"):
             uid = str(arguments.get("uid", "")).strip()
             if not uid:
-                return make_error(
-                    f"E008: '{name}' requires --uid UID from a prior 'snapshot'"
-                )
+                return make_error(f"E008: '{name}' requires --uid UID from a prior 'snapshot'")
             try:
                 if name == "click":
                     result = await self._native_interactor.click_async(send, uid)
                     assert result.point is not None  # click_steps always sets point
-                    return make_text(f"Clicked uid={result.uid} at ({result.point[0]:.0f}, {result.point[1]:.0f}).")
+                    return make_text(
+                        f"Clicked uid={result.uid} at ({result.point[0]:.0f}, {result.point[1]:.0f})."
+                    )
                 value = str(arguments.get("value", ""))
                 result = await self._native_interactor.fill_async(send, uid, value)
                 return make_text(f"Filled uid={result.uid} (value now {result.value_after!r}).")
