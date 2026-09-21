@@ -511,6 +511,10 @@ def check_preconditions(args: argparse.Namespace) -> None:
                 "screencast requires --dir DIR. It captures and writes the frames "
                 "in one invocation; there is no separate start or stop."
             )
+        curated.check_screencast_values(args.duration, args.format)
+
+    if command == "detect":
+        curated.check_detect_wait(None if args.no_wait else args.wait)
 
 
 def _run(args: argparse.Namespace) -> int:

@@ -16,18 +16,12 @@ Nothing here reaches the browser. A UID that no longer resolves, a frame
 pattern that matches nothing, a CDP method Chrome does not have: those are
 runtime failures found at their own step, not usage errors.
 
-Why it reuses the CLI's own parser
-----------------------------------
-A second parser that matches the first is a second parser that will stop
-matching it. One disagreement about one flag turns a usage error into a runtime
-failure or the reverse, and the difference would show up as a step behaving
-differently inside a run than outside it. This repository already carries a
-live example of two lists disagreeing about one verb, which is why
-``STEP_VERBS`` below is written out rather than derived by subtraction.
-
-So a step is parsed by handing its argv to ``cli.build_parser``, and its
-per-verb requirements are checked by ``cli.check_preconditions``, the same
-function ``cli._run`` calls. Neither is copied.
+Nothing here defines a second parser. A step goes to ``cli.build_parser``
+and ``cli.check_preconditions``, the ones ``cli._run`` uses. A copy that
+disagreed about one flag would turn a usage error into a runtime failure or
+the reverse, and a step would behave differently inside a run than outside
+it. ``STEP_VERBS`` is written out for the same reason: two lists in this
+repository already disagree about one verb.
 """
 
 from __future__ import annotations
@@ -191,7 +185,6 @@ def _why_argparse_gave_up(argv: list[str], stderr: str, code: object) -> str:
 
 
 def _check_not_an_instance(argv: list[str], line: int, known: set[str]) -> None:
-    """A step names no instance. The run resolved one before step 1."""
     if argv[0] in known:
         raise _at(
             line,
@@ -209,13 +202,11 @@ def _refuse_invocation_flag(flag: str, line: int) -> StepListError:
 
 
 def _check_no_invocation_flags(argv: list[str], line: int) -> None:
-    """Reject the flags the invocation owns, before the step is parsed.
+    """Reject the flags the invocation owns, for a step with no parser.
 
-    Scanning tokens catches only what the caller typed in full. It is here
-    for the passthrough step, which never reaches ``argparse``, and for a
-    message that names the flag as written. The authoritative check for a
-    curated verb is ``_check_nothing_was_retargeted`` below, on the parsed
-    result.
+    Passthrough steps only. On a curated step this would misread a
+    positional and refuse the valid ``frames select -- --target``, whose
+    pattern is the word ``--target``.
     """
     for token in argv:
         flag = token.split("=", 1)[0]
@@ -227,12 +218,9 @@ def _check_nothing_was_retargeted(args: argparse.Namespace, line: int) -> None:
     """Reject an invocation flag by what ``argparse`` produced, not by spelling.
 
     ``argparse`` accepts any unambiguous prefix of a long option, so
-    ``--targ 1`` sets ``target`` and ``--end URL`` sets ``endpoint`` while a
-    scan for the full flag name sees neither. Left to the scan alone, a step
-    could silently drive a different page, or a different browser.
-
-    Reading the namespace is immune to the spelling: whatever the caller
-    wrote, this is what the step would have used.
+    ``--targ 1`` sets ``target`` and ``--end URL`` sets ``endpoint``. A scan
+    for the full name sees neither, and the step drives a different page, or
+    a different browser.
     """
     for attribute, flag in (("target", "--target"), ("url", "--url"), ("endpoint", "--endpoint")):
         if getattr(args, attribute, None) is not None:
@@ -262,7 +250,11 @@ def _validate_passthrough(argv: list[str], line: int) -> tuple[str, dict[str, An
         params = decoded
 
     try:
-        passthrough.guard_focus(method, params)
+        # The return value is the point, not just the refusal: for
+        # `Target.createTarget` it adds `background: true`, which is what keeps
+        # a new tab from raising the browser over the user's work. The bare
+        # path keeps it (`passthrough.py:310`), so the Step must too.
+        params = passthrough.guard_focus(method, params)
     except UsageError as exc:
         raise _at(line, str(exc)) from exc
 
@@ -289,7 +281,6 @@ def validate(text: str, registry_path: str | None = None) -> list[Step]:
 
     for number, (line, step_text, argv) in enumerate(raw_steps, start=1):
         _check_not_an_instance(argv, line, known)
-        _check_no_invocation_flags(argv, line)
 
         head = argv[0]
 
@@ -313,6 +304,7 @@ def validate(text: str, registry_path: str | None = None) -> list[Step]:
             continue
 
         if lifecycle.looks_like_domain_method(head):
+            _check_no_invocation_flags(argv, line)
             method, params = _validate_passthrough(argv, line)
             steps.append(
                 Step(

@@ -14,6 +14,7 @@ outside it.
 from __future__ import annotations
 
 import argparse
+import contextlib
 
 import pytest
 
@@ -209,11 +210,49 @@ class TestTheSurfaceCoversEveryVerbTheParserKnows:
 
 
 class TestTheInvocationOwnsSomeFlags:
-    @pytest.mark.parametrize("flag", ["--endpoint http://127.0.0.1:9222", "--target 1", "--url ex"])
-    def test_a_step_may_not_carry_one(self, flag, no_instances):
+    @pytest.mark.parametrize(
+        ("step", "flag"),
+        [
+            ("snapshot --endpoint http://127.0.0.1:9222", "--endpoint"),
+            ("snapshot --target 1", "--target"),
+            ("screenshot --url example", "--url"),
+            ("console-list --target 2", "--target"),
+            ("Page.getFrameTree --target 1", "--target"),
+        ],
+    )
+    def test_a_step_may_not_carry_one(self, step, flag, no_instances):
         with pytest.raises(StepListError) as caught:
-            validate(f"snapshot {flag}\n")
+            validate(step + "\n")
         assert "must not carry" in str(caught.value)
+        assert flag in str(caught.value)
+
+    @pytest.mark.parametrize(
+        ("step", "field", "value"),
+        [
+            ("frames select -- --target", "pattern", "--target"),
+            ("frames select -- --target=x", "pattern", "--target=x"),
+            ("fill --uid A-1 --text=--target", "text", "--target"),
+        ],
+    )
+    def test_an_option_shaped_value_is_not_an_option(self, step, field, value, no_instances):
+        """A frame pattern may look like a flag. The parser knows; a scan does not.
+
+        Scanning the raw tokens of a curated step would refuse
+        `frames select -- --target` for carrying `--target`, when `--target`
+        is the pattern being selected and nothing is retargeted. The check
+        reads the parsed namespace for exactly this reason.
+        """
+        parsed = validate(step + "\n")[0].args
+        assert getattr(parsed, field) == value
+
+    def test_a_flag_the_verb_never_had_is_still_refused(self, no_instances):
+        """`snapshot` has no `--url`, so the parser rejects it first.
+
+        Different message, same exit 2 and same nothing executed.
+        """
+        with pytest.raises(StepListError) as caught:
+            validate("snapshot --url ex\n")
+        assert "--url" in str(caught.value)
 
     def test_the_equals_form_is_caught_too(self, no_instances):
         with pytest.raises(StepListError) as caught:
@@ -291,16 +330,94 @@ class TestThePreconditionsAreTheCLIsOwn:
             validate("screencast start --dir /tmp/x\n")
         assert "no sub-action" in str(caught.value)
 
-    def test_the_message_is_the_cli_s_own(self, no_instances):
-        """Not a lookalike written here. Same words, from the same function."""
-        expected = None
-        try:
-            cli.check_preconditions(argparse.Namespace(command="click", uid=None))
-        except Exception as exc:
-            expected = str(exc)
+    def test_frames_without_its_sub_action_is_refused(self, no_instances):
         with pytest.raises(StepListError) as caught:
-            validate("click\n")
-        assert expected and expected in str(caught.value)
+            validate("frames\n")
+        assert "one sub-action" in str(caught.value)
+
+    def test_click_and_fill_both_need_a_uid(self, no_instances):
+        for step in ("click", "fill --text hello"):
+            with pytest.raises(StepListError) as caught:
+                validate(step + "\n")
+            assert "requires --uid" in str(caught.value)
+
+    @pytest.mark.parametrize(
+        ("step", "fragment"),
+        [
+            ("screencast --dir /tmp/x --duration 0", "greater than 0"),
+            ("screencast --dir /tmp/x --duration -1", "greater than 0"),
+            ("screencast --dir /tmp/x --format gif", "'jpeg' or 'png'"),
+            ("detect --wait nan", "finite"),
+            ("detect --wait inf", "finite"),
+        ],
+    )
+    def test_a_value_that_cannot_run_is_caught_before_step_one(
+        self, step, fragment, no_instances
+    ):
+        """These need no browser, so they belong at validation.
+
+        Each is already a usage error for the bare command. Reached only
+        inside the verb, they would fire after earlier steps had driven the
+        browser, which is the whole-list guarantee broken.
+        """
+        with pytest.raises(StepListError) as caught:
+            validate("snapshot\n" + step + "\n")
+        assert fragment in str(caught.value)
+        assert "line 2" in str(caught.value)
+
+    def test_a_good_screencast_and_detect_still_pass(self, no_instances):
+        assert len(validate("screencast --dir /tmp/x --duration 2 --format png\ndetect --wait 3\n")) == 2
+
+
+class TestValidationReachesTheCLIsOwnCode:
+    """Proving reuse, not resemblance.
+
+    A test that compares error text passes just as well against a copy, and
+    a copy is exactly what RFC-03 forbids. These replace the function and
+    assert validation notices.
+    """
+
+    def test_the_parser_is_cli_build_parser(self, monkeypatch, no_instances):
+        called = []
+        real = cli.build_parser
+
+        def spy():
+            called.append(True)
+            return real()
+
+        monkeypatch.setattr(cli, "build_parser", spy)
+        validate("snapshot\ndetect\n")
+        assert len(called) == 2, "validation did not go through cli.build_parser"
+
+    def test_the_preconditions_are_cli_check_preconditions(self, monkeypatch, no_instances):
+        seen = []
+        monkeypatch.setattr(cli, "check_preconditions", lambda args: seen.append(args.command))
+        validate("snapshot\nclick\n")
+        assert seen == ["snapshot", "click"], (
+            "validation did not go through cli.check_preconditions; a step it "
+            "should have rejected was accepted because the real one never ran"
+        )
+
+    def test_run_reaches_the_same_function(self, monkeypatch):
+        """The other half: the live CLI path uses it too."""
+        seen = []
+        monkeypatch.setattr(cli, "check_preconditions", lambda args: seen.append(args.command))
+        with contextlib.suppress(Exception):
+            cli._run(argparse.Namespace(command="cleanup"))
+        assert seen == ["cleanup"]
+
+
+class TestTheRegistryIsReadOnce:
+    """It is mutable, and another process can change it mid-validation."""
+
+    def test_one_read_for_a_whole_list(self, monkeypatch):
+        reads = []
+        monkeypatch.setattr(
+            "browser_tools.lifecycle.read_instances",
+            lambda **_: (reads.append(1), [])[1],
+        )
+        validate("snapshot\ndetect\nwait-idle\nPage.getFrameTree\n")
+        assert len(reads) == 1, f"the registry was read {len(reads)} times"
 
 
 class TestTheFocusRefusalsAreCaughtUpFront:
@@ -320,6 +437,26 @@ class TestTheFocusRefusalsAreCaughtUpFront:
 
     def test_create_target_in_the_background_is_allowed(self, no_instances):
         assert len(validate("""Target.createTarget '{"url": "about:blank"}'\n""")) == 1
+
+    @pytest.mark.parametrize(
+        "written",
+        ["""Target.createTarget '{"url": "about:blank"}'""", "Target.createTarget"],
+    )
+    def test_the_step_carries_the_background_the_guard_adds(self, written, no_instances):
+        """`guard_focus` returns normalised params, and the Step keeps them.
+
+        Discarding the return value leaves a Step whose params say nothing
+        about `background`. Sent as-is, Chrome's default is foreground, and
+        the new tab raises the browser over the user's work: the exact thing
+        the guard exists to stop.
+        """
+        step = validate(written + "\n")[0]
+        assert step.params is not None
+        assert step.params["background"] is True
+
+    def test_an_explicit_background_true_survives(self, no_instances):
+        step = validate("""Target.createTarget '{"background": true}'\n""")[0]
+        assert step.params == {"background": True}
 
 
 class TestPassthroughSteps:
@@ -357,10 +494,22 @@ class TestValidationIsWholeListBeforeAnyStep:
             validate(text)
         assert "line 4" in str(caught.value)
 
-    def test_the_first_failure_is_the_one_reported(self, no_instances):
+    def test_the_first_failing_step_is_the_one_reported(self, no_instances):
         with pytest.raises(StepListError) as caught:
             validate("click\nfill\n")
         assert "line 1" in str(caught.value)
+
+    def test_a_line_that_will_not_split_is_reported_before_any_step(self, no_instances):
+        """Splitting happens for the whole source first, so it wins.
+
+        `click` on line 1 is already missing its UID, and the unclosed quote
+        on line 2 is what gets reported. Both refuse the run and execute
+        nothing, so the guarantee holds; the order between the two classes
+        is what this pins.
+        """
+        with pytest.raises(StepListError) as caught:
+            validate("click\nfill --text '\n")
+        assert "line 2" in str(caught.value)
 
     def test_a_good_list_returns_every_step(self, no_instances):
         text = (
