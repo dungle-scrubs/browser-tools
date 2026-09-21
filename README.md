@@ -61,8 +61,13 @@ bt stop            # close the browser and retire its registry entry
 ```
 
 Omit `INSTANCE` while exactly one instance is running; with several, every verb
-names the candidates rather than guessing. `bt guide` prints the full manual,
-and `bt help Domain.method` reads the protocol schema from the running browser.
+names the candidates rather than guessing. `bt help Domain.method` reads the
+protocol schema from the running browser.
+
+**`bt guide` is the manual.** It is the complete CLI surface -- every verb,
+every refusal with its exit code, the login walkthrough, the UID rule, and the
+`--endpoint` rules -- and reading it is enough to drive a browser with this
+tool. A test fails the build when a verb has no entry in it.
 
 To drive a browser you started yourself, pass its debugging port instead of an
 instance name:

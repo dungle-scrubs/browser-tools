@@ -80,6 +80,7 @@ build-backend = "hatchling.build"
 packages = ["src/browser_tools"]
 artifacts = [
     "src/browser_tools/*.js",
+    "src/browser_tools/GUIDE.txt",
 ]
 
 [tool.hatch.build.targets.sdist]
