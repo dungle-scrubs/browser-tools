@@ -319,6 +319,10 @@ class CDPRuntime:
         self._stop_event: asyncio.Event | None = None
         self._cdp_client: Any = None
         self._frame_manager: Any = None
+        # Holds the One-Shot Session open for the whole runtime. The session
+        # is what every step of a Step Run shares (RFC-03), so it cannot be a
+        # context manager scoped to one command.
+        self._sessions: Any = None
         # Screencast capture state machine (Page.startScreencast buffer, ack,
         # write-to-dir). Owned here so the screencast tool handlers stay
         # two-line delegators.
@@ -379,9 +383,12 @@ class CDPRuntime:
 
     async def _main(self) -> None:
         """Main async entry point."""
+        import contextlib as _contextlib
+
         from .frame_manager import FrameManager
 
         self._frame_manager = FrameManager()
+        self._sessions = _contextlib.AsyncExitStack()
 
         if self._browser_url:
             await self._connect_cdp()
@@ -394,19 +401,50 @@ class CDPRuntime:
 
         if self._cdp_client:
             await self._cdp_client.disconnect()
+        # Detaches the Target session and closes the browser-level socket.
+        # Best-effort: a browser that died first must not turn teardown into
+        # a traceback on a command that already returned its result.
+        with _contextlib.suppress(Exception):
+            await self._sessions.aclose()
 
     async def _connect_cdp(self) -> None:
-        """Connect the CDP client to Chrome."""
+        """Attach a Target session and build the runtime over it.
+
+        The transport is the One-Shot Session: one browser-level connection
+        plus one flattened ``Target`` session, which RFC-03 requires the
+        runtime and its frame manager to sit on. It is entered on
+        ``self._sessions`` rather than with ``async with``, because the
+        session has to outlive this function and live as long as the runtime.
+
+        ``one_shot_page_session`` is reused rather than reimplemented, so
+        target resolution stays in one place. Both transports already sorted
+        page targets by target ID, so ``--target N`` still names the page it
+        named before.
+        """
         try:
-            from .cdp_client import CDPClient, resolve_page_ws_url_async
+            from urllib.parse import urlparse
+
+            from .attached_session import AttachedSessionClient
+            from .one_shot import one_shot_page_session
 
             browser_url: str = self._browser_url  # type: ignore[assignment]  # guarded by if-self._browser_url
-            ws_url = await resolve_page_ws_url_async(browser_url, self._target_spec)
-            if not ws_url:
+            port = urlparse(browser_url).port
+            if port is None:
+                logger.error("no port in browser url %s", browser_url)
                 return
 
-            self._cdp_client = CDPClient(ws_url)
-            await self._cdp_client.connect()
+            # `target_by` is not optional when a spec is given: the seam
+            # dispatches on it and rejects None. The page-level path derived
+            # it the same way (`cdp_client._resolve_among`), so --target 3
+            # and --target B343DD76 keep meaning what they meant.
+            target_by = None
+            if self._target_spec is not None:
+                target_by = "index" if self._target_spec.isdigit() else "id"
+
+            cdp, session_id = await self._sessions.enter_async_context(
+                one_shot_page_session(port, self._target_spec, target_by)
+            )
+            self._cdp_client = AttachedSessionClient(cdp, session_id)
 
             # Enable Page domain for frame events
             await self._cdp_client.send("Page.enable")

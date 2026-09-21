@@ -357,13 +357,6 @@ def resolve_page_target_id(browser_url: str, target_spec: str) -> str | None:
     return _resolve_among(pages, target_spec)
 
 
-async def resolve_page_ws_url_async(
-    browser_url: str, target_spec: str | None = None
-) -> str | None:
-    """Awaitable :func:`resolve_page_ws_url`, for callers on an event loop."""
-    return await asyncio.to_thread(resolve_page_ws_url, browser_url, target_spec)
-
-
 async def get_page_ws_url_async(browser_url: str, page_index: int = 0) -> str | None:
     """Awaitable :func:`get_page_ws_url`, for callers on an event loop.
 
