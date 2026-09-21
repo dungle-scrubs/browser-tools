@@ -94,7 +94,13 @@ class FrameManager:
         self._selected_frame_id: str | None = None
         self._selected_url_pattern: str | None = None
         self._event_buffer: list[FrameEvent] = []
-        self._execution_contexts: dict[int, str] = {}  # context_id -> frame_id
+        #: ``(frame session, context id) -> frame id``. Keyed by the pair
+        #: because an execution context id is renderer-local: two frames in
+        #: two Frame Sessions can both own context 1, and a map keyed by the
+        #: id alone let the second one overwrite the first, then let a
+        #: destroy for either clear the wrong frame (RFC-04, Routing). The
+        #: page session is ``None``, matching ``FrameInfo.frame_session_id``.
+        self._execution_contexts: dict[tuple[str | None, int], str] = {}
 
     @property
     def selected_frame_id(self) -> str | None:
@@ -259,16 +265,22 @@ class FrameManager:
         self._selected_frame_id = None
         return None
 
-    def get_selected_execution_context_id(self) -> int | None:
-        """Get the execution context ID for the selected frame.
+    def get_selected_context(self) -> tuple[str | None, int] | None:
+        """Where to evaluate against the selected frame, or None.
 
-        Returns:
-            Execution context ID, or None if no selection or no context mapped.
+        The pair ``(frame session, execution context id)``, because the id
+        alone is no longer an address: it is unique within one renderer, and
+        an Out-of-Process Frame has its own. Returning the id by itself from
+        a world with several renderers is the `backendNodeId` mistake again
+        (RFC-04, Routing).
+
+        ``None`` for the frame session means the page session, which is what
+        every frame was before Frame Sessions existed.
         """
         frame = self.get_selected_frame()
-        if frame is None:
+        if frame is None or frame.execution_context_id is None:
             return None
-        return frame.execution_context_id
+        return frame.frame_session_id, frame.execution_context_id
 
     def _reachable_frames(self) -> list[FrameInfo]:
         """The frames `frames list` shows, in the order it shows them.
@@ -575,16 +587,26 @@ class FrameManager:
         self._reresolve_selection()
         self._event_buffer.append(FrameEvent(event_type="navigated", frame_id=frame_id, url=url))
 
-    def handle_execution_contexts_cleared(self, params: dict[str, Any] | None = None) -> None:
-        """Handle Runtime.executionContextsCleared.
+    def handle_execution_contexts_cleared(
+        self, params: dict[str, Any] | None = None, session_id: str | None = None
+    ) -> None:
+        """Handle Runtime.executionContextsCleared, for one session only.
 
-        Every context the page had is gone. Keeping the map would leave each
-        frame holding a destroyed context id, which a frame-scoped read then
-        evaluates against and gets an error for, or worse, silently skips.
+        Every context that session had is gone. Keeping them would leave
+        each of its frames holding a destroyed context id, which a
+        frame-scoped read then evaluates against and gets an error for, or
+        worse, silently skips.
+
+        One session only, because the event says nothing about the others.
+        Cleared globally, a cross-origin iframe navigating would wipe the
+        main frame's context and break a read that had nothing to do with
+        it (RFC-04, Routing).
         """
-        self._execution_contexts.clear()
+        for key in [k for k in self._execution_contexts if k[0] == session_id]:
+            del self._execution_contexts[key]
         for frame in self._frames.values():
-            frame.execution_context_id = None
+            if frame.frame_session_id == session_id:
+                frame.execution_context_id = None
 
     def _forget_descendants(self, frame_id: str) -> None:
         """Drop every frame below ``frame_id``, which a navigation destroyed.
@@ -672,13 +694,18 @@ class FrameManager:
             )
         )
 
-    def handle_execution_context_created(self, params: dict[str, Any]) -> None:
+    def handle_execution_context_created(
+        self, params: dict[str, Any], session_id: str | None = None
+    ) -> None:
         """Handle Runtime.executionContextCreated event.
 
         Maps execution contexts to their owning frames.
 
         Args:
             params: CDP event parameters.
+            session_id: The Frame Session the event arrived on, or None for
+                the page session. Part of the key, not a label: see
+                :attr:`_execution_contexts`.
         """
         context = params.get("context", {})
         context_id = context.get("id")
@@ -686,24 +713,39 @@ class FrameManager:
         frame_id = aux_data.get("frameId")
 
         if context_id is not None and frame_id:
-            self._execution_contexts[context_id] = frame_id
+            self._execution_contexts[(session_id, context_id)] = frame_id
             frame = self._frames.get(frame_id)
             if frame and aux_data.get("isDefault", False):
                 frame.execution_context_id = context_id
 
-    def handle_execution_context_destroyed(self, params: dict[str, Any]) -> None:
+    def handle_execution_context_destroyed(
+        self, params: dict[str, Any], session_id: str | None = None
+    ) -> None:
         """Handle Runtime.executionContextDestroyed event.
+
+        Scoped to the session it arrived on. Unscoped, a child renderer
+        destroying its context 1 cleared whichever frame happened to hold
+        the id, which on a page with an Out-of-Process Frame is usually the
+        main frame.
 
         Args:
             params: CDP event parameters.
+            session_id: The Frame Session the event arrived on, or None for
+                the page session.
         """
         context_id = params.get("executionContextId")
-        if context_id is not None:
-            frame_id = self._execution_contexts.pop(context_id, None)
-            if frame_id:
-                frame = self._frames.get(frame_id)
-                if frame and frame.execution_context_id == context_id:
-                    frame.execution_context_id = None
+        if context_id is None:
+            return
+        frame_id = self._execution_contexts.pop((session_id, context_id), None)
+        if not frame_id:
+            return
+        frame = self._frames.get(frame_id)
+        if (
+            frame
+            and frame.execution_context_id == context_id
+            and frame.frame_session_id == session_id
+        ):
+            frame.execution_context_id = None
 
     # -----------------------------------------------------------------------
     # Event Buffer

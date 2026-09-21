@@ -101,12 +101,16 @@ glossary rather than left to name code that does not exist.
   session. Bounded at 32 sessions and 10 levels of nesting; a frame past
   either bound is listed `[unreachable]`, never dropped in silence.
 
-  It is not yet the session commands go to. The execution-context map is
-  keyed by context id alone, and context ids are per-session, so a child's
-  contexts cannot be recorded without colliding with the page's. Until
-  that is fixed, selecting an Out-of-Process Frame gets you the selection
-  and nothing that reads through it: `storage get` returns cookies only
-  and `snapshot` shows the `Iframe` node empty.
+  It is the session a frame-scoped read goes to. The execution-context
+  map is keyed by `(frame session, context id)`, because a context id is
+  unique within one renderer and means nothing outside it, and a destroy
+  or a clear is scoped to the session it arrived on. `storage get` on a
+  selected Out-of-Process Frame reads that frame's own storage, at any
+  nesting depth.
+
+  A read addressed by UID is not routed yet, so `snapshot` still shows
+  the `Iframe` node empty and `click` and `fill` have no uid inside the
+  frame to address.
 
 - **Spliced Frame Tree** - the single tree `frames list` prints, built by
   attaching each Frame Session's own frame tree under the parent frame its

@@ -237,7 +237,7 @@ class TestExecutionContexts:
             }
         )
         fm.select_frame_by_url("myapp.example.com")
-        assert fm.get_selected_execution_context_id() == 42
+        assert fm.get_selected_context() == (None, 42)
 
     def test_context_destroyed_clears_mapping(self, fm: FrameManager) -> None:
         """executionContextDestroyed should clear the mapping."""
@@ -251,7 +251,7 @@ class TestExecutionContexts:
         )
         fm.handle_execution_context_destroyed({"executionContextId": 42})
         fm.select_frame_by_url("myapp.example.com")
-        assert fm.get_selected_execution_context_id() is None
+        assert fm.get_selected_context() is None
 
     def test_only_default_context_assigned(self, fm: FrameManager) -> None:
         """Non-default contexts should not be assigned to the frame."""
@@ -264,7 +264,7 @@ class TestExecutionContexts:
             }
         )
         fm.select_frame_by_url("myapp.example.com")
-        assert fm.get_selected_execution_context_id() is None
+        assert fm.get_selected_context() is None
 
 
 class TestEventBuffer:
