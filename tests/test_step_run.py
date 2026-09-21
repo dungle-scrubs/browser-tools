@@ -236,7 +236,7 @@ class TestOneSessionForTheWholeRun:
         import contextlib
 
         @contextlib.contextmanager
-        def fake_session(instance, target, url, registry_path, endpoint):
+        def fake_session(instance, target, url, registry_path, endpoint, all_frames=False):
             opened.append((instance, target, url, endpoint))
             yield handler
 
@@ -784,7 +784,7 @@ class TestTheRunOwnsTheSessionItOpened:
         import contextlib as _ctx
 
         @_ctx.contextmanager
-        def fake_cdp_session(port, spec=None, by=None, external=False):
+        def fake_cdp_session(port, spec=None, by=None, external=False, all_frames=False):
             try:
                 yield handler
             finally:
@@ -1219,6 +1219,30 @@ class TestTheDoublesMatchTheRealHandler:
             "test_step_dispatch.py:FakeHandler",
             "test_shared_session.py:FakeHandler",
         } <= found, f"the walk stopped finding handler doubles: {sorted(found)}"
+
+    def test_a_double_that_replaces_cdphandler_takes_its_arguments(self):
+        """The guard above covers attributes. This one covers the constructor.
+
+        Two doubles are monkeypatched over `curated.CDPHandler`, so they are
+        constructed with whatever `_cdp_handler_session` passes. Adding
+        `all_frames` to `CDPHandler` broke both, and the attribute guard could
+        not see it: a missing keyword argument is a `TypeError` at
+        construction, not a missing name.
+        """
+        import inspect
+
+        from browser_tools.cdp_handler import CDPHandler
+
+        real = set(inspect.signature(CDPHandler.__init__).parameters) - {"self"}
+        for module in ("test_curated_verbs", "test_interaction_targeting"):
+            double = __import__(module).FakeHandler
+            taken = set(inspect.signature(double.__init__).parameters) - {"self"}
+            missing = sorted(real - taken)
+            assert not missing, (
+                f"{module}.FakeHandler stands in for CDPHandler and does not "
+                f"take {missing}. Every verb that constructs one fails with a "
+                "TypeError the moment production passes it."
+            )
 
     def test_every_double_inherits_the_shared_surface(self):
         offenders = self._doubles_declared_without_the_surface()

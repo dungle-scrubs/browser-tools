@@ -224,3 +224,93 @@ probe still printed two events and `isOurPage=True`. Nothing here establishes
 that auto-attach produces a second page session.
 
 Finding 2 in the RFC is narrowed to what these probes actually measured.
+
+## Phase 1, measured against the implementation
+
+### Open Question 4: the cost on a wide page
+
+Answered. A page holding twenty sibling cross-origin iframes, each in its own
+renderer process, served from two loopback origins. Mean of 9 `frames list`
+invocations per row, headless Chrome, from
+`docs/rfc/04_probes/wide_page_cost.sh`.
+
+| page | `--frames page` | `--frames all` |
+|---|---|---|
+| no iframe at all | 108.1 ms | 116.2 ms |
+| twenty sibling Out-of-Process Frames | 109.2 ms | 119.7 ms |
+
+Twenty Frame Sessions cost about 10 ms over the same page read without them,
+against a floor of roughly 108 ms that is Python start plus one CDP
+connection. A page with no cross-origin iframe pays about 8 ms for the flag,
+which is the `Target.setAutoAttach` round trip and its barrier.
+
+The absolute floor moves with the machine. An earlier run of the same
+comparison on a busier machine read 120.0 / 126.5 and 122.1 / 138.2. The
+figure that holds across both is the difference, not the floor: twenty Frame
+Sessions are tens of milliseconds, not hundreds.
+
+Decision 1's bounds are set above the shape measured here: `MAX_SESSIONS` 32,
+`MAX_DEPTH` 10.
+
+### The defect the wide page found, which was not RFC-04's
+
+Ten identical `frames list --frames all` invocations against that page
+reported 0, 8, 12 and 20 out-of-process frames.
+
+Discovery was not at fault. Instrumenting `FrameSessions.settle` showed
+`sessions=20 pending=0 ready=20 tasks=0 mapframes=21` on every single run.
+Instrumenting the listing showed `mapframes=9`, `mapframes=5`, `mapframes=1`
+- and the listing's timestamp was *earlier* than settle's.
+
+`CDPRuntime.available` is what `curated._cdp_handler_session` polls to decide
+the invocation may start, and it read:
+
+```python
+return self._cdp_client is not None and self._cdp_client.connected
+```
+
+`_connect_cdp` assigns `_cdp_client` as its first statement. `Page.enable`,
+`Page.getFrameTree`, `Runtime.enable` and Frame Sessions all run after it.
+The poll sleeps 20 ms, so setup usually won; setup that attaches twenty
+targets does not. Whatever the frame map held when the read won was the
+answer.
+
+This predates RFC-04. Every verb routed through a `CDPHandler` could read a
+half-built frame map. `_ready`, a `threading.Event` already on the class, was
+set and never read; `available` now requires it, and `_connect_cdp` sets it
+where setup finishes.
+
+With that one change, 15 consecutive runs reported 20 of 20.
+
+### Three hypotheses the measurements refuted
+
+Recorded because each one looked right and cost a change that was then
+reverted.
+
+**"`setAutoAttach`'s attach events race the barrier."** They do not. A probe
+subscribing before `Target.setAutoAttach` and sending `Target.getTargetInfo`
+after it saw all 20 `Target.attachedToTarget` events before the barrier's
+reply, with 0 detaches. The round-trip barrier is sound.
+
+**"Enumerate the targets and attach them explicitly instead."** Implemented,
+and it made the numbers worse: 0, 0, 5, 0, 20, 0, 14, 3, 4, 0. Explicit
+attaches followed by `setAutoAttach` produce detach churn that
+`Target.detachedFromTarget` then feeds into `drop`. Reverted.
+
+**"The page session's own `frameAttached` and `frameNavigated` replace the
+spliced frame."** Both branches were written, instrumented, and never fired -
+not on the static twenty-iframe page, and not on a `bt run` that appended a
+cross-origin iframe mid-run and found it. Reverted; speculative handling is
+not kept.
+
+### Four defects reading found, none of which the wide page showed
+
+| defect | why it was invisible |
+|---|---|
+| `_abandon`: `drop` clears the `_unreachable` row its caller just set, so every setup failure vanished with no row saying why | needs a setup failure |
+| `resplice_pending` made one pass, leaving a nested chain half-attached when the deeper trees were held first | needs nested Out-of-Process Frames |
+| the depth bound read `openerId`, which an `iframe` target does not set, so it could never fire | needs 11 levels of nesting |
+| `_has_target`: two sessions for one target would splice the same subtree twice | never observed; kept as a guard, and said so |
+
+All four are pinned by `tests/test_frame_session_discovery.py` and by
+`docs/rfc/04_probes/mutate_discovery.py`, whose 8 mutants all read CAUGHT.

@@ -144,6 +144,7 @@ def run_session(
     url: str | None,
     registry_path: str | None,
     endpoint: str | None,
+    all_frames: bool = False,
 ) -> Generator[CDPHandler]:
     """The one session a Step Run holds for all of its steps.
 
@@ -153,7 +154,9 @@ def run_session(
     """
     spec, by = target_selector(target, url)
     port = _resolve_port(instance, registry_path, endpoint)
-    with _cdp_handler_session(port, spec, by, external=endpoint is not None) as handler:
+    with _cdp_handler_session(
+        port, spec, by, external=endpoint is not None, all_frames=all_frames
+    ) as handler:
         yield handler
 
 
@@ -165,6 +168,7 @@ def _handler_for(
     target: str | None,
     registry_path: str | None,
     endpoint: str | None,
+    all_frames: bool = False,
 ) -> Generator[CDPHandler]:
     """Yield the session this verb runs on, opening one only if it must.
 
@@ -178,7 +182,9 @@ def _handler_for(
         yield handler
         return
     port = _resolve_port(instance, registry_path, endpoint)
-    with _cdp_handler_session(port, target, external=endpoint is not None) as opened:
+    with _cdp_handler_session(
+        port, target, external=endpoint is not None, all_frames=all_frames
+    ) as opened:
         yield opened
 
 
@@ -189,6 +195,7 @@ def _cdp_handler_session(
     target_by: str | None = None,
     *,
     external: bool = False,
+    all_frames: bool = False,
 ) -> Generator[CDPHandler]:
     """Yield a connected one-shot :class:`CDPHandler`, then tear it down.
 
@@ -208,7 +215,11 @@ def _cdp_handler_session(
     look the browser up in (#97).
     """
     handler = CDPHandler(
-        f"http://127.0.0.1:{port}", mode="full", target_spec=target_spec, target_by=target_by
+        f"http://127.0.0.1:{port}",
+        mode="full",
+        target_spec=target_spec,
+        target_by=target_by,
+        all_frames=all_frames,
     )
     thread = threading.Thread(target=handler.run, name="curated-cdp", daemon=True)
     thread.start()
@@ -327,6 +338,7 @@ def snapshot(
     registry_path: str | None = None,
     endpoint: str | None = None,
     handler: CDPHandler | None = None,
+    all_frames: bool = False,
 ) -> dict[str, Any]:
     """Return the native UID accessibility tree (frozen ``take_snapshot``).
 
@@ -334,7 +346,7 @@ def snapshot(
     not focus-guarded. ``target`` selects the page whose UIDs are returned,
     which is what makes those UIDs usable with ``click --target``.
     """
-    with _handler_for(handler, instance, target, registry_path, endpoint) as handler:
+    with _handler_for(handler, instance, target, registry_path, endpoint, all_frames) as handler:
         tree = _native_or_raise(handler, "take_snapshot", {})
     return {"snapshot": tree}
 
@@ -347,6 +359,7 @@ def click(
     registry_path: str | None = None,
     endpoint: str | None = None,
     handler: CDPHandler | None = None,
+    all_frames: bool = False,
 ) -> dict[str, Any]:
     """Native UID click (frozen ``click``), over the #40 interaction path.
 
@@ -356,7 +369,7 @@ def click(
     check unable to fire: it was always "current", so a UID from a different
     tree resolved against it by ordinal and named whatever now sat there.
     """
-    with _handler_for(handler, instance, target, registry_path, endpoint) as handler:
+    with _handler_for(handler, instance, target, registry_path, endpoint, all_frames) as handler:
         _refuse_input_to_hidden_tab(handler)
         text = _native_or_raise(handler, "click", {"uid": uid})
     return {"uid": uid, "result": text}
@@ -371,12 +384,13 @@ def fill(
     registry_path: str | None = None,
     endpoint: str | None = None,
     handler: CDPHandler | None = None,
+    all_frames: bool = False,
 ) -> dict[str, Any]:
     """Native UID fill (frozen ``fill``), over the #40 interaction path.
 
     Takes no snapshot, for the reason :func:`click` gives.
     """
-    with _handler_for(handler, instance, target, registry_path, endpoint) as handler:
+    with _handler_for(handler, instance, target, registry_path, endpoint, all_frames) as handler:
         _refuse_input_to_hidden_tab(handler)
         result = _native_or_raise(handler, "fill", {"uid": uid, "value": text})
     return {"uid": uid, "text": text, "result": result}
@@ -513,9 +527,10 @@ def frames_list(
     registry_path: str | None = None,
     endpoint: str | None = None,
     handler: CDPHandler | None = None,
+    all_frames: bool = False,
 ) -> dict[str, Any]:
     """List the page's frames (frozen ``list_frames``)."""
-    with _handler_for(handler, instance, None, registry_path, endpoint) as handler:
+    with _handler_for(handler, instance, None, registry_path, endpoint, all_frames) as handler:
         text = _tool_or_raise(handler, "list_frames", {})
     return {"frames": text}
 
@@ -527,9 +542,10 @@ def frames_select(
     registry_path: str | None = None,
     endpoint: str | None = None,
     handler: CDPHandler | None = None,
+    all_frames: bool = False,
 ) -> dict[str, Any]:
     """Select a frame by URL pattern (frozen ``select_frame``)."""
-    with _handler_for(handler, instance, None, registry_path, endpoint) as handler:
+    with _handler_for(handler, instance, None, registry_path, endpoint, all_frames) as handler:
         text = _tool_or_raise(handler, "select_frame", {"url_pattern": pattern})
     return {"selected": text}
 
@@ -540,9 +556,10 @@ def frames_reset(
     registry_path: str | None = None,
     endpoint: str | None = None,
     handler: CDPHandler | None = None,
+    all_frames: bool = False,
 ) -> dict[str, Any]:
     """Clear frame selection back to the top-level page (frozen ``reset_frame``)."""
-    with _handler_for(handler, instance, None, registry_path, endpoint) as handler:
+    with _handler_for(handler, instance, None, registry_path, endpoint, all_frames) as handler:
         text = _tool_or_raise(handler, "reset_frame", {})
     return {"result": text}
 
@@ -559,6 +576,7 @@ def storage_get(
     registry_path: str | None = None,
     endpoint: str | None = None,
     handler: CDPHandler | None = None,
+    all_frames: bool = False,
 ) -> dict[str, Any]:
     """Read a frame's storage (frozen ``get_frame_storage``).
 
@@ -572,7 +590,7 @@ def storage_get(
     :meth:`CDPHandler.borrowed_frame_selection`.
     """
     with (
-        _handler_for(handler, instance, None, registry_path, endpoint) as handler,
+        _handler_for(handler, instance, None, registry_path, endpoint, all_frames) as handler,
         contextlib.ExitStack() as scope,
     ):
         if key:

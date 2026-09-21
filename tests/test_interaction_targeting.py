@@ -52,12 +52,19 @@ class FakeHandler(HandlerSurface):
     instances: ClassVar[list[FakeHandler]] = []
 
     def __init__(
-        self, browser_url, mode="full", stealth=False, target_spec=None, target_by=None
+        self,
+        browser_url,
+        mode="full",
+        stealth=False,
+        target_spec=None,
+        target_by=None,
+        all_frames=False,
     ):
         self.browser_url = browser_url
         self.mode = mode
         self.target_spec = target_spec
         self.target_by = target_by
+        self.all_frames = all_frames
         self.tool_calls: list[tuple[str, dict]] = []
         self.native_calls: list[tuple[str, dict]] = []
         FakeHandler.instances.append(self)

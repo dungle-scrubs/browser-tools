@@ -236,6 +236,7 @@ def run(
     url: str | None = None,
     registry_path: str | None = None,
     endpoint: str | None = None,
+    all_frames: bool = False,
 ) -> tuple[dict[str, Any], bool]:
     """Validate a Step List, then run it. Returns ``(document, succeeded)``.
 
@@ -248,7 +249,9 @@ def run(
     steps = step_list.validate(
         read_source(source), registry_path=registry_path, endpoint=endpoint
     )
-    with curated.run_session(instance, target, url, registry_path, endpoint) as handler:
+    with curated.run_session(
+        instance, target, url, registry_path, endpoint, all_frames
+    ) as handler:
         return execute(steps, handler, registry_path, timeout)
 
 

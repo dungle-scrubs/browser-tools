@@ -89,6 +89,27 @@ def _add_endpoint(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     return parser
 
 
+#: What `--frames all` buys, in one line for `--help`.
+FRAMES_HELP = (
+    "'all' also reaches cross-origin iframes, which run in their own process "
+    "and are otherwise invisible to frames list, frames select and snapshot. "
+    "Default 'page': same-process frames only."
+)
+
+
+def _add_frames(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+    """Give one frame-reading verb the ``--frames`` flag (RFC-04).
+
+    Off by default for this release. Reaching an Out-of-Process Frame opens a
+    CDP session per frame, and that lifecycle is new, so a caller asks for it
+    rather than every invocation paying for it.
+    """
+    parser.add_argument(
+        "--frames", choices=("page", "all"), default="page", metavar="SCOPE", help=FRAMES_HELP
+    )
+    return parser
+
+
 def _installed_version() -> str:
     """The running build's version, read from the installed distribution.
 
@@ -319,6 +340,7 @@ def _add_run_verb(
         "--url", metavar="SUBSTRING", help="Select the page target by URL substring"
     )
     _add_endpoint(run_parser)
+    _add_frames(run_parser)
 
 
 def _add_curated_verbs(
@@ -341,6 +363,7 @@ def _add_curated_verbs(
         "--target", metavar="SPEC", help="Select the page target (1-based index or id)"
     )
     _add_endpoint(snapshot)
+    _add_frames(snapshot)
 
     click = sub.add_parser("click", help="Native UID click")
     click.add_argument(
@@ -351,6 +374,7 @@ def _add_curated_verbs(
         "--target", metavar="SPEC", help="Select the page target (1-based index or id)"
     )
     _add_endpoint(click)
+    _add_frames(click)
 
     fill = sub.add_parser("fill", help="Native UID fill")
     fill.add_argument("instance", nargs="?", metavar="INSTANCE", help="Instance (omit if only one)")
@@ -360,6 +384,7 @@ def _add_curated_verbs(
         "--target", metavar="SPEC", help="Select the page target (1-based index or id)"
     )
     _add_endpoint(fill)
+    _add_frames(fill)
 
     wait_idle = sub.add_parser("wait-idle", help="Wait for network idle")
     wait_idle.add_argument(
@@ -428,13 +453,16 @@ def _add_curated_verbs(
     fl = frames_sub.add_parser("list", help="List frames")
     fl.set_defaults(instance=None)
     _add_endpoint(fl)
+    _add_frames(fl)
     fs = frames_sub.add_parser("select", help="Select a frame by URL pattern")
     fs.add_argument("pattern", metavar="PATTERN", help="Frame URL substring/pattern")
     fs.set_defaults(instance=None)
     _add_endpoint(fs)
+    _add_frames(fs)
     fr = frames_sub.add_parser("reset", help="Clear frame selection")
     fr.set_defaults(instance=None)
     _add_endpoint(fr)
+    _add_frames(fr)
 
     storage = sub.add_parser("storage", help="Read a frame's storage")
     storage_sub = storage.add_subparsers(dest="storage_action", metavar="ACTION")
@@ -442,6 +470,7 @@ def _add_curated_verbs(
     sg.add_argument("--key", metavar="K", help="Frame URL pattern to select before reading")
     sg.set_defaults(instance=None)
     _add_endpoint(sg)
+    _add_frames(sg)
 
     screenshot = sub.add_parser("screenshot", help="Capture a page screenshot")
     screenshot.add_argument(
@@ -750,6 +779,7 @@ def _run_step_list(args: argparse.Namespace, registry_path: str | None) -> int:
         url=args.url,
         registry_path=registry_path,
         endpoint=args.endpoint,
+        all_frames=getattr(args, "frames", "page") == "all",
     )
     _print_json(document)
     if succeeded:
@@ -849,6 +879,7 @@ def _curated_envelope(
             registry_path=registry_path,
             endpoint=args.endpoint,
             handler=handler,
+            all_frames=getattr(args, "frames", "page") == "all",
         )
 
     if args.command == "click":
@@ -859,6 +890,7 @@ def _curated_envelope(
             registry_path=registry_path,
             endpoint=args.endpoint,
             handler=handler,
+            all_frames=getattr(args, "frames", "page") == "all",
         )
 
     if args.command == "fill":
@@ -870,6 +902,7 @@ def _curated_envelope(
             registry_path=registry_path,
             endpoint=args.endpoint,
             handler=handler,
+            all_frames=getattr(args, "frames", "page") == "all",
         )
 
     if args.command == "wait-idle":
@@ -912,6 +945,7 @@ def _curated_envelope(
             registry_path=registry_path,
             endpoint=args.endpoint,
             handler=handler,
+            all_frames=getattr(args, "frames", "page") == "all",
         )
 
     if args.command == "screenshot":
@@ -953,6 +987,7 @@ def _frames_envelope(
             registry_path=registry_path,
             endpoint=args.endpoint,
             handler=handler,
+            all_frames=getattr(args, "frames", "page") == "all",
         )
     if action == "select":
         return curated.frames_select(
@@ -961,6 +996,7 @@ def _frames_envelope(
             registry_path=registry_path,
             endpoint=args.endpoint,
             handler=handler,
+            all_frames=getattr(args, "frames", "page") == "all",
         )
     if action == "reset":
         return curated.frames_reset(

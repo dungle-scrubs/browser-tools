@@ -338,6 +338,8 @@ class CDPRuntime:
     #: Rebound rather than mutated, so the class-level default cannot be
     #: shared by two runtimes built without `__init__`.
     _caller_enabled: frozenset[str] = frozenset()
+    _all_frames: bool = False
+    _frame_sessions: Any = None
 
     def __init__(
         self,
@@ -346,6 +348,7 @@ class CDPRuntime:
         stealth: bool = False,
         target_spec: str | None = None,
         target_by: str | None = None,
+        all_frames: bool = False,
     ) -> None:
         """Initialize the CDP runtime.
 
@@ -367,6 +370,11 @@ class CDPRuntime:
         self._stealth = stealth
         self._target_spec = target_spec
         self._target_by = target_by
+        # RFC-04, Decision 8: off unless the caller asked for it. A cross-
+        # origin iframe is reached only with `--frames all`, for the first
+        # release, because the correctness work behind it is new.
+        self._all_frames = all_frames
+        self._frame_sessions: Any = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._ready = threading.Event()
         self._stop_event: asyncio.Event | None = None
@@ -390,8 +398,23 @@ class CDPRuntime:
 
     @property
     def available(self) -> bool:
-        """Whether the CDP client is connected and ready."""
-        return self._cdp_client is not None and self._cdp_client.connected
+        """Whether the CDP client is connected and setup has finished.
+
+        `_ready` is the second half, and it is not decoration. The caller in
+        `curated._cdp_handler_session` polls this property to decide the
+        invocation may start, and `_connect_cdp` assigns `_cdp_client` as its
+        first statement - before `Page.enable`, before the frame tree, before
+        `Runtime.enable`, before Frame Sessions. Without `_ready` the poll
+        returns true in the gap and the verb runs against a half-built map.
+
+        It stayed hidden because the poll sleeps 20 ms and setup usually
+        beats it. Setup that does more does not: on a page with twenty
+        cross-origin iframes, `frames list --frames all` returned 20, then
+        8, then 20, then 4 out-of-process frames over consecutive identical
+        runs, each answer being however much of the map existed when the
+        read won the race.
+        """
+        return self._cdp_client is not None and self._cdp_client.connected and self._ready.is_set()
 
     @property
     def connect_error(self) -> str | None:
@@ -419,6 +442,15 @@ class CDPRuntime:
         in flight to cut, so it reads the deadline and clamps its own.
         """
         return self._deadline
+
+    @property
+    def frame_sessions(self) -> Any:
+        """Every Frame Session below the page session (RFC-04).
+
+        ``None`` when the caller did not ask for them with ``--frames all``,
+        and when the browser refused ``Target.setAutoAttach``.
+        """
+        return self._frame_sessions
 
     @property
     def caller_enabled(self) -> frozenset[str]:
@@ -680,10 +712,50 @@ class CDPRuntime:
                 self._frame_manager.handle_execution_contexts_cleared,
             )
             await self._cdp_client.send("Runtime.enable")
+
+            # RFC-04. Last, and only when asked: a page with no cross-origin
+            # iframe pays nothing, and a failure here must not cost the
+            # caller the page session that is already working.
+            if self._all_frames:
+                await self._start_frame_sessions(cdp, session_id)
+
+            # Setup is over, so the invocation may start. Set here rather
+            # than in `_main`, because this is the method that finishes the
+            # work `available` promises has been done, and it is also called
+            # on its own.
+            self._ready.set()
         except Exception as exc:
             self._connect_error = str(exc)
             logger.exception("CDP session setup failed for %s", self._browser_url)
             self._cdp_client = None
+
+    async def _start_frame_sessions(self, cdp: Any, session_id: str) -> None:
+        """Turn auto-attach on, or carry on without it.
+
+        A browser that refuses `Target.setAutoAttach` leaves the page session
+        exactly as it was, and `frames select` keeps the diagnosis that says
+        a cross-origin iframe is out of reach. That is a worse answer than
+        reaching the frame and a much better one than no page at all.
+        """
+        from .frame_sessions import FrameSessions
+
+        try:
+            # Which target this session is attached to. `one_shot_page_session`
+            # knows it and yields `(cdp, session_id)`, a shape six callers
+            # unpack, so it is asked for here rather than threaded through all
+            # of them. One round trip, on the opt-in path only.
+            info = await cdp.send(method="Target.getTargetInfo", session_id=session_id)
+            target_id = (info.get("targetInfo") or {}).get("targetId", "")
+            sessions = FrameSessions(cdp, self._frame_manager, session_id, target_id)
+            await sessions.start()
+            self._frame_sessions = sessions
+            # Discovery before the invocation reports itself ready. Without
+            # this, `frames select` on an Out-of-Process Frame races the
+            # splice and fails against a tree the child is not in yet.
+            await sessions.settle()
+        except Exception as exc:
+            logger.debug("auto-attach unavailable, driving the page session alone: %s", exc)
+            self._frame_sessions = None
 
     def stop(self) -> None:
         """Signal the background loop to stop."""
@@ -836,6 +908,7 @@ class CDPHandler:
         stealth: bool = False,
         target_spec: str | None = None,
         target_by: str | None = None,
+        all_frames: bool = False,
     ) -> None:
         """Initialize the handler registry over a fresh CDP runtime.
 
@@ -847,7 +920,12 @@ class CDPHandler:
             target_spec: Which page to attach to; see :class:`CDPRuntime`.
         """
         self._rt = CDPRuntime(
-            browser_url, mode, stealth=stealth, target_spec=target_spec, target_by=target_by
+            browser_url,
+            mode,
+            stealth=stealth,
+            target_spec=target_spec,
+            target_by=target_by,
+            all_frames=all_frames,
         )
         # Tool name -> bound handler. Built from the class-level _CDP_HANDLERS
         # table, which is parity-checked against tool_registry.CDP_TOOLS above.
@@ -892,6 +970,11 @@ class CDPHandler:
     def caller_enabled(self) -> frozenset[str]:
         """Domains a raw step turned on by hand; see :attr:`CDPRuntime.caller_enabled`."""
         return self._rt.caller_enabled
+
+    @property
+    def frame_sessions(self) -> Any:
+        """The Frame Sessions below the page session; see :class:`CDPRuntime`."""
+        return self._rt.frame_sessions
 
     def record_caller_enable(self, method: str) -> None:
         """See :meth:`CDPRuntime.record_caller_enable`."""
@@ -1136,7 +1219,18 @@ class CDPHandler:
             indent = "  " * frame["depth"]
             selected = " [selected]" if frame["frameId"] == fm.selected_frame_id else ""
             name = f' name="{frame["name"]}"' if frame.get("name") else ""
-            lines.append(f"{indent}{frame['frameId']}: {frame['url']}{name}{selected}")
+            # A frame answered by its own session is out-of-process. Say so:
+            # it is why its UIDs come from a different document, and why it is
+            # absent altogether without `--frames all` (RFC-04).
+            oopif = " [out-of-process]" if frame.get("frameSessionId") else ""
+            lines.append(f"{indent}{frame['frameId']}: {frame['url']}{name}{oopif}{selected}")
+
+        # A frame a bound refused is listed and marked, never silently
+        # dropped: a caller who cannot see it cannot ask why it is missing.
+        sessions = self._rt.frame_sessions
+        if sessions is not None:
+            for target_id, url in sessions.unreachable.items():
+                lines.append(f"  {target_id}: {url or '(url unknown)'} [unreachable]")
         return make_text("\n".join(lines))
 
     async def _handle_select_frame(self, arguments: dict[str, Any]) -> dict[str, Any]:

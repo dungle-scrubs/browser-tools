@@ -160,15 +160,41 @@ CURATED VERBS
       Inspect and select page frames. PATTERN is a frame URL substring. Any
       other sub-action is a usage error (exit 2).
 
-      SAME-PROCESS FRAMES ONLY. A cross-origin iframe runs in its own renderer
-      process under Chrome's site isolation, with its own CDP target. It is
-      absent from `frames list`, `frames select` cannot select it, and
-      `snapshot` shows the Iframe node with nothing under it. `--target` does
-      not reach it either: only page targets are attachable. Logins, payment
-      forms and consent banners are usually cross-origin iframes, so this is
-      the common case rather than the exotic one. Drive the iframe's URL as a
-      page of its own instead. `frames select` says so when it can tell that
-      is what happened.
+      SAME-PROCESS FRAMES ONLY, unless you pass --frames all. A cross-origin
+      iframe runs in its own renderer process under Chrome's site isolation,
+      with its own CDP target. By default it is absent from `frames list`,
+      `frames select` cannot select it, and `snapshot` shows the Iframe node
+      with nothing under it. `--target` does not reach it either: only page
+      targets are attachable. Logins, payment forms and consent banners are
+      usually cross-origin iframes, so this is the common case rather than
+      the exotic one. `frames select` says so when it can tell that is what
+      happened.
+
+  --frames page | --frames all
+      Which frames the invocation can see. Default `page`, which is the
+      behaviour above. `all` attaches to each cross-origin iframe as well and
+      splices its frames into the one tree, so they are listed, selectable,
+      and readable by the verbs that take a selected frame.
+
+      Takes effect on `frames list`, `frames select`, `frames reset`,
+      `storage get`, `snapshot`, `click`, `fill`, and `run`, where it covers
+      every step of the run.
+
+      `frames list --frames all` marks a frame in another process
+      [out-of-process]. A frame past a bound is listed [unreachable] with its
+      URL rather than dropped, so a frame you cannot reach is still a row you
+      can see. The bounds are 32 frame sessions and 10 levels of nesting.
+
+      Off by default because it is opt-in for this release, not because it
+      costs much: measured over 9 runs each on a page with twenty sibling
+      cross-origin iframes, `frames list` took 109.2 ms by default and
+      119.7 ms with --frames all. On a page with no cross-origin iframe the
+      flag costs one CDP round trip, about 8 ms.
+
+      It does not change what `snapshot` prints. A cross-origin iframe's
+      Iframe node still has nothing under it; merging the child trees is
+      later work. What --frames all gives you today is the frame, by name,
+      selectable, so `storage get`, `click` and `fill` can address it.
 
   storage get [--key K]
       The selected frame's storage. --key is a frame URL pattern to select
