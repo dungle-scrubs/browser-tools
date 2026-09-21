@@ -65,11 +65,20 @@ class CDPClient:
         method: str,
         params: dict | None = None,
         session_id: str | None = None,
+        timeout: float | None = None,
     ) -> dict:
         """Send a CDP command and await the response.
 
+        ``timeout`` bounds the wait in seconds. It defaults to no bound, so a
+        caller that does not ask for one blocks until Chrome answers or the
+        socket closes. The bound belongs here rather than in a ``wait_for``
+        around this call, because only this scope knows ``msg_id``: a caller
+        that gives up outside has no way to retire the pending entry, and the
+        stale entry is what a late response later trips over.
+
         Raises CDPError for protocol errors.
         Raises ConnectionError if not connected or connection lost.
+        Raises TimeoutError when ``timeout`` elapses first.
         """
         if not self._connected:
             raise ConnectionError("Not connected to CDP WebSocket")
@@ -92,7 +101,15 @@ class CDPClient:
             self._connected = False
             raise ConnectionError(f"Failed to send CDP command: {exc}") from exc
 
-        return await future
+        try:
+            if timeout is None:
+                return await future
+            return await asyncio.wait_for(future, timeout=timeout)
+        except (TimeoutError, asyncio.CancelledError):
+            # Retire the entry so a late response is dropped in the receive
+            # loop rather than found and delivered to a future nobody awaits.
+            self._pending.pop(msg_id, None)
+            raise
 
     def on(
         self,
@@ -144,6 +161,12 @@ class CDPClient:
 
                 if "id" in msg and msg["id"] in self._pending:
                     future = self._pending.pop(msg["id"])
+                    if future.done():
+                        # The waiter was cancelled or timed out. Setting a
+                        # result here raises InvalidStateError, which this
+                        # loop's own handler would answer by exiting, taking
+                        # the connection down with it.
+                        continue
                     if "error" in msg:
                         err = msg["error"]
                         future.set_exception(

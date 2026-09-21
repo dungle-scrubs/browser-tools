@@ -33,11 +33,17 @@ it is sent changes.
 
 What this preserves deliberately
 --------------------------------
-- **The command timeout.** ``core.cdp_client.CDPClient.send`` awaits its
-  future with no deadline, so a command Chrome never answers hangs forever.
-  The page-level client bounds every command at 30 seconds. Adopting the core
-  client without this wrapper would silently drop that bound, so ``send``
-  re-applies it here.
+- **The command timeout.** ``core.cdp_client.CDPClient.send`` defaults to no
+  deadline, so a command Chrome never answers hangs forever. The page-level
+  client bounds every command at 30 seconds. ``send`` here asks the core
+  client for that bound on every command.
+
+  The bound is passed down rather than applied with a ``wait_for`` around the
+  call, and that is not a style choice. Only the core client's ``send`` knows
+  the message id, so only it can retire the pending entry when the wait ends
+  early. A ``wait_for`` out here leaves the entry behind, and the late
+  response then lands on a cancelled future and takes the receive loop with
+  it.
 - **The exception type.** ``cdp_handler`` and ``screencast`` both catch
   ``cdp_client.CDPError``. The core client raises ``core.errors.CDPError``,
   an unrelated class, and a ``ConnectionError`` when the socket is gone. Both
@@ -46,7 +52,6 @@ What this preserves deliberately
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from typing import TYPE_CHECKING, Any
 
@@ -111,15 +116,15 @@ class AttachedSessionClient:
             raise CDPError("Not connected to Chrome CDP")
         deadline = DEFAULT_TIMEOUT_SECONDS if timeout is None else timeout
         try:
-            return await asyncio.wait_for(
-                self._client.send(method=method, params=params, session_id=self._session_id),
+            return await self._client.send(
+                method=method,
+                params=params,
+                session_id=self._session_id,
                 timeout=deadline,
             )
         except CoreCDPError as exc:
             raise CDPError(f"CDP error in {method}: {exc.message}") from exc
         except TimeoutError as exc:
-            # The core client keeps the pending future; the session is torn
-            # down at the end of the invocation, which collects it.
             raise CDPError(f"CDP command timed out after {deadline}s: {method}") from exc
         except ConnectionError as exc:
             raise CDPError(f"Failed to send CDP command: {exc}") from exc

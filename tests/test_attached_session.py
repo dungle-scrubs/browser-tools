@@ -9,8 +9,6 @@ catch, and the command timeout the page-level client always had survives.
 
 from __future__ import annotations
 
-import asyncio
-
 import pytest
 
 from browser_tools.attached_session import (
@@ -24,7 +22,7 @@ from browser_tools.core.errors import CDPError as CoreCDPError
 class FakeCore:
     """Records what a core client would have been asked to do."""
 
-    def __init__(self, *, result=None, raises=None, hang=False):
+    def __init__(self, *, result=None, raises=None):
         self.sent: list[dict] = []
         self.subscriptions: list[tuple[str, object, str | None]] = []
         self.removed: list[tuple[str, object]] = []
@@ -32,12 +30,16 @@ class FakeCore:
         self._connected = True
         self._result = result if result is not None else {"ok": True}
         self._raises = raises
-        self._hang = hang
 
-    async def send(self, method, params=None, session_id=None):
-        self.sent.append({"method": method, "params": params, "session_id": session_id})
-        if self._hang:
-            await asyncio.Event().wait()
+    async def send(self, method, params=None, session_id=None, timeout=None):
+        self.sent.append(
+            {
+                "method": method,
+                "params": params,
+                "session_id": session_id,
+                "timeout": timeout,
+            }
+        )
         if self._raises is not None:
             raise self._raises
         return self._result
@@ -68,7 +70,7 @@ class TestEverySendCarriesTheSession:
     @pytest.mark.asyncio
     async def test_the_session_id_is_attached(self, client, core):
         await client.send("Page.enable")
-        assert core.sent == [{"method": "Page.enable", "params": None, "session_id": "SESSION-1"}]
+        assert core.sent[0]["session_id"] == "SESSION-1"
 
     @pytest.mark.asyncio
     async def test_params_pass_through_unchanged(self, client, core):
@@ -114,10 +116,13 @@ class TestTheExceptionTypeCallersCatch:
 
 
 class TestTheCommandTimeoutSurvives:
-    """The core client awaits its future with no deadline.
+    """The core client defaults to no deadline.
 
-    Adopting it without re-applying a bound turns a command Chrome never
-    answers into a hang with no diagnostic.
+    Adopting it without asking for a bound turns a command Chrome never
+    answers into a hang with no diagnostic. The bound is asked for on the
+    call rather than wrapped around it: only the core client's `send` can
+    retire the pending entry when the wait ends early. What a wrapper would
+    have cost is in `tests/test_core_send_timeout.py`.
     """
 
     def test_the_default_matches_the_page_level_client(self):
@@ -129,20 +134,21 @@ class TestTheCommandTimeoutSurvives:
         assert page_default == DEFAULT_TIMEOUT_SECONDS
 
     @pytest.mark.asyncio
-    async def test_a_hung_command_raises_rather_than_hanging(self):
-        client = AttachedSessionClient(FakeCore(hang=True), "S")
+    async def test_every_command_asks_for_the_bound(self, client, core):
+        await client.send("Page.enable")
+        assert core.sent[0]["timeout"] == DEFAULT_TIMEOUT_SECONDS
+
+    @pytest.mark.asyncio
+    async def test_the_caller_can_override_the_deadline(self, client, core):
+        await client.send("Page.enable", timeout=2.5)
+        assert core.sent[0]["timeout"] == 2.5
+
+    @pytest.mark.asyncio
+    async def test_a_timeout_reaches_the_caller_as_their_own_error(self):
+        client = AttachedSessionClient(FakeCore(raises=TimeoutError()), "S")
         with pytest.raises(CDPError) as caught:
             await client.send("Page.enable", timeout=0.05)
         assert "timed out" in str(caught.value)
-
-    @pytest.mark.asyncio
-    async def test_the_caller_can_override_the_deadline(self):
-        client = AttachedSessionClient(FakeCore(hang=True), "S")
-        loop = asyncio.get_running_loop()
-        started = loop.time()
-        with pytest.raises(CDPError):
-            await client.send("Page.enable", timeout=0.02)
-        assert loop.time() - started < 1.0, "the override was ignored"
 
 
 class TestSubscriptionsAreScopedToTheSession:
