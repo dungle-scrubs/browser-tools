@@ -49,12 +49,22 @@ glossary rather than left to name code that does not exist.
   can span two processes.
 - **UID** - the handle a snapshot gives a node, used by `click` and `fill`
   to address it. Valid for the lifetime of the document that produced it.
+- **CPU Profiler** - `browser-tools-profiler`, the second console script the
+  install puts down beside `bt` and `browser-tools`. It profiles the page's
+  JavaScript through `Profiler.*` over the vendored core client, with `timed`
+  for a fixed window and `watch` for threshold-triggered capture. It takes a
+  debug port rather than an instance name, so it reads no registry. It is a
+  separate command because a profile is an enable-start-stop sequence and
+  domain enable state belongs to one session, which a `bt` invocation does not
+  outlive. The implementation module is `profiler`.
 
-- **The Manual** - `bt guide`, the complete CLI surface and the only
+- **The Manual** - `bt guide`, the complete `bt` surface and the only
   documentation an agent reads before driving a browser. It lives in
   `src/browser_tools/GUIDE.txt` and ships as package data.
   `tests/test_guide.py` enumerates the verbs from the parser and fails the
-  build when one has no entry.
+  build when one has no entry, and reads `[project.scripts]` so a console
+  script with no manual entry fails the build too. The manual covers the CPU
+  Profiler in its own section for that reason.
 
 ## Module names (architecture)
 
