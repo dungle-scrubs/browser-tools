@@ -260,11 +260,33 @@ def _envelope_text(resp: dict[str, Any]) -> tuple[str, bool]:
     return text, is_error
 
 
+#: The envelope's own error prefix, which the CLI front replaces with its own.
+_ENVELOPE_ERROR_PREFIX = "Error: "
+
+
+def _reason(text: str) -> str:
+    """The envelope's error text, without the prefix the CLI adds back.
+
+    `mcp_response.make_error` prefixes `Error: ` for a daemon socket that no
+    longer exists (RFC-01 deleted the MCP front), and `cli.py` prefixes
+    `error: ` on the way to stderr. Together they printed
+    `error: Error: E002: ...`. Only one prefix belongs to the CLI, and it is
+    the CLI's.
+
+    Stripped here rather than at the print, because this is where envelope
+    text becomes an exception message and the message is what every caller
+    then reads. A message that carries no prefix is returned unchanged, so
+    the diagnostics that write their own wording through `error_response`
+    are untouched.
+    """
+    return text[len(_ENVELOPE_ERROR_PREFIX):] if text.startswith(_ENVELOPE_ERROR_PREFIX) else text
+
+
 def _tool_or_raise(handler: CDPHandler, name: str, arguments: dict[str, Any]) -> str:
     """Run a CDP tool through the handler; raise ``LifecycleError`` on tool error."""
     text, is_error = _envelope_text(handler.call_tool(name, arguments))
     if is_error:
-        raise LifecycleError(text)
+        raise LifecycleError(_reason(text))
     return text
 
 
@@ -272,7 +294,7 @@ def _native_or_raise(handler: CDPHandler, name: str, arguments: dict[str, Any]) 
     """Run a native tool through the handler; raise ``LifecycleError`` on tool error."""
     text, is_error = _envelope_text(handler.call_native(name, arguments))
     if is_error:
-        raise LifecycleError(text)
+        raise LifecycleError(_reason(text))
     return text
 
 
