@@ -190,8 +190,10 @@ RUNNING MANY STEPS IN ONE INVOCATION
 
       One step per line, each line a verb phrase exactly as you would type it
       after the instance name. Blank lines and lines starting with # are
-      ignored. Lines are split the way a shell splits them, so quoting works as
-      it does at the prompt.
+      ignored; a # anywhere else is an ordinary character, so a URL fragment
+      or a --text value carrying one needs no quoting for that reason. Lines
+      are split the way a shell splits them, so quoting works as it does at
+      the prompt.
 
           # select the checkout frame once, then read it twice
           frames select checkout
@@ -214,10 +216,56 @@ RUNNING MANY STEPS IN ONE INVOCATION
       in a step list is a usage error (exit 2).
 
       FRAME SELECTION LASTS. `frames select` in one step governs the steps after
-      it, so `storage get` with no --key works inside a run.
+      it, so `storage get` with no --key works inside a run. A selection
+      remembers the pattern you gave it, so after a navigation it re-points at
+      whatever frame now matches. If nothing matches any more, the selection is
+      cleared and the next frame-scoped step fails rather than reading the wrong
+      frame. The selected frame going away clears it too, but the pattern is
+      kept either way, so a later navigation that brings a matching frame back
+      selects it again. Only `frames reset` and a new `frames select` change the
+      pattern. `storage get --key` does not: the key names the frame for that
+      one read, and the selection is put back afterwards.
 
-      EVERYTHING ELSE BEHAVES AS IT WOULD ALONE. A step inside a run does what
-      the same command does on its own.
+      AFTER A NAVIGATION, WAIT BEFORE YOU READ. Page.navigate returns when the
+      navigation commits, and the frame tree updates from the event that
+      follows it. A step placed straight after a navigate can run before that
+      event arrives and see the frames of the page you just left. Put a
+      `wait-idle` step in between.
+
+      Use `wait-idle` and not `wait --event Page.loadEventFired` here. `wait`
+      reports events that arrive after it subscribes, and it subscribes when
+      its own step starts. A load that fired in the gap after the navigate step
+      is already gone, and the wait then times out on a page that has finished
+      loading. `wait-idle` reads the page's current state instead of waiting
+      for an edge, so it cannot miss one. It answers a narrower question than
+      `load` - the new document has stopped fetching - which is the question
+      this paragraph is about.
+
+      EVERYTHING ELSE BEHAVES AS IT WOULD ALONE, WITH ONE EXCEPTION. A step
+      inside a run does what the same command does on its own. Domains a step
+      turns on are turned off when that step ends, so a second `network-list`
+      in one run sees what the first one saw.
+
+      The exception is the Page and Runtime domains. A run needs them on
+      throughout to track frames, so they are never turned off between steps.
+      A step that relies on being the first to turn one of them on does not
+      get that. `wait --event Runtime.executionContextCreated` after any step
+      that touched Runtime reports nothing, where the same command on its own
+      reports the contexts that already exist; `console-list` is in the same
+      position, because it turns Runtime on too. Run either one on its own.
+
+      A raw step you write yourself is yours to undo. `Network.enable {}`
+      stays on until a later step turns it off; the rule above covers only the
+      domains a verb turns on for you. It wins over that rule where the two
+      meet: a `network-list` step after a hand-written `Network.enable` leaves
+      the domain on, because turning it off would make your step a no-op. The
+      price is that the `network-list` is not the first enable, the same
+      position Page and Runtime are already in.
+
+      The two exceptions are the run's own: `Page.disable` and
+      `Runtime.disable` are usage errors as steps (exit 2), because turning
+      either off breaks every step after it without failing any of them. Run
+      either on its own, outside a run.
 
       UIDS ARE UNCHANGED. A UID is still valid until the page navigates, no
       longer and no shorter. One process does not extend it. Because no step can

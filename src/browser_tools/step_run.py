@@ -83,6 +83,10 @@ def _one_step(step: step_list.Step, handler: Any, registry_path: str | None) -> 
 
     if step.is_passthrough:
         method, params = step.as_method()
+        # A domain this step turns on is the caller's, and no later step may
+        # give it back. Recorded before the send, so a step that enables a
+        # domain and then fails on something else still owns it.
+        handler.record_caller_enable(method)
         cdp, session_id = handler.require_session()
         try:
             return handler.submit(passthrough.send_on_session(cdp, session_id, method, params))

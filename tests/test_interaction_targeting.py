@@ -16,6 +16,7 @@ from __future__ import annotations
 from typing import Any, ClassVar
 
 import pytest
+from doubles import HandlerSurface
 
 from browser_tools import curated
 from browser_tools.core import registry as core_registry
@@ -44,7 +45,7 @@ def _seed(registry_path: str, port: int = 9222) -> None:
     )
 
 
-class FakeHandler:
+class FakeHandler(HandlerSurface):
     """A one-shot CDPHandler double that records its target and visibility."""
 
     visibility: ClassVar[str] = "visible"

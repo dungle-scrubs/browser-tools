@@ -214,6 +214,23 @@ class FrameManager:
         self._selected_frame_id = None
         self._selected_url_pattern = None
 
+    @property
+    def selection_pattern(self) -> str | None:
+        """The URL pattern the selection follows, or ``None`` when unset.
+
+        The pattern rather than the frame id is the selection's identity: it
+        survives a navigation, and the id is re-resolved from it. So it is
+        also the only thing worth saving and restoring.
+        """
+        return self._selected_url_pattern
+
+    def restore_selection(self, pattern: str | None) -> None:
+        """Put the selection back where a borrowing read found it."""
+        if pattern is None:
+            self.reset_frame()
+        else:
+            self.select_frame_by_url(pattern)
+
     def get_selected_frame(self) -> FrameInfo | None:
         """Get the currently selected frame, re-resolving if needed.
 
@@ -242,6 +259,60 @@ class FrameManager:
             return None
         return frame.execution_context_id
 
+    def _reachable_frames(self) -> list[FrameInfo]:
+        """The frames `frames list` shows, in the order it shows them.
+
+        `_frames` is one representation and the `children` lists are another,
+        and they can disagree: a frame whose `Page.frameNavigated` arrived
+        before its `Page.frameAttached` lands in the map with no parent
+        holding it. Resolving a selection against the map made such a frame
+        selectable while `frames list` did not show it, so `storage get` read
+        a frame the caller could not see. Both views answer from this walk
+        instead, so one cannot show what the other denies.
+        """
+        reachable: list[FrameInfo] = []
+        if self._root_frame_id is None:
+            return reachable
+        seen: set[str] = set()
+        # Depth-first, children in order, which is the order `frames list`
+        # prints. Two frames can match one pattern, so the order decides which
+        # one a selection gets, and it has to be the order the caller read.
+        frontier = [self._root_frame_id]
+        while frontier:
+            frame = self._frames.get(frontier.pop())
+            if frame is None or frame.frame_id in seen:
+                continue
+            seen.add(frame.frame_id)
+            reachable.append(frame)
+            frontier.extend(child.frame_id for child in reversed(frame.children))
+        return reachable
+
+    def _unlink(self, frame_id: str) -> None:
+        """Take ``frame_id`` out of whatever parent's ``children`` holds it.
+
+        Scans every frame rather than following ``parent_frame_id``, because
+        the link this is fixing is exactly the one that may be stale.
+        """
+        for frame in self._frames.values():
+            if any(child.frame_id == frame_id for child in frame.children):
+                frame.children = [c for c in frame.children if c.frame_id != frame_id]
+
+    def _is_descendant(self, frame_id: str, ancestor_id: str) -> bool:
+        """Is ``frame_id`` at or below ``ancestor_id``?
+
+        Walks up by ``parent_frame_id`` with a seen set, so a cycle already in
+        the map answers rather than hanging.
+        """
+        seen: set[str] = set()
+        current: str | None = frame_id
+        while current and current not in seen:
+            if current == ancestor_id:
+                return True
+            seen.add(current)
+            frame = self._frames.get(current)
+            current = frame.parent_frame_id if frame else None
+        return False
+
     def _resolve_frame_by_url(self, url_pattern: str) -> FrameInfo | None:
         """Find a frame whose URL contains the pattern (case-insensitive).
 
@@ -252,7 +323,7 @@ class FrameManager:
             First matching FrameInfo, or None.
         """
         pattern_lower = url_pattern.lower()
-        for frame in self._frames.values():
+        for frame in self._reachable_frames():
             if pattern_lower in frame.url.lower():
                 return frame
         return None
@@ -272,6 +343,32 @@ class FrameManager:
         if not frame_id:
             return
 
+        # A re-attach under a frame that is already below this one would make
+        # the frame its own ancestor. The tree cannot hold that, and keeping
+        # the pieces would leave an island in the map that `frames list` never
+        # shows and no walk ever collects. Drop the subtree instead, and say
+        # so: a frame the map holds is reachable from the root, always.
+        if self._is_descendant(parent_id, frame_id) or parent_id == frame_id:
+            self._forget_descendants(frame_id)
+            self._unlink(frame_id)
+            self._frames.pop(frame_id, None)
+            if self._selected_frame_id == frame_id:
+                self._selected_frame_id = None
+            return
+
+        # Re-attaching an id the map already holds replaces that frame, so
+        # whatever hung below the old one is gone with it. Dropping the
+        # descendants first is what keeps them from being stranded in the map:
+        # nothing would hold them afterwards, `frames list` would not show
+        # them, and no later walk could reach them to collect them.
+        self._forget_descendants(frame_id)
+
+        # And a frame has one parent. A re-attach under a *different* parent
+        # left the old one still holding it, so `frames list` printed the
+        # frame twice, once under each. Chrome re-parents a frame in ordinary
+        # use, so this is not a defensive case.
+        self._unlink(frame_id)
+
         info = FrameInfo(
             frame_id=frame_id,
             url="",
@@ -281,7 +378,6 @@ class FrameManager:
         )
         self._frames[frame_id] = info
 
-        # Add as child of parent
         parent = self._frames.get(parent_id)
         if parent:
             parent.children.append(info)
@@ -303,13 +399,23 @@ class FrameManager:
         if not frame_id:
             return
 
+        # Detaching a frame destroys everything inside it. Removing only this
+        # frame leaves its children in the map with a `parent_frame_id` that
+        # no longer resolves, which cuts them out of the tree and out of
+        # `_forget_descendants`, so a later navigation cannot remove them
+        # either. They stay selectable, because `_resolve_frame_by_url` walks
+        # the map rather than the tree.
+        self._forget_descendants(frame_id)
+
         frame = self._frames.pop(frame_id, None)
         if frame and frame.parent_frame_id:
             parent = self._frames.get(frame.parent_frame_id)
             if parent:
                 parent.children = [c for c in parent.children if c.frame_id != frame_id]
 
-        # Clear selection if detached frame was selected
+        # Clear selection if detached frame was selected. The pattern is kept,
+        # so a later navigation that brings a matching frame back re-points at
+        # it; only `frames reset` and a new `frames select` clear the pattern.
         if self._selected_frame_id == frame_id:
             self._selected_frame_id = None
 
@@ -319,6 +425,89 @@ class FrameManager:
                 frame_id=frame_id,
             )
         )
+
+    def _reresolve_selection(self) -> None:
+        """Re-point the selection at whatever now matches its pattern.
+
+        The `else` matters (RFC-03, "Frame selection across steps"). Without
+        it a re-resolution that finds nothing leaves the previous frame id in
+        place, and the next frame-scoped read succeeds against a frame whose
+        URL no longer matches the pattern the caller selected. Inside a Step
+        Run the selection outlives the step, so that stale id is read by later
+        steps.
+
+        The pattern is kept, matching what a detach does. A later navigation
+        that brings a matching frame back re-points the selection at it.
+        """
+        if not self._selected_url_pattern:
+            return
+        resolved = self._resolve_frame_by_url(self._selected_url_pattern)
+        self._selected_frame_id = resolved.frame_id if resolved else None
+
+    def handle_navigated_within_document(self, params: dict[str, Any]) -> None:
+        """Handle Page.navigatedWithinDocument, a History API route change.
+
+        A single-page app changes its URL through `history.pushState` rather
+        than by loading a document, and Chrome reports that with its own
+        event. Handling only `Page.frameNavigated` meant the frame kept the
+        URL it was first loaded with: `frames list` reported the old route,
+        and a selection made by pattern went on matching a URL the page had
+        left. The Shopify admin and most consoles are single-page apps, so
+        this is the common case rather than the exotic one.
+
+        The document is the same one, so its child frames survive and nothing
+        is forgotten here. Only the URL changed, so only the selection is
+        re-resolved against it.
+        """
+        frame_id = params.get("frameId", "")
+        url = params.get("url")
+        if not frame_id or url is None:
+            return
+
+        frame = self._frames.get(frame_id)
+        if frame is None:
+            return
+        frame.url = url
+
+        self._reresolve_selection()
+        self._event_buffer.append(
+            FrameEvent(event_type="navigated", frame_id=frame_id, url=url)
+        )
+
+    def handle_execution_contexts_cleared(self, params: dict[str, Any] | None = None) -> None:
+        """Handle Runtime.executionContextsCleared.
+
+        Every context the page had is gone. Keeping the map would leave each
+        frame holding a destroyed context id, which a frame-scoped read then
+        evaluates against and gets an error for, or worse, silently skips.
+        """
+        self._execution_contexts.clear()
+        for frame in self._frames.values():
+            frame.execution_context_id = None
+
+    def _forget_descendants(self, frame_id: str) -> None:
+        """Drop every frame below ``frame_id``, which a navigation destroyed.
+
+        Only the descendants: the frame itself survives its own navigation
+        with a new document. Walks the flat map by parent id rather than the
+        ``children`` lists, so a frame whose parent link was recorded without
+        a matching child entry is still removed.
+        """
+        doomed: list[str] = []
+        frontier = [frame_id]
+        while frontier:
+            parent_id = frontier.pop()
+            for candidate_id, candidate in self._frames.items():
+                if candidate.parent_frame_id == parent_id and candidate_id not in doomed:
+                    doomed.append(candidate_id)
+                    frontier.append(candidate_id)
+
+        for doomed_id in doomed:
+            self._frames.pop(doomed_id, None)
+            if self._selected_frame_id == doomed_id:
+                # The pattern is kept, as everywhere else: the re-resolution
+                # below may find the selection again in the new document.
+                self._selected_frame_id = None
 
     def handle_frame_navigated(self, params: dict[str, Any]) -> None:
         """Handle Page.frameNavigated event.
@@ -331,26 +520,40 @@ class FrameManager:
         if not frame_id:
             return
 
+        # A navigated frame gets a new document, and the old document's child
+        # frames go with it. Chrome sends no `Page.frameDetached` for them, so
+        # nothing else here can learn they are gone: without this, `frames
+        # list` keeps reporting frames that no longer exist, and a selection
+        # re-resolves onto one of them and reads a frame that is not there.
+        self._forget_descendants(frame_id)
+
         frame = self._frames.get(frame_id)
         if frame:
             frame.url = frame_data.get("url", frame.url)
             frame.security_origin = frame_data.get("securityOrigin", frame.security_origin)
             frame.name = frame_data.get("name", frame.name)
+            frame.children = []
         else:
-            # Frame navigated before we saw attached — create it
-            self._frames[frame_id] = FrameInfo(
+            # Frame navigated before we saw it attached, so create it. Linking
+            # it to its parent is what puts it in the tree: without that it
+            # sits in `_frames` alone, invisible to `frames list` and to
+            # `_reachable_frames`, which is the same orphan a detach used to
+            # leave behind.
+            created = FrameInfo(
                 frame_id=frame_id,
                 url=frame_data.get("url", ""),
                 security_origin=frame_data.get("securityOrigin", ""),
                 name=frame_data.get("name", ""),
                 parent_frame_id=frame_data.get("parentId"),
             )
+            self._frames[frame_id] = created
+            parent = self._frames.get(created.parent_frame_id or "")
+            if parent is not None:
+                parent.children.append(created)
+            elif self._root_frame_id is None and created.parent_frame_id is None:
+                self._root_frame_id = frame_id
 
-        # Re-resolve frame selection if URL pattern is active
-        if self._selected_url_pattern:
-            resolved = self._resolve_frame_by_url(self._selected_url_pattern)
-            if resolved:
-                self._selected_frame_id = resolved.frame_id
+        self._reresolve_selection()
 
         self._event_buffer.append(
             FrameEvent(

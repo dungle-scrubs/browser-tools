@@ -140,7 +140,10 @@ class TestCollectOnSession:
             )
         )
         assert len(result) == 2
-        assert fake.calls == ["Network.enable"]  # one enable per domain, not per event
+        # One enable per domain, not per event, and one disable to match: the
+        # step gives the domain back so the next step still gets a first
+        # enable (RFC-03, "Domain-enable state").
+        assert fake.calls == ["Network.enable", "Network.disable"]
 
     def test_handlers_removed_after_return(self):
         fake = _RaceFakeCDP([("Runtime.consoleAPICalled", {"n": 1})])

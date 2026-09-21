@@ -474,3 +474,59 @@ class TestGuidePrintsPlainText:
         path = resources.files("browser_tools").joinpath(lifecycle.GUIDE_FILENAME)
         assert path.is_file()
         assert len(lifecycle.guide_text()) > 5000
+
+
+class TestTheStepSurfaceIsNotHandWritten:
+    """The Manual's `run` section lists which verbs are steps and which are not.
+
+    Both lists are prose, and prose drifts. `test_guide.py` already fails the
+    build when a verb has no entry anywhere; these fail it when the step
+    section disagrees with `step_list`, which is what a caller reads before
+    writing a Step List and what `validate` actually enforces.
+    """
+
+    @staticmethod
+    def _between(start: str, end: str) -> str:
+        """The manual text between two markers, as one line.
+
+        Scoped to the enumerating sentence rather than the whole section. A
+        looser slice makes the check meaningless: `run` appears as an ordinary
+        word all over this section, so a substring test for it passes whether
+        or not the excluded list names it. Verified by removing `run itself`
+        from the list and watching the wider check still pass.
+        """
+        text = lifecycle.guide_text()
+        begin = text.index(start)
+        return " ".join(text[begin : text.index(end, begin)].split())
+
+    def test_every_step_verb_is_named_as_one(self):
+        from browser_tools import step_list
+
+        listed = self._between("Steps may be:", "A step may")
+        missing = sorted(
+            verb for verb in step_list.STEP_VERBS if not re.search(rf"\b{verb}\b", listed)
+        )
+        assert not missing, (
+            f"{missing} can be a step, and the manual's list of steps does not "
+            f"say so. A caller reading it would not know the verb is available.\n"
+            f"The list reads: {listed}"
+        )
+
+    def test_every_excluded_verb_is_named_as_excluded(self):
+        from browser_tools import step_list
+
+        listed = self._between("attach is not a step", "Any of these")
+        missing = sorted(
+            verb for verb in step_list.EXCLUDED_VERBS if not re.search(rf"\b{verb}\b", listed)
+        )
+        assert not missing, (
+            f"{missing} is refused as a step with exit 2, and the manual does "
+            f"not say so. The caller finds out by running the list.\n"
+            f"The list reads: {listed}"
+        )
+
+    def test_the_two_lists_do_not_overlap(self):
+        from browser_tools import step_list
+
+        overlap = step_list.STEP_VERBS & set(step_list.EXCLUDED_VERBS)
+        assert not overlap, f"{sorted(overlap)} is both a step and not a step"

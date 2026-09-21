@@ -9,12 +9,16 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import logging
 import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from collections.abc import Generator
 
 from .core.attach import AmbiguousTargetError, TargetNotFoundError
 from .lifecycle import LifecycleError
@@ -331,6 +335,9 @@ class CDPRuntime:
     _target_by: str | None = None
     _deadline: float | None = None
     _grace_until: float | None = None
+    #: Rebound rather than mutated, so the class-level default cannot be
+    #: shared by two runtimes built without `__init__`.
+    _caller_enabled: frozenset[str] = frozenset()
 
     def __init__(
         self,
@@ -375,6 +382,7 @@ class CDPRuntime:
         # checked between steps.
         self._deadline: float | None = None
         self._grace_until: float | None = None
+        self._caller_enabled: frozenset[str] = frozenset()
         # Screencast capture state machine (Page.startScreencast buffer, ack,
         # write-to-dir). Owned here so the screencast tool handlers stay
         # two-line delegators.
@@ -411,6 +419,23 @@ class CDPRuntime:
         in flight to cut, so it reads the deadline and clamps its own.
         """
         return self._deadline
+
+    @property
+    def caller_enabled(self) -> frozenset[str]:
+        """Domains a raw step in this run turned on by hand.
+
+        A later curated step must not disable one of these on its way out.
+        CDP cannot tell the helper who enabled a domain - a second
+        `Network.enable` succeeds exactly like a first - so the run records
+        it at the one place that knows: the step that sent the enable.
+        """
+        return self._caller_enabled
+
+    def record_caller_enable(self, method: str) -> None:
+        """Note a raw step's own ``Domain.enable`` so nothing undoes it."""
+        domain, _, call = method.partition(".")
+        if call == "enable" and domain:
+            self._caller_enabled = self._caller_enabled | {domain}
 
     def bounded_timeout(self, timeout: float | None) -> float | None:
         """``timeout`` clamped to what is left of the run's deadline.
@@ -620,19 +645,28 @@ class CDPRuntime:
         try:
             self._cdp_client = AttachedSessionClient(cdp, session_id)
 
-            # Enable Page domain for frame events
+            # SUBSCRIBE FIRST, then enable. `Runtime.enable` replays the
+            # execution contexts that already exist, and enabling before the
+            # handler was registered threw that replay away: every frame kept
+            # `execution_context_id = None`, and `storage get` then returned
+            # cookies only, with no localStorage or sessionStorage, and exit 0.
+            # The same discipline the event verbs already follow.
+            self._cdp_client.on("Page.frameAttached", self._frame_manager.handle_frame_attached)
+            self._cdp_client.on("Page.frameDetached", self._frame_manager.handle_frame_detached)
+            self._cdp_client.on("Page.frameNavigated", self._frame_manager.handle_frame_navigated)
+            self._cdp_client.on(
+                "Page.navigatedWithinDocument",
+                self._frame_manager.handle_navigated_within_document,
+            )
             await self._cdp_client.send("Page.enable")
-            await self._cdp_client.send("Runtime.enable")
 
-            # Get initial frame tree
+            # The frame tree before the Runtime replay, not after: the context
+            # handler files each context against a frame it looks up by id, and
+            # `update_from_frame_tree` clears the map it would look in.
             result = await self._cdp_client.send("Page.getFrameTree")
             if "frameTree" in result:
                 self._frame_manager.update_from_frame_tree(result["frameTree"])
 
-            # Subscribe to frame lifecycle events only (D-001)
-            self._cdp_client.on("Page.frameAttached", self._frame_manager.handle_frame_attached)
-            self._cdp_client.on("Page.frameDetached", self._frame_manager.handle_frame_detached)
-            self._cdp_client.on("Page.frameNavigated", self._frame_manager.handle_frame_navigated)
             self._cdp_client.on(
                 "Runtime.executionContextCreated",
                 self._frame_manager.handle_execution_context_created,
@@ -641,6 +675,11 @@ class CDPRuntime:
                 "Runtime.executionContextDestroyed",
                 self._frame_manager.handle_execution_context_destroyed,
             )
+            self._cdp_client.on(
+                "Runtime.executionContextsCleared",
+                self._frame_manager.handle_execution_contexts_cleared,
+            )
+            await self._cdp_client.send("Runtime.enable")
         except Exception as exc:
             self._connect_error = str(exc)
             logger.exception("CDP session setup failed for %s", self._browser_url)
@@ -849,6 +888,15 @@ class CDPHandler:
         """The run's deadline; see :attr:`CDPRuntime.deadline`."""
         return self._rt.deadline
 
+    @property
+    def caller_enabled(self) -> frozenset[str]:
+        """Domains a raw step turned on by hand; see :attr:`CDPRuntime.caller_enabled`."""
+        return self._rt.caller_enabled
+
+    def record_caller_enable(self, method: str) -> None:
+        """See :meth:`CDPRuntime.record_caller_enable`."""
+        self._rt.record_caller_enable(method)
+
     def require_session(self) -> tuple[Any, str]:
         """The runtime's ``(client, sessionId)``, or a refusal saying why not.
 
@@ -905,6 +953,27 @@ class CDPHandler:
     @property
     def _frame_manager(self) -> Any:
         return self._rt.frame_manager
+
+    @contextlib.contextmanager
+    def borrowed_frame_selection(self) -> Generator[None]:
+        """Select inside this block, and give the run's selection back after.
+
+        A `--key` on a read names the frame for that one read. In a one-shot
+        invocation the difference does not show, because the selection dies
+        with the process a moment later. In a Step Run the selection outlives
+        the step, so a read that left it moved would silently re-point every
+        later frame-scoped step at whatever frame it happened to read.
+
+        `GUIDE.txt` states the rule this keeps true: only `frames reset` and
+        `frames select` change the pattern.
+        """
+        frames = self._frame_manager
+        pattern = frames.selection_pattern if frames is not None else None
+        try:
+            yield
+        finally:
+            if frames is not None:
+                frames.restore_selection(pattern)
 
     @property
     def _screencast(self) -> ScreencastRecorder:
@@ -1131,8 +1200,11 @@ class CDPHandler:
         if selected is None:
             return make_error(
                 "No frame selected. Pass --key PATTERN to name the frame on this "
-                "read. A 'frames select' in an earlier command does not carry "
-                "over: the selection belongs to the process that made it."
+                "read, or select one first. Inside a 'bt run' a 'frames select' "
+                "step governs the steps after it, and a navigation that leaves "
+                "the pattern matching no frame clears it. Between separate "
+                "commands a selection never carries over: it belongs to the "
+                "process that made it."
             )
 
         storage_types = arguments.get(

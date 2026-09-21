@@ -33,6 +33,7 @@ import time
 from typing import ClassVar
 
 import pytest
+from doubles import HandlerSurface
 
 from browser_tools import cli, curated, lifecycle
 from browser_tools.core import registry as core_registry
@@ -68,7 +69,7 @@ def _entry(port: int = 9222, **extra) -> dict:
 # ---------------------------------------------------------------------------
 
 
-class FakeHandler:
+class FakeHandler(HandlerSurface):
     """A stand-in for the one-shot ``CDPHandler`` the handler transport builds.
 
     Records the tool/native calls a verb dispatches and returns canned

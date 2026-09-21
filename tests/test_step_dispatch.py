@@ -15,11 +15,12 @@ from __future__ import annotations
 import argparse
 
 import pytest
+from doubles import HandlerSurface
 
 from browser_tools import cli, step_list
 
 
-class FakeHandler:
+class FakeHandler(HandlerSurface):
     """Records that the session reached the verb."""
 
     def __init__(self):

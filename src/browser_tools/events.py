@@ -49,7 +49,7 @@ from .core.attach import AmbiguousTargetError, TargetNotFoundError
 from .core.errors import CDPError, NoPageError
 from .core.registry import InstanceNotFoundError
 from .lifecycle import LifecycleError
-from .one_shot import cli_cdp_errors, one_shot_page_session
+from .one_shot import cli_cdp_errors, domains_enabled, one_shot_page_session
 from .passthrough import UsageError
 
 #: ``wait``'s default deadline in seconds (RFC-01 "wait design").
@@ -319,6 +319,7 @@ async def wait_on_session(
     event: str,
     match: str | None,
     timeout: float,
+    keep: frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
     """Block on one CDP session for a matching event; SUBSCRIBE-FIRST.
 
@@ -349,26 +350,24 @@ async def wait_on_session(
     # ends and the leaked subscription with it; on a shared session it stays
     # registered and keeps pushing into a queue nobody reads.
     try:
-        domain = event.split(".")[0]
-        with contextlib.suppress(CDPError):
-            # Some domains have no enable; a CDP error here must not abort the
-            # wait. Events delivered during this await are already buffered.
-            await cdp.send(method=f"{domain}.enable", session_id=session_id)
-
-        deadline = None if timeout == 0 else time.monotonic() + timeout
-        while True:
-            if deadline is None:
-                item = await buffer.get()
-            else:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise WaitTimeout(_timeout_message(event, match, timeout))
-                try:
-                    item = await asyncio.wait_for(buffer.get(), timeout=remaining)
-                except TimeoutError as exc:
-                    raise WaitTimeout(_timeout_message(event, match, timeout)) from exc
-            if match is None or match in json.dumps(item):
-                return item
+        # Enabled for this wait and disabled after it, so the next step that
+        # wants this domain still gets a first enable (RFC-03, "Domain-enable
+        # state"). Events delivered during the enable are already buffered.
+        async with domains_enabled(cdp, session_id, [event.split(".")[0]], keep):
+            deadline = None if timeout == 0 else time.monotonic() + timeout
+            while True:
+                if deadline is None:
+                    item = await buffer.get()
+                else:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise WaitTimeout(_timeout_message(event, match, timeout))
+                    try:
+                        item = await asyncio.wait_for(buffer.get(), timeout=remaining)
+                    except TimeoutError as exc:
+                        raise WaitTimeout(_timeout_message(event, match, timeout)) from exc
+                if match is None or match in json.dumps(item):
+                    return item
     finally:
         cdp.off(event=event, callback=handler)
 
@@ -411,7 +410,7 @@ def wait(
         # `--timeout` is what bounds an otherwise unbounded step.
         cdp, session_id = handler.require_session()
         return handler.submit(
-            wait_on_session(cdp, session_id, event, match, timeout),
+            wait_on_session(cdp, session_id, event, match, timeout, handler.caller_enabled),
             timeout=None if timeout == 0 else timeout + _WAIT_GRACE_SECONDS,
         )
 
