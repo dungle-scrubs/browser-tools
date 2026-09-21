@@ -237,9 +237,9 @@ def test_native_capture_carries_native_uid_and_backend_node():
     textbox = next(n for n in capture.nodes if n.role == "textbox")
     # A native UID is "<docToken>-<backendNodeId>" (#96): the document the node
     # belongs to, and the DOM node itself. Not its position in the tree.
-    from browser_tools.native_snapshot import doc_token_from_loader_id
+    from browser_tools.native_snapshot import doc_token
 
-    token = doc_token_from_loader_id(FakeNativeCdpSession.LOADER_ID)
+    token = doc_token("", FakeNativeCdpSession.LOADER_ID)
     assert textbox.uid == f"{token}-3"
     assert textbox.backend_node == "3"
 

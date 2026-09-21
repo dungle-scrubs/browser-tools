@@ -24,6 +24,10 @@ class FrameInfo:
     name: str
     parent_frame_id: str | None = None
     execution_context_id: int | None = None
+    #: The load currently in this frame. With the frame id it forms the
+    #: document token every UID minted in this frame carries, which is how a
+    #: `click` in one process finds the frame it belongs to.
+    loader_id: str = ""
     children: list[FrameInfo] = field(default_factory=list)
     #: The Frame Session that answers for this frame (RFC-04). ``None`` is the
     #: page session, which is what every frame was before OOPIFs.
@@ -50,6 +54,20 @@ class FrameInfo:
         if self.children:
             result["children"] = [child.to_dict() for child in self.children]
         return result
+
+
+@dataclass(frozen=True)
+class FrameDocument:
+    """One live document: which frame holds it, and who answers for it."""
+
+    frame_id: str
+    #: `<frame id, loader id>` hashed. What a UID minted here carries.
+    doc_token: str
+    #: The Frame Session answering for this frame, or None for the page.
+    session_id: str | None
+    parent_frame_id: str | None
+    parent_doc_token: str | None
+    parent_session_id: str | None
 
 
 @dataclass
@@ -153,6 +171,7 @@ class FrameManager:
             name=frame_data.get("name", ""),
             parent_frame_id=parent_id,
             frame_session_id=session_id,
+            loader_id=str(frame_data.get("loaderId", "")),
         )
         self._frames[frame_id] = info
 
@@ -264,6 +283,38 @@ class FrameManager:
             return self.select_frame_by_url(self._selected_url_pattern)
         self._selected_frame_id = None
         return None
+
+    def frame_documents(self) -> list[FrameDocument]:
+        """Every reachable frame as a document, in `frames list` order.
+
+        One source for the two things a cross-frame read needs. A `click`
+        asks which frame a UID's document token names and which session
+        answers for it; a stitched `snapshot` asks the same, plus the
+        parent, because a frame's `Iframe` node lives in the parent's
+        document and is read on the parent's session.
+
+        Pre-order, so a frame always follows the frame that owns it. The
+        stitch depends on that: a nested frame's owner has to be in the
+        merged tree before the lookup for it can succeed.
+        """
+        from .native_snapshot import doc_token
+
+        documents: list[FrameDocument] = []
+        for frame in self._reachable_frames():
+            parent = self._frames.get(frame.parent_frame_id or "")
+            documents.append(
+                FrameDocument(
+                    frame_id=frame.frame_id,
+                    doc_token=doc_token(frame.frame_id, frame.loader_id),
+                    session_id=frame.frame_session_id,
+                    parent_frame_id=parent.frame_id if parent else None,
+                    parent_doc_token=(
+                        doc_token(parent.frame_id, parent.loader_id) if parent else None
+                    ),
+                    parent_session_id=parent.frame_session_id if parent else None,
+                )
+            )
+        return documents
 
     def get_selected_context(self) -> tuple[str | None, int] | None:
         """Where to evaluate against the selected frame, or None.
@@ -655,6 +706,7 @@ class FrameManager:
             frame.url = frame_data.get("url", frame.url)
             frame.security_origin = frame_data.get("securityOrigin", frame.security_origin)
             frame.name = frame_data.get("name", frame.name)
+            frame.loader_id = str(frame_data.get("loaderId", frame.loader_id))
             frame.children = []
         else:
             # Frame navigated before we saw it attached, so create it. Linking
@@ -668,6 +720,7 @@ class FrameManager:
                 security_origin=frame_data.get("securityOrigin", ""),
                 name=frame_data.get("name", ""),
                 parent_frame_id=frame_data.get("parentId"),
+                loader_id=str(frame_data.get("loaderId", "")),
             )
             parent = self._frames.get(created.parent_frame_id or "")
             if parent is not None:

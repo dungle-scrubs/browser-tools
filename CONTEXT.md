@@ -75,7 +75,16 @@ glossary rather than left to name code that does not exist.
   never reached are absent. The caller contract is ordered, and The Manual
   says so: read the exit code first, then `run.status`, then the steps.
 - **UID** - the handle a snapshot gives a node, used by `click` and `fill`
-  to address it. Valid for the lifetime of the document that produced it.
+  to address it: `<docToken>-<backendNodeId>`. Valid for the lifetime of the
+  document that produced it.
+- **Document Token** - the `docToken` half of a UID: the frame id and the
+  full `loaderId`, hashed to 12 hex characters. Both halves are needed. The
+  loaderId changes on every navigation, which makes the token the staleness
+  guard. The frame id is what lets one snapshot hold several documents,
+  because a `backendDOMNodeId` is unique within a renderer process, not
+  within a browser - measured, a cross-origin child's ids overlapped the
+  page's on 5 of its 7 nodes. A UID is checked against every document live
+  in the page, not against the main frame's alone.
 - **CPU Profiler** - `browser-tools-profiler`, the second console script the
   install puts down beside `bt` and `browser-tools`. It profiles the page's
   JavaScript through `Profiler.*` over the vendored core client, with `timed`
@@ -108,9 +117,11 @@ glossary rather than left to name code that does not exist.
   selected Out-of-Process Frame reads that frame's own storage, at any
   nesting depth.
 
-  A read addressed by UID is not routed yet, so `snapshot` still shows
-  the `Iframe` node empty and `click` and `fill` have no uid inside the
-  frame to address.
+  It is also the session a UID-addressed command goes to. With
+  `--frames all`, `snapshot` reads each frame's accessibility tree on the
+  session that owns it and splices the child under the `Iframe` node its
+  `DOM.getFrameOwner` names, so nodes inside a cross-origin iframe get
+  UIDs and `click` and `fill` reach them.
 
 - **Spliced Frame Tree** - the single tree `frames list` prints, built by
   attaching each Frame Session's own frame tree under the parent frame its

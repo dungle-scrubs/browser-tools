@@ -27,13 +27,15 @@ from browser_tools.native_snapshot import (
     AX_ENABLE,
     AX_GET_FULL_TREE,
     DOM_GET_FRAME_OWNER,
+    NODE_DOC_TOKEN_KEY,
     NON_DOM_UID_PREFIX,
     PAGE_ENABLE,
     PAGE_GET_FRAME_TREE,
     AxUidNode,
+    ChildFrameTree,
     NativeSnapshot,
     NativeSnapshotReader,
-    doc_token_from_loader_id,
+    doc_token,
     parse_uid,
     read_stitched_ax_tree,
     stitch_ax_frames,
@@ -41,8 +43,8 @@ from browser_tools.native_snapshot import (
 
 # A loaderId as Chrome reports it, and the token derived from it.
 LOADER_ID = "D0C0FFEE1234ABCDEF0123456789ABCD"
-DOC = doc_token_from_loader_id(LOADER_ID)
-OTHER_DOC = doc_token_from_loader_id("0B50LETE5678FEDCBA9876543210FEDC")
+DOC = doc_token("", LOADER_ID)
+OTHER_DOC = doc_token("", "0B50LETE5678FEDCBA9876543210FEDC")
 
 
 def _node(
@@ -478,8 +480,21 @@ def _child_tree() -> dict[str, Any]:
     }
 
 
+CHILD_DOC = doc_token("CHILD", "CHILDLOADER")
+
+
+def _child_frame(owner_backend: int) -> ChildFrameTree:
+    """The child tree hanging off ``owner_backend`` in the top document."""
+    return ChildFrameTree(
+        owner_backend_node_id=owner_backend,
+        owner_doc_token=DOC,
+        doc_token=CHILD_DOC,
+        result=_child_tree(),
+    )
+
+
 def test_stitch_splices_child_under_its_owner_iframe_node():
-    merged = stitch_ax_frames(_top_with_iframe(), [(14, _child_tree())])
+    merged = stitch_ax_frames(_top_with_iframe(), [_child_frame(14)], top_doc_token=DOC)
     snap = NativeSnapshotReader().build(merged, doc_token=DOC)
     roles = [(n.role, n.name) for n in snap.visible_nodes()]
     # The child frame's nodes now appear, spliced under the Iframe node.
@@ -495,20 +510,25 @@ def test_stitch_splices_child_under_its_owner_iframe_node():
 
 def test_stitch_namespaces_colliding_child_ids():
     """The child's ax_node_id 1/2 collide with the top's; both survive stitching."""
-    merged = stitch_ax_frames(_top_with_iframe(), [(14, _child_tree())])
+    merged = stitch_ax_frames(_top_with_iframe(), [_child_frame(14)], top_doc_token=DOC)
     ids = [n["nodeId"] for n in merged["nodes"]]
     assert ids.count("1") == 1  # only the top root keeps bare id "1"
     assert "f1:1" in ids and "f1:2" in ids
 
 
 def test_stitch_with_no_children_is_identity():
+    """Identity but for the document stamp, which says where each node is from."""
     top = _top_with_iframe()
-    assert stitch_ax_frames(top, []) == {"nodes": top["nodes"]}
+    merged = stitch_ax_frames(top, [], top_doc_token=DOC)
+    assert [
+        {k: v for k, v in node.items() if k != NODE_DOC_TOKEN_KEY} for node in merged["nodes"]
+    ] == top["nodes"]
+    assert {node[NODE_DOC_TOKEN_KEY] for node in merged["nodes"]} == {DOC}
 
 
 def test_stitch_skips_frame_with_no_matching_owner():
     """An owner backend absent from the top tree drops the frame's link, not its nodes."""
-    merged = stitch_ax_frames(_top_with_iframe(), [(999, _child_tree())])
+    merged = stitch_ax_frames(_top_with_iframe(), [_child_frame(999)], top_doc_token=DOC)
     iframe = next(n for n in merged["nodes"] if n.get("role", {}).get("value") == "Iframe")
     # The Iframe node gains no child link when its owner backend is unknown.
     assert "f1:1" not in (iframe.get("childIds") or [])
@@ -542,12 +562,12 @@ class _FrameSend:
 @pytest.mark.asyncio
 async def test_read_stitched_ax_tree_discovers_and_splices_child_frame():
     send = _FrameSend(_top_with_iframe(), _child_tree())
-    merged = await read_stitched_ax_tree(send)
+    merged, token = await read_stitched_ax_tree(send)
     methods = [m for m, _ in send.calls]
     assert AX_ENABLE in methods and PAGE_ENABLE in methods and PAGE_GET_FRAME_TREE in methods
     # The child frame's tree was read with its frameId.
     assert (AX_GET_FULL_TREE, {"frameId": "CHILD"}) in send.calls
-    snap = NativeSnapshotReader().build(merged, doc_token=DOC)
+    snap = NativeSnapshotReader().build(merged, doc_token=token)
     assert ("button", "Framed button") in {(n.role, n.name) for n in snap.visible_nodes()}
 
 
@@ -561,9 +581,13 @@ async def test_read_stitched_ax_tree_degrades_to_top_frame_when_no_children():
                 return {"frameTree": {"frame": {"id": "TOP"}}}
             return {}
 
-    merged = await read_stitched_ax_tree(_NoFrames())
-    # With no child frames the merged tree is exactly the top tree.
-    assert merged == _form_tree()
+    merged, token = await read_stitched_ax_tree(_NoFrames())
+    # With no child frames the merged tree is the top tree, stamped with the
+    # one document it came from.
+    assert [
+        {k: v for k, v in node.items() if k != NODE_DOC_TOKEN_KEY} for node in merged["nodes"]
+    ] == _form_tree()["nodes"]
+    assert token == doc_token("TOP", "")
 
 
 @pytest.mark.asyncio

@@ -682,10 +682,38 @@ Frame reads that frame's own storage, verified through two levels of
 nesting across three renderers: depth 0 reads `A0`, depth 1 `B1`, depth 2
 `A2`, where depth 0 and depth 2 share an origin and differ only by document.
 
-The UID half - routes rebuilt from the live frame tree, document identity
-per node, and the merged snapshot - is not built. `snapshot` still shows a
-cross-origin iframe's `Iframe` node with nothing under it, so `click` and
-`fill` have no uid inside the frame to address.
+**Phase 2b shipped the UID half.** The document token is now the frame id
+and the full loader id hashed, so it is an identity; the build takes
+document identity per node; `snapshot --frames all` reads each frame's
+accessibility tree on the session that owns it and splices the child under
+the `Iframe` node `DOM.getFrameOwner` names; a UID is checked against every
+document live in the page rather than the main frame's alone; and a
+UID-addressed command is dispatched to the renderer its token names.
+Verified end to end: clicking the host's button and a cross-origin child's
+button in one run left `{"h":"HOST"}` and `{"c":"CHILD"}` in their own
+renderers' localStorage.
+
+**One premise in this RFC is corrected by that work.** The Routing section
+says a `backendDOMNodeId` is "unique per document, not per page". It is
+unique per **renderer process**. Same-process frames share one sequence and
+never collide, which is why the existing same-process stitch was correct
+under a single token; a cross-origin child's ids overlapped the page's on 5
+of its 7 nodes. The conclusion the RFC drew still holds - the frame id has
+to be in the token - but it holds for cross-process frames, not for every
+frame.
+
+Two things Phase 2b added that this RFC did not specify, both because the
+work found them:
+
+- the same-process `click` regression the token change caused, fixed by
+  checking a UID against every live document. The RFC specified routes
+  rebuilt from the live frame tree and this is that, arrived at from the
+  failure rather than from the text.
+- a UID minted with `--frames all` and used without it was refused as
+  stale, and the stated remedy - take another snapshot - mints the same
+  UID and fails again. The message now tells the two reasons apart by
+  asking the browser for its `iframe` targets, the same shape as the
+  `frames select` diagnosis for #127.
 
 **What Phase 1 did not give you, stated because the first write-up of it
 claimed otherwise.** Verified against the released 0.7.0, before Phase 2a:

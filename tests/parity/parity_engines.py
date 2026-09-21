@@ -257,12 +257,10 @@ class NativeSnapshotEngine:
 
     def _doc_token(self) -> str:
         """The live document's token, which every UID this capture mints carries."""
-        from browser_tools.native_snapshot import doc_token_from_loader_id
+        from browser_tools.native_snapshot import doc_token_from_frame
 
         frame_tree = self._session.cdp_send("Page.getFrameTree", {})
-        return doc_token_from_loader_id(
-            frame_tree.get("frameTree", {}).get("frame", {}).get("loaderId", "")
-        )
+        return doc_token_from_frame(frame_tree.get("frameTree", {}).get("frame", {}))
 
     def capture(self, page: CorpusPage) -> PageCapture:
         """Navigate to ``page`` and capture its native snapshot, UIDs, and text."""
@@ -340,12 +338,10 @@ class NativeInteractionEngine:
 
     def _doc_token(self) -> str:
         """The live document's token, which every UID this capture mints carries."""
-        from browser_tools.native_snapshot import doc_token_from_loader_id
+        from browser_tools.native_snapshot import doc_token_from_frame
 
         frame_tree = self._session.cdp_send("Page.getFrameTree", {})
-        return doc_token_from_loader_id(
-            frame_tree.get("frameTree", {}).get("frame", {}).get("loaderId", "")
-        )
+        return doc_token_from_frame(frame_tree.get("frameTree", {}).get("frame", {}))
 
     def capture(self, page: CorpusPage) -> PageCapture:
         """Navigate to ``page`` and capture its snapshot and native UID targets."""

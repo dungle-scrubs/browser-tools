@@ -1159,13 +1159,19 @@ class CDPHandler:
         send = cdp.send
 
         if name == "take_snapshot":
-            snapshot = await self._native_reader.snapshot_stitched(send)
+            documents = self._cross_process_documents()
+            if documents:
+                merged, token = await self._stitch_across_sessions(documents)
+                snapshot = self._native_reader.build(merged, doc_token=token)
+            else:
+                snapshot = await self._native_reader.snapshot_stitched(send)
             return make_text(snapshot.format_tree())
 
         if name in ("click", "fill"):
             uid = str(arguments.get("uid", "")).strip()
             if not uid:
                 return make_error(f"E008: '{name}' requires --uid UID from a prior 'snapshot'")
+            send = self._send_for_uid(uid, send)
             try:
                 if name == "click":
                     result = await self._native_interactor.click_async(send, uid)
@@ -1177,9 +1183,146 @@ class CDPHandler:
                 result = await self._native_interactor.fill_async(send, uid, value)
                 return make_text(f"Filled uid={result.uid} (value now {result.value_after!r}).")
             except UidResolutionError as exc:
-                return make_error(str(exc))
+                return make_error(await self._uid_failure(uid, exc))
 
         return make_error(f"Unknown native tool: {name}")
+
+    async def _uid_failure(self, uid: str, exc: UidResolutionError) -> str:
+        """Why the UID did not resolve, saying which of the reasons it was.
+
+        The resolver knows one reason and states it: the document is gone.
+        There is a second, and it has the opposite remedy. A UID minted
+        inside a cross-origin iframe names that iframe's document, and this
+        invocation only sees documents it attached to - so without
+        `--frames all` a perfectly live UID is refused with "the page
+        navigated since", and taking another snapshot produces the same UID
+        and the same refusal.
+
+        Asking the browser for its `iframe` targets is what tells the two
+        apart. On the failure path only, and a browser that will not answer
+        leaves the plain message rather than an error about the diagnosis.
+        This is the same shape as the `frames select` diagnosis for #127.
+        """
+        message = str(exc)
+        if self._rt.frame_sessions is not None or "previous document" not in message:
+            return message
+        targets = await self._out_of_process_frames("")
+        if not targets:
+            return message
+        listed = ", ".join(targets[:3])
+        return (
+            f"{message}\n"
+            f"Or the uid names a node inside a cross-origin iframe, and this "
+            f"command did not pass --frames all. The browser has "
+            f"{len(targets)} such iframe(s): {listed}. A uid minted with "
+            f"--frames all only resolves with --frames all."
+        )
+
+    def _cross_process_documents(self) -> list[Any]:
+        """The page's documents, when any of them is in another process.
+
+        Empty when every frame answers on the page session, which is the
+        common page and the whole of the default `--frames page`. The
+        same-process stitch then runs unchanged: it is one session, one
+        `Page.getFrameTree`, and no frame map needed.
+        """
+        fm = self._frame_manager
+        if fm is None or self._rt.frame_sessions is None:
+            return []
+        documents = fm.frame_documents()
+        if not any(document.session_id for document in documents):
+            return []
+        return documents
+
+    async def _stitch_across_sessions(self, documents: list[Any]) -> tuple[dict[str, Any], str]:
+        """Read each frame's accessibility tree on the session that owns it.
+
+        `Accessibility.getFullAXTree` answers for the renderer it is sent to.
+        A cross-origin iframe is a different renderer, so asking the page
+        session for it returns nothing and the `Iframe` node stays empty -
+        which is exactly what `snapshot` printed before this.
+
+        `DOM.getFrameOwner` goes to the *parent*, because the owner node is
+        in the parent's document. Each frame is read with its own token, so
+        the merged tree carries several documents and `build` mints each
+        node's UID against the one it came from.
+
+        A frame that will not answer is skipped, not fatal: one broken child
+        frame degrades the snapshot to the rest of the tree, the same way the
+        same-process stitch already degrades.
+        """
+        from .native_snapshot import (
+            AX_ENABLE,
+            AX_GET_FULL_TREE,
+            DOM_GET_FRAME_OWNER,
+            ChildFrameTree,
+            stitch_ax_frames,
+        )
+
+        top, rest = documents[0], documents[1:]
+        top_send = self.client_for_session(top.session_id).send
+        await top_send(AX_ENABLE)
+        top_tree = await top_send(AX_GET_FULL_TREE)
+
+        children: list[ChildFrameTree] = []
+        for document in rest:
+            if document.parent_doc_token is None:
+                continue
+            try:
+                owner_send = self.client_for_session(document.parent_session_id).send
+                owner = await owner_send(
+                    DOM_GET_FRAME_OWNER, {"frameId": document.frame_id}
+                )
+                backend = owner.get("backendNodeId")
+                if not isinstance(backend, int):
+                    continue
+                child_send = self.client_for_session(document.session_id).send
+                await child_send(AX_ENABLE)
+                # No frameId: the child's own session answers for its own
+                # frame, and passing one asks that renderer about a frame it
+                # does not own.
+                tree = await child_send(AX_GET_FULL_TREE)
+            except Exception:
+                logger.debug("frame %s did not answer for its tree", document.frame_id)
+                continue
+            children.append(
+                ChildFrameTree(
+                    owner_backend_node_id=backend,
+                    owner_doc_token=document.parent_doc_token,
+                    doc_token=document.doc_token,
+                    result=tree,
+                )
+            )
+
+        return (
+            stitch_ax_frames(top_tree, children, top_doc_token=top.doc_token),
+            top.doc_token,
+        )
+
+    def _send_for_uid(self, uid: str, default: Any) -> Any:
+        """The transport for the document a UID was minted in.
+
+        A backend DOM node id is unique within a renderer process, not within
+        a browser, so `DOM.resolveNode` for a cross-origin frame's node has to
+        be sent to that frame's own session. Sent to the page session it either
+        fails or, worse, resolves a different node that happens to share the
+        id - measured, a cross-origin child's ids overlapped the page's on 5
+        of its 7 nodes.
+
+        A UID whose token names no frame in the map falls back to the default
+        transport, so the staleness error comes from the resolver with its own
+        wording rather than from a routing failure here.
+        """
+        from .native_snapshot import parse_uid
+
+        fm = self._frame_manager
+        if fm is None or self._rt.frame_sessions is None:
+            return default
+        token, _ = parse_uid(uid)
+        for document in fm.frame_documents():
+            if document.doc_token == token and document.session_id:
+                return self.client_for_session(document.session_id).send
+        return default
 
     async def _dispatch_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         """Route a tool call to its registered handler.

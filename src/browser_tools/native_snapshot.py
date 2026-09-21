@@ -23,10 +23,12 @@ UID assignment and stability scheme
 -----------------------------------
 A UID is ``"<docToken>-<backendNodeId>"``:
 
-- ``docToken`` names the *document* the UID was minted against. It is derived
-  from the page's CDP ``loaderId``, which changes on every navigation and is
-  readable at any time from ``Page.getFrameTree``. It is the staleness guard:
-  a UID whose token does not match the live document is refused.
+- ``docToken`` names the *document* the UID was minted against: a digest of
+  the frame id and the CDP ``loaderId``, both readable at any time from
+  ``Page.getFrameTree``. The loaderId changes on every navigation, which
+  makes the token the staleness guard - a UID whose token matches no live
+  document is refused. The frame id is what lets two documents live in one
+  snapshot, which is what merging a cross-origin iframe's tree requires.
 - ``backendNodeId`` is the accessibility node's ``backendDOMNodeId`` -- the DOM
   node the UID names, which is also exactly what an interaction needs. Every
   addressable node already carries one.
@@ -65,6 +67,7 @@ only ``InlineTextBox`` nodes lacked a backend id.
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -82,20 +85,50 @@ DOM_GET_FRAME_OWNER = "DOM.getFrameOwner"
 # Async CDP transport: ``send(method, params) -> result``.
 CdpSend = Callable[..., Awaitable[dict[str, Any]]]
 
-#: Characters of the ``loaderId`` a docToken carries. A loaderId is 32 hex
-#: characters; 12 of them is 48 bits, so two documents in one page's history
-#: colliding is not a practical concern, and the UID stays short enough to read
-#: and cheap enough to print once per node.
+#: Hex characters of the document digest a docToken carries. 12 of them is
+#: 48 bits, which keeps the UID short enough to print once per node and read
+#: back by hand, against a population of the documents live in one browser.
 DOC_TOKEN_CHARS = 12
+
+#: Key stamped on a raw AX node naming the document it came from, so one
+#: build can carry nodes from several documents. Read by :meth:`build`, which
+#: falls back to the build's own token for an unstamped node.
+NODE_DOC_TOKEN_KEY = "_btDocToken"
 
 #: Prefix marking the ordinal fallback for a node with no backend DOM node.
 #: A leading non-digit is what keeps it out of the numeric backend-id space.
 NON_DOM_UID_PREFIX = "x"
 
 
-def doc_token_from_loader_id(loader_id: str) -> str:
-    """Derive a document token from a CDP ``loaderId``."""
-    return str(loader_id)[:DOC_TOKEN_CHARS].upper()
+def doc_token(frame_id: str, loader_id: str) -> str:
+    """The identity of one document: the frame, and the load in it.
+
+    A token must not be shared by two live documents. A UID carries it and
+    nothing else, so the token is the only thing saying which document a
+    UID's backend node id belongs to. Two properties the previous
+    derivation lacked (RFC-04, Routing).
+
+    *It was not an identity.* The old token was the first 12 characters of
+    a 32-character ``loaderId``, so two loader ids differing only in the
+    tail produced one token. A constructed collision rather than one Chrome
+    is likely to produce, and the guarantee was still false.
+
+    *A loaderId does not say which frame.* Merging a child frame's
+    accessibility tree into the parent's puts two documents' backend node
+    ids in one snapshot, and a backend node id is unique per document, not
+    per page: the parent's node 2 and the child's node 2 are different
+    nodes. The frame id is what keeps their UIDs apart.
+
+    Hashed rather than concatenated, because a frame id is already 32
+    characters and a UID is printed on every line of a snapshot.
+    """
+    digest = hashlib.sha256(f"{frame_id}\x00{loader_id}".encode()).hexdigest()
+    return digest[:DOC_TOKEN_CHARS].upper()
+
+
+def doc_token_from_frame(frame: dict[str, Any]) -> str:
+    """The token for one ``frame`` object out of ``Page.getFrameTree``."""
+    return doc_token(str(frame.get("id", "")), str(frame.get("loaderId", "")))
 
 
 def make_uid(doc_token: str, backend_node_id: int) -> str:
@@ -129,15 +162,49 @@ async def read_doc_token(send: CdpSend) -> str:
     tree.
     """
     result = await send(PAGE_GET_FRAME_TREE)
-    loader_id = result.get("frameTree", {}).get("frame", {}).get("loaderId", "")
-    return doc_token_from_loader_id(loader_id)
+    return doc_token_from_frame(result.get("frameTree", {}).get("frame", {}))
+
+
+def live_doc_tokens(frame_tree_node: dict[str, Any]) -> set[str]:
+    """Every document token live in a ``Page.getFrameTree``, root included.
+
+    The staleness guard reads this rather than the main frame's token alone.
+    A UID minted inside an iframe carries that iframe's document, so checking
+    it against the main frame's token refuses a node that is on the screen:
+    measured, `click` on a button in a same-process iframe failed with
+    "minted against a previous document" while the button was right there.
+
+    Membership is the whole test. A token that names no live document is a
+    stale UID, and that is still refused.
+    """
+    tokens: set[str] = set()
+
+    def walk(node: dict[str, Any]) -> None:
+        frame = node.get("frame", {})
+        if frame:
+            tokens.add(doc_token_from_frame(frame))
+        for child in node.get("childFrames", []) or []:
+            walk(child)
+
+    walk(frame_tree_node)
+    return tokens
+
+
+async def read_live_doc_tokens(send: CdpSend) -> set[str]:
+    """The tokens of every document in the page, from one CDP call."""
+    result = await send(PAGE_GET_FRAME_TREE)
+    return live_doc_tokens(result.get("frameTree", {}))
+
+
+def read_live_doc_tokens_sync(send: Callable[..., dict[str, Any]]) -> set[str]:
+    """Synchronous :func:`read_live_doc_tokens`."""
+    return live_doc_tokens(send(PAGE_GET_FRAME_TREE).get("frameTree", {}))
 
 
 def read_doc_token_sync(send: Callable[..., dict[str, Any]]) -> str:
     """Synchronous :func:`read_doc_token`, for the sync interaction driver."""
     result = send(PAGE_GET_FRAME_TREE)
-    loader_id = result.get("frameTree", {}).get("frame", {}).get("loaderId", "")
-    return doc_token_from_loader_id(loader_id)
+    return doc_token_from_frame(result.get("frameTree", {}).get("frame", {}))
 
 
 @dataclass(frozen=True)
@@ -342,7 +409,7 @@ class NativeSnapshotReader:
         by_uid: dict[str, AxUidNode] = {}
         ordinal = 0
 
-        def mint(backend: int | None) -> str:
+        def mint(backend: int | None, node_token: str) -> str:
             """The node's UID: its backend DOM node, or an ordinal fallback.
 
             A node with no backend DOM node, and a node whose backend id another
@@ -353,10 +420,10 @@ class NativeSnapshotReader:
             nonlocal ordinal
             ordinal += 1
             if backend is not None:
-                candidate = make_uid(doc_token, backend)
+                candidate = make_uid(node_token, backend)
                 if candidate not in by_uid:
                     return candidate
-            return f"{doc_token}-{NON_DOM_UID_PREFIX}{ordinal}"
+            return f"{node_token}-{NON_DOM_UID_PREFIX}{ordinal}"
 
         def walk(ax_id: str, parent_uid: str | None) -> str | None:
             raw = by_ax_id.get(ax_id)
@@ -364,7 +431,13 @@ class NativeSnapshotReader:
                 return None
             raw_backend = raw.get("backendDOMNodeId")
             backend = int(raw_backend) if isinstance(raw_backend, int) else None
-            uid = mint(backend)
+            # The node's own document, not the build's. A stitched tree carries
+            # nodes from several documents, and a backendDOMNodeId is unique
+            # within a renderer process rather than within a browser: measured,
+            # a cross-origin child's ids overlapped the page's on 5 of its 7
+            # nodes. Minting both under one token gave the second node an
+            # `x<ordinal>` UID, which no interaction can address.
+            uid = mint(backend, str(raw.get(NODE_DOC_TOKEN_KEY) or doc_token))
             # Claim the UID before recursing: a descendant must not be handed
             # the same name, and the node object is only built after its
             # children (it carries their UIDs).
@@ -433,8 +506,8 @@ class NativeSnapshotReader:
         Returns:
             The freshly built, current :class:`NativeSnapshot`.
         """
-        doc_token = await read_doc_token(send)
-        return self.build(await read_stitched_ax_tree(send), doc_token=doc_token)
+        merged, doc_token = await read_stitched_ax_tree(send)
+        return self.build(merged, doc_token=doc_token)
 
     def resolve_uid(self, uid: str) -> AxUidNode | None:
         """Resolve a UID against the current snapshot.
@@ -468,9 +541,32 @@ class NativeSnapshotReader:
         self._generation += 1
 
 
+@dataclass(frozen=True)
+class ChildFrameTree:
+    """One child frame's accessibility tree, and where it hangs in the parent.
+
+    ``owner_doc_token`` is the *parent's* document, not this frame's. The
+    owner node is an ``Iframe`` in the parent document, and it is found by
+    backend node id, which is only unique within one renderer. Without the
+    parent's token, a nested frame's owner lookup can land on a node of the
+    same backend id in an unrelated document.
+    """
+
+    #: `DOM.getFrameOwner`'s backendNodeId: the parent's `Iframe` node.
+    owner_backend_node_id: int
+    #: The document that `Iframe` node lives in.
+    owner_doc_token: str
+    #: This frame's own document, stamped on every node it contributes.
+    doc_token: str
+    #: This frame's `Accessibility.getFullAXTree` result.
+    result: dict[str, Any]
+
+
 def stitch_ax_frames(
     top_result: dict[str, Any],
-    child_frames: list[tuple[int, dict[str, Any]]],
+    child_frames: list[ChildFrameTree],
+    *,
+    top_doc_token: str,
 ) -> dict[str, Any]:
     """Splice child-frame accessibility trees into the top frame's tree.
 
@@ -503,18 +599,27 @@ def stitch_ax_frames(
     Returns:
         A merged ``{"nodes": [...]}`` with child frames spliced under their owners.
     """
-    merged: list[dict[str, Any]] = [dict(node) for node in top_result.get("nodes", []) or []]
-    backend_to_node: dict[int, dict[str, Any]] = {}
-    for node in merged:
-        backend = node.get("backendDOMNodeId")
-        if isinstance(backend, int):
-            backend_to_node[backend] = node
+    merged: list[dict[str, Any]] = []
+    #: Owner lookup, by the document the node is in and its backend id. Keyed
+    #: by the pair because a backend node id is unique within one renderer
+    #: process, not within a browser.
+    by_owner: dict[tuple[str, int], dict[str, Any]] = {}
 
-    for index, (owner_backend, child_result) in enumerate(child_frames):
+    def take(nodes: list[dict[str, Any]], token: str) -> None:
+        for node in nodes:
+            node[NODE_DOC_TOKEN_KEY] = token
+            backend = node.get("backendDOMNodeId")
+            if isinstance(backend, int):
+                by_owner.setdefault((token, backend), node)
+            merged.append(node)
+
+    take([dict(node) for node in top_result.get("nodes", []) or []], top_doc_token)
+
+    for index, child in enumerate(child_frames):
         prefix = f"f{index + 1}:"
         child_root_id: str | None = None
         child_nodes: list[dict[str, Any]] = []
-        for raw in child_result.get("nodes", []) or []:
+        for raw in child.result.get("nodes", []) or []:
             node = dict(raw)
             node["nodeId"] = prefix + str(node.get("nodeId"))
             parent_id = node.get("parentId")
@@ -525,34 +630,47 @@ def stitch_ax_frames(
             node["childIds"] = [prefix + str(cid) for cid in (node.get("childIds") or [])]
             child_nodes.append(node)
 
-        owner = backend_to_node.get(owner_backend)
+        owner = by_owner.get((child.owner_doc_token, child.owner_backend_node_id))
         if owner is not None and child_root_id is not None:
             owner["childIds"] = [*(owner.get("childIds") or []), child_root_id]
             for node in child_nodes:
                 if node["nodeId"] == child_root_id:
                     node["parentId"] = owner["nodeId"]
-        merged.extend(child_nodes)
+        # Taken whether or not the owner was found, so a frame whose owner is
+        # missing still contributes its nodes rather than vanishing, and so a
+        # frame nested below this one can still find its own owner here.
+        take(child_nodes, child.doc_token)
 
     return {"nodes": merged}
 
 
-def _iter_frame_ids(frame_tree_node: dict[str, Any]) -> list[str]:
-    """Collect child (non-root) frame ids from a ``Page.getFrameTree`` node."""
-    ids: list[str] = []
+def _iter_child_frames(
+    frame_tree_node: dict[str, Any],
+) -> list[tuple[dict[str, Any], dict[str, Any]]]:
+    """Every child frame and its parent frame, in pre-order.
 
-    def walk(node: dict[str, Any], is_root: bool) -> None:
+    Pre-order so a frame is always stitched after the frame that owns it:
+    a nested frame's `Iframe` node lives in its parent's document, which has
+    to be in the merged tree before the lookup for it can succeed.
+
+    The parent comes back too because the owner node is found by backend node
+    id within the parent's document, and that document has to be named.
+    """
+    pairs: list[tuple[dict[str, Any], dict[str, Any]]] = []
+
+    def walk(node: dict[str, Any]) -> None:
         frame = node.get("frame", {})
-        frame_id = frame.get("id")
-        if not is_root and frame_id is not None:
-            ids.append(str(frame_id))
         for child in node.get("childFrames", []) or []:
-            walk(child, False)
+            child_frame = child.get("frame", {})
+            if child_frame.get("id") is not None:
+                pairs.append((child_frame, frame))
+            walk(child)
 
-    walk(frame_tree_node, True)
-    return ids
+    walk(frame_tree_node)
+    return pairs
 
 
-async def read_stitched_ax_tree(send: CdpSend) -> dict[str, Any]:
+async def read_stitched_ax_tree(send: CdpSend) -> tuple[dict[str, Any], str]:
     """Read the full accessibility tree, stitched across child frames.
 
     Enables the Accessibility and Page domains, reads the top frame's tree,
@@ -565,22 +683,31 @@ async def read_stitched_ax_tree(send: CdpSend) -> dict[str, Any]:
         send: Async CDP transport, ``send(method, params) -> result``.
 
     Returns:
-        A merged ``{"nodes": [...]}`` ready for :meth:`NativeSnapshotReader.build`.
+        ``(merged, top_doc_token)``: a merged ``{"nodes": [...]}`` ready for
+        :meth:`NativeSnapshotReader.build`, and the top frame's document
+        token. The token comes back from here rather than from a second
+        ``read_doc_token`` call, because this function reads the frame tree
+        it is derived from anyway, and two reads could straddle a navigation
+        and stamp the tree with the wrong document.
     """
-    await send(AX_ENABLE)
-    top = await send(AX_GET_FULL_TREE)
-
     try:
         await send(PAGE_ENABLE)
         frame_tree = await send(PAGE_GET_FRAME_TREE)
     except Exception:
-        return top
-    frame_ids = _iter_frame_ids(frame_tree.get("frameTree", {}))
-    if not frame_ids:
-        return top
+        frame_tree = {}
+    top_frame = frame_tree.get("frameTree", {}).get("frame", {})
+    top_token = doc_token_from_frame(top_frame)
 
-    child_frames: list[tuple[int, dict[str, Any]]] = []
-    for frame_id in frame_ids:
+    await send(AX_ENABLE)
+    top = await send(AX_GET_FULL_TREE)
+
+    pairs = _iter_child_frames(frame_tree.get("frameTree", {}))
+    if not pairs:
+        return stitch_ax_frames(top, [], top_doc_token=top_token), top_token
+
+    child_frames: list[ChildFrameTree] = []
+    for child_frame, parent_frame in pairs:
+        frame_id = str(child_frame.get("id"))
         try:
             owner = await send(DOM_GET_FRAME_OWNER, {"frameId": frame_id})
             backend = owner.get("backendNodeId")
@@ -589,9 +716,16 @@ async def read_stitched_ax_tree(send: CdpSend) -> dict[str, Any]:
             child = await send(AX_GET_FULL_TREE, {"frameId": frame_id})
         except Exception:
             continue
-        child_frames.append((backend, child))
+        child_frames.append(
+            ChildFrameTree(
+                owner_backend_node_id=backend,
+                owner_doc_token=doc_token_from_frame(parent_frame),
+                doc_token=doc_token_from_frame(child_frame),
+                result=child,
+            )
+        )
 
-    return stitch_ax_frames(top, child_frames)
+    return stitch_ax_frames(top, child_frames, top_doc_token=top_token), top_token
 
 
 def _find_root_ax_id(

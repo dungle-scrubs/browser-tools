@@ -38,7 +38,7 @@ from browser_tools.native_interaction import NativeInteractor, UidResolutionErro
 from browser_tools.native_snapshot import (
     NativeSnapshot,
     NativeSnapshotReader,
-    doc_token_from_loader_id,
+    doc_token_from_frame,
 )
 
 _AVAILABLE, _WHY = chromium_available()
@@ -107,9 +107,7 @@ def test_native_interaction_targets_are_flake_free(chromium_session):
 def _live_doc_token(session) -> str:
     """The token every UID minted against the session's current page carries."""
     frame_tree = session.cdp_send("Page.getFrameTree", {})
-    return doc_token_from_loader_id(
-        frame_tree.get("frameTree", {}).get("frame", {}).get("loaderId", "")
-    )
+    return doc_token_from_frame(frame_tree.get("frameTree", {}).get("frame", {}))
 
 
 def test_native_fill_and_click_on_form_page(chromium_session):

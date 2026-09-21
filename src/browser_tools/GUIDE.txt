@@ -175,22 +175,23 @@ CURATED VERBS
       which is the behaviour above. `all` attaches to each cross-origin
       iframe as well and splices its frames into the one tree.
 
-      What works today, and what does not:
+      What it gives you:
 
           frames list      lists cross-origin iframes in tree position,
                            marked [out-of-process]
           frames select    selects one, at any nesting depth
-          storage get      READS THE SELECTED FRAME'S OWN localStorage and
+          storage get      reads the selected frame's own localStorage and
                            sessionStorage, from its own renderer
-          snapshot         still prints the Iframe node with nothing under
-                           it, whatever is selected
-          click, fill      no uid exists inside the frame, so they cannot
-                           reach it
+          snapshot         reads each frame's tree on the session that owns
+                           it and prints one tree, so nodes inside a
+                           cross-origin iframe get uids
+          click, fill      reach those nodes, dispatching into the frame's
+                           own renderer
 
-      So a read that goes through a context is routed, and a read that goes
-      through a uid is not. Merging the child accessibility trees into one
-      snapshot is the remaining work; until it lands, drive the iframe's URL
-      as a page of its own when you need to click inside it.
+      A uid names the document it was minted in, so nodes in different
+      frames of one snapshot have different uid prefixes. That is how a
+      later `click` knows which process to send to. Pass --frames all to
+      the click too, or it will not know.
 
       `frames list --frames all` marks a frame in another process
       [out-of-process]. A frame past a bound is listed [unreachable] with its
