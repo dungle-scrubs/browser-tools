@@ -213,3 +213,36 @@ class TestPhase5Packaging:
         ]
         left = [name for name in gone if (pkg / name).exists()]
         assert left == [], f"deleted modules still on disk: {left}"
+
+
+class TestTheVersionDoesNotDrift:
+    """`__version__` read 0.1.0 while the package shipped 0.3.0.
+
+    A hardcoded second copy has to be remembered at release time, and was
+    not, through two releases. It now reads the installed distribution, and
+    these tests pin that rather than pinning a number that would need the
+    same remembering.
+    """
+
+    def test_it_matches_the_installed_distribution(self):
+        from importlib import metadata
+
+        import browser_tools
+
+        assert browser_tools.__version__ == metadata.version("browser-tools")
+
+    def test_it_matches_pyproject(self):
+        """The installed editable build and the source of truth agree."""
+        import tomllib
+        from pathlib import Path
+
+        import browser_tools
+
+        pyproject = Path(__file__).resolve().parent.parent / "pyproject.toml"
+        declared = tomllib.loads(pyproject.read_text())["project"]["version"]
+        assert browser_tools.__version__ == declared
+
+    def test_it_is_not_the_stale_literal(self):
+        import browser_tools
+
+        assert browser_tools.__version__ != "0.1.0"
