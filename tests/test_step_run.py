@@ -25,37 +25,10 @@ import time
 from typing import Any
 
 import pytest
+from doubles import FakeHandler
 
 from browser_tools import step_list, step_run
 from browser_tools.lifecycle import LifecycleError
-
-
-class FakeHandler:
-    """The run's session, and a log of everything that happened to it.
-
-    One log for the handler and the steps together, so a test can assert
-    *ordering across the two* - that the deadline was set before step 1 ran,
-    not merely that it was set.
-    """
-
-    def __init__(self, log: list[Any] | None = None):
-        self.log: list[Any] = [] if log is None else log
-        self.session = ("CLIENT", "SESSION-1")
-        self.available = True
-        self.connect_error = None
-        self.deadlines: list[float | None] = []
-
-    def set_deadline(self, deadline: float | None) -> None:
-        self.deadlines.append(deadline)
-        self.log.append(("deadline", deadline is not None))
-
-    def require_session(self):
-        return self.session
-
-    def submit(self, coro, timeout=None):
-        coro.close()
-        self.log.append(("submit", timeout))
-        return {"sent": True}
 
 
 def _step(number: int, text: str = "snapshot") -> step_list.Step:
@@ -775,38 +748,9 @@ class TestNoStepOpensItsOwnSession:
             key=None,
             removed_action=None,
         )
-        handler = _FullFakeHandler()
+        handler = FakeHandler()
         with contextlib.suppress(Exception):
             cli.step_envelope(args, None, handler=handler)
-
-
-class _FullFakeHandler(FakeHandler):
-    """Enough of `CDPHandler` for every curated verb to run over it."""
-
-    def __init__(self):
-        super().__init__()
-        self.deadline = None
-        self.screencast_frame_count = 0
-        self.stopped = 0
-
-    def stop(self):
-        self.stopped += 1
-
-    def call_tool(self, name, arguments):
-        from browser_tools.mcp_response import make_text
-
-        self.log.append(("tool", name))
-        return make_text("Cookies (0):" if name == "get_storage" else "ok")
-
-    def call_native(self, name, arguments):
-        from browser_tools.mcp_response import make_text
-
-        self.log.append(("native", name))
-        return make_text("[uid=AB-1] RootWebArea")
-
-    def run_post_navigation_detection(self, max_retries=None):
-        self.log.append(("detect", max_retries))
-        return {"detections": [], "auto_retried": False, "retries_used": 0}
 
 
 class TestTheRunOwnsTheSessionItOpened:
@@ -816,7 +760,7 @@ class TestTheRunOwnsTheSessionItOpened:
         """A borrowed handler closed after step 1 leaves step 2 nothing to use."""
         from browser_tools import cli
 
-        handler = _FullFakeHandler()
+        handler = FakeHandler()
         for _ in range(3):
             cli.step_envelope(
                 argparse.Namespace(
@@ -834,7 +778,7 @@ class TestTheRunOwnsTheSessionItOpened:
         """And the owner does close it, on the way out."""
         from browser_tools import curated
 
-        handler = _FullFakeHandler()
+        handler = FakeHandler()
         closed: list[int] = []
 
         import contextlib as _ctx
@@ -870,7 +814,7 @@ class TestWhatARawStepRaises:
             raise exc
 
         monkeypatch.setattr(passthrough, "send_on_session", boom)
-        handler = _FullFakeHandler()
+        handler = FakeHandler()
         handler.submit = lambda coro, timeout=None: _drain(coro)
         return step_run.execute([_step(1), _raw_step(2), _step(3)], handler)
 
@@ -1149,4 +1093,138 @@ class TestADeadlineAlreadyPastRunsNothing:
         assert document["steps"] == [], (
             "a step that never started has an entry, so the caller cannot tell "
             "what reached the browser from what did not"
+        )
+
+
+class TestTheDoublesMatchTheRealHandler:
+    """Four times in one sitting a handler gained a name and a double did
+    not: `target_by`, `deadline`, `record_caller_enable`, then
+    `borrowed_frame_selection`. Each time the suite passed and the break
+    showed up in CI or in a live run, because a double missing a name is
+    only exercised on the one path that reads it.
+
+    The rule has two halves, and one without the other is no guard at all.
+    `HandlerSurface` carries every name production calls on a handler, and
+    every handler double in `tests/` inherits it. Checking only the first
+    half leaves a suite free to declare its own bare double; checking only
+    the second leaves the shared surface free to fall behind.
+    """
+
+    @staticmethod
+    def _names_production_calls() -> set[str]:
+        import re
+        from pathlib import Path as _Path
+
+        import browser_tools
+
+        package = _Path(browser_tools.__file__).parent
+        names: set[str] = set()
+        for path in sorted(package.glob("*.py")):
+            for match in re.finditer(r"\bhandler\.([a-z_][a-z0-9_]*)", path.read_text()):
+                names.add(match.group(1))
+        return names
+
+    def test_the_scan_finds_something(self):
+        found = self._names_production_calls()
+        assert {"submit", "require_session", "call_tool"} <= found, (
+            f"the scan is not finding handler attributes any more: {sorted(found)}"
+        )
+
+    def test_the_real_handler_has_every_name(self):
+        """If this fails, production calls something `CDPHandler` lacks."""
+        from browser_tools.cdp_handler import CDPHandler
+
+        missing = sorted(n for n in self._names_production_calls() if not hasattr(CDPHandler, n))
+        assert not missing, f"production calls handler.{missing} and CDPHandler has no such name"
+
+    def test_the_shared_surface_has_every_name(self):
+        from doubles import HandlerSurface
+
+        missing = sorted(
+            n for n in self._names_production_calls() if not hasattr(HandlerSurface, n)
+        )
+        assert not missing, (
+            f"HandlerSurface is missing {missing}, which production calls on a "
+            "handler. A test using a double only fails on the path that reads "
+            "the missing name, so the suite can pass while the verb is broken."
+        )
+
+    #: Defining any of these makes a class a handler double, whatever it is
+    #: called. Naming the methods rather than the class names is what stops a
+    #: `_StubSession` from slipping past.
+    HANDLER_METHODS = frozenset(
+        {"call_tool", "call_native", "require_session", "record_caller_enable", "submit"}
+    )
+
+    @staticmethod
+    def _doubles_declared_without_the_surface() -> list[str]:
+        """Every handler double in `tests/` that does not inherit the surface.
+
+        A base defined in the same file counts, so a suite may derive one
+        double from another. The walk is transitive within the file, with
+        `HandlerSurface` as the only root.
+        """
+        import ast
+        from pathlib import Path as _Path
+
+        offenders: list[str] = []
+        for path in sorted(_Path(__file__).parent.glob("test_*.py")):
+            tree = ast.parse(path.read_text())
+            classes = {
+                node.name: node for node in ast.walk(tree) if isinstance(node, ast.ClassDef)
+            }
+
+            def rooted(name, where, seen=frozenset()):
+                node = where.get(name)
+                if node is None or name in seen:
+                    return False
+                for base in node.bases:
+                    if not isinstance(base, ast.Name):
+                        continue
+                    if base.id == "HandlerSurface" or rooted(base.id, where, seen | {name}):
+                        return True
+                return False
+
+            for name, node in classes.items():
+                methods = {
+                    child.name
+                    for child in node.body
+                    if isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef)
+                }
+                if methods & TestTheDoublesMatchTheRealHandler.HANDLER_METHODS and not rooted(
+                    name, classes
+                ):
+                    offenders.append(f"{path.name}:{name}")
+        return offenders
+
+    def test_the_scan_for_doubles_finds_the_real_ones(self):
+        """The check above is only as good as this walk, so pin the walk."""
+        import ast
+        from pathlib import Path as _Path
+
+        found = set()
+        for path in sorted(_Path(__file__).parent.glob("test_*.py")):
+            for node in ast.walk(ast.parse(path.read_text())):
+                if not isinstance(node, ast.ClassDef):
+                    continue
+                methods = {
+                    child.name
+                    for child in node.body
+                    if isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef)
+                }
+                if methods & self.HANDLER_METHODS:
+                    found.add(f"{path.name}:{node.name}")
+        assert {
+            "test_curated_verbs.py:FakeHandler",
+            "test_step_dispatch.py:FakeHandler",
+            "test_shared_session.py:FakeHandler",
+        } <= found, f"the walk stopped finding handler doubles: {sorted(found)}"
+
+    def test_every_double_inherits_the_shared_surface(self):
+        offenders = self._doubles_declared_without_the_surface()
+        assert not offenders, (
+            f"{offenders} look like handler doubles but do not inherit "
+            "HandlerSurface, so a new name on CDPHandler will not reach them. "
+            "Subclass `doubles.HandlerSurface` and override only what the "
+            "suite reads."
         )

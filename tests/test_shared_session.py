@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 
 import pytest
+from doubles import HandlerSurface
 
 from browser_tools import curated, passthrough
 from browser_tools.attached_session import AttachedSessionClient
@@ -40,7 +41,7 @@ class FakeCore:
     def off(self, event, callback): ...
 
 
-class FakeHandler:
+class FakeHandler(HandlerSurface):
     """Records that it was used and that nobody closed it."""
 
     def __init__(self):
