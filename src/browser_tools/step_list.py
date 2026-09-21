@@ -308,6 +308,18 @@ def _validate_passthrough(
             f"and exited 0. Run '{method}' on its own, outside a run.",
         )
 
+    if method == "Target.setAutoAttach":
+        raise _at(
+            line,
+            "Target.setAutoAttach cannot be a step: a run holds one CDP "
+            "session per cross-origin iframe, and turning auto-attach off "
+            "drops every one of them for the rest of the run. 'frames list' "
+            "would stop showing those frames and a selection into one would "
+            "fail, with nothing reporting why. It is the shape of "
+            "'Page.disable' above and it is refused for the same reason. Use "
+            "'--frames page', which is the default, to run without them.",
+        )
+
     try:
         # The return value is the point, not just the refusal: for
         # `Target.createTarget` it adds `background: true`, which is what keeps

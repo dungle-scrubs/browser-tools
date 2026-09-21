@@ -85,6 +85,32 @@ glossary rather than left to name code that does not exist.
   domain enable state belongs to one session, which a `bt` invocation does not
   outlive. The implementation module is `profiler`.
 
+- **Out-of-Process Frame** - a cross-origin iframe that Chrome's site
+  isolation runs in its own renderer process, giving it its own CDP
+  `iframe` target. It is absent from `Page.getFrameTree` on the page
+  session and its lifecycle events do not arrive there, so nothing reaches
+  it without attaching to that target. `--frames all` does; the default
+  `--frames page` does not, and `frames list --frames all` marks one
+  `[out-of-process]`.
+
+- **Frame Session** - the CDP session attached to one Out-of-Process
+  Frame's target, below the page session and owned by `frame_sessions`.
+  It enables `Page` and `Runtime` on that target, reads its frame tree, and
+  is the session every command against a frame in that process goes to. A
+  frame the map holds names the Frame Session answering for it, or none,
+  which means the page session. Bounded at 32 sessions and 10 levels of
+  nesting; a frame past either bound is listed `[unreachable]`, never
+  dropped in silence.
+
+- **Spliced Frame Tree** - the single tree `frames list` prints, built by
+  attaching each Frame Session's own frame tree under the parent frame its
+  root names in `parentId`. The attachment point is given by Chrome rather
+  than guessed. A child whose parent is not in the map yet is held, not
+  hung somewhere else, and spliced when the parent arrives. The invariant
+  is the one the page tree already had: a frame the map holds is reachable
+  from the root, exactly once, and a selection resolves in the order
+  `frames list` prints.
+
 - **The Manual** - `bt guide`, the complete `bt` surface and the only
   documentation an agent reads before driving a browser. It lives in
   `src/browser_tools/GUIDE.txt` and ships as package data.

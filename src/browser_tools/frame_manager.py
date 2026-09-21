@@ -25,6 +25,9 @@ class FrameInfo:
     parent_frame_id: str | None = None
     execution_context_id: int | None = None
     children: list[FrameInfo] = field(default_factory=list)
+    #: The Frame Session that answers for this frame (RFC-04). ``None`` is the
+    #: page session, which is what every frame was before OOPIFs.
+    frame_session_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to a serializable dictionary.
@@ -40,6 +43,8 @@ class FrameInfo:
         }
         if self.parent_frame_id:
             result["parentFrameId"] = self.parent_frame_id
+        if self.frame_session_id:
+            result["frameSessionId"] = self.frame_session_id
         if self.execution_context_id is not None:
             result["executionContextId"] = self.execution_context_id
         if self.children:
@@ -114,13 +119,18 @@ class FrameManager:
         self._root_frame_id = frame_data.get("id")
 
     def _parse_frame_tree(
-        self, tree_node: dict[str, Any], parent_id: str | None
+        self, tree_node: dict[str, Any], parent_id: str | None, session_id: str | None = None
     ) -> FrameInfo | None:
         """Recursively parse a frame tree node.
+
+        ``session_id`` is the Frame Session this tree came from, carried down
+        the whole subtree: a same-process child of an Out-of-Process Frame is
+        answered by that frame's session, not by the page session.
 
         Args:
             tree_node: Frame tree node with 'frame' and optional 'childFrames'.
             parent_id: Parent frame ID.
+            session_id: Owning Frame Session, or None for the page session.
 
         Returns:
             Parsed FrameInfo, or None if parsing fails.
@@ -136,11 +146,12 @@ class FrameManager:
             security_origin=frame_data.get("securityOrigin", ""),
             name=frame_data.get("name", ""),
             parent_frame_id=parent_id,
+            frame_session_id=session_id,
         )
         self._frames[frame_id] = info
 
         for child_node in tree_node.get("childFrames", []):
-            child = self._parse_frame_tree(child_node, parent_id=frame_id)
+            child = self._parse_frame_tree(child_node, parent_id=frame_id, session_id=session_id)
             if child:
                 info.children.append(child)
 
@@ -286,6 +297,90 @@ class FrameManager:
             reachable.append(frame)
             frontier.extend(child.frame_id for child in reversed(frame.children))
         return reachable
+
+    def splice_session_tree(self, tree: dict[str, Any], session_id: str) -> bool:
+        """Attach an Out-of-Process Frame's own tree under its parent.
+
+        ``tree`` is the child's ``Page.getFrameTree`` result, rooted at the
+        child frame. Its ``parentId`` names a frame in the parent session's
+        tree, which is what makes the attachment point given rather than
+        guessed (RFC-04, finding 3).
+
+        Returns True when the tree was spliced, False when the parent frame is
+        not in the map yet. A False is not an error: the child session can
+        attach before the parent session has reported the placeholder frame,
+        and the caller holds the tree and tries again. Storing it anywhere
+        else would put it in the wrong place in the listing, or leave an
+        island.
+        """
+        frame_data = tree.get("frame", {})
+        frame_id = frame_data.get("id", "")
+        parent_id = frame_data.get("parentId")
+        if not frame_id or not parent_id:
+            return False
+        parent = self._frames.get(parent_id)
+        if parent is None:
+            return False
+        # Replacing a frame this session already reported: its old subtree
+        # goes with it, exactly as a re-attach does.
+        self._forget_descendants(frame_id)
+        self._unlink(frame_id)
+        self._frames.pop(frame_id, None)
+
+        info = self._parse_frame_tree(tree, parent_id=parent_id, session_id=session_id)
+        if info is None:
+            return False
+        parent.children.append(info)
+        self._event_buffer.append(
+            FrameEvent(event_type="attached", frame_id=frame_id, url=info.url)
+        )
+        return True
+
+    def forget_session(self, session_id: str) -> list[str]:
+        """Drop every frame a detached Frame Session answered for.
+
+        Returns the frame ids removed, so the caller can drop the Frame
+        Sessions that hung below them in the same step. Leaving them would
+        leak a session for the rest of the run.
+        """
+        doomed = [f.frame_id for f in self._frames.values() if f.frame_session_id == session_id]
+        for frame_id in doomed:
+            self._forget_descendants(frame_id)
+            self._unlink(frame_id)
+            self._frames.pop(frame_id, None)
+            if self._selected_frame_id == frame_id:
+                self._selected_frame_id = None
+        self._reresolve_selection()
+        return doomed
+
+    def depth_of(self, frame_id: str) -> int:
+        """How many frames sit between ``frame_id`` and the root.
+
+        The root is 0. Used for the Frame Session depth bound, which cannot
+        be applied before the splice: an ``iframe`` target's ``openerId`` is
+        not set, so nothing in the attach event says how deep the frame is.
+        The tree says it, once the child has been attached to its parent.
+
+        Counts to the root or to a frame whose parent is not in the map,
+        with a visited set so a cycle a bad event produced returns a number
+        rather than hanging.
+        """
+        depth = 0
+        seen: set[str] = set()
+        current = self._frames.get(frame_id)
+        while current is not None and current.frame_id not in seen:
+            seen.add(current.frame_id)
+            parent_id = current.parent_frame_id
+            if not parent_id:
+                break
+            current = self._frames.get(parent_id)
+            depth += 1
+        return depth
+
+    def session_for(self, frame_id: str) -> str | None:
+        """The Frame Session that answers for a frame, or None for the page."""
+        frame = self._frames.get(frame_id)
+        return frame.frame_session_id if frame else None
 
     def _unlink(self, frame_id: str) -> None:
         """Take ``frame_id`` out of whatever parent's ``children`` holds it.
@@ -478,9 +573,7 @@ class FrameManager:
         frame.url = url
 
         self._reresolve_selection()
-        self._event_buffer.append(
-            FrameEvent(event_type="navigated", frame_id=frame_id, url=url)
-        )
+        self._event_buffer.append(FrameEvent(event_type="navigated", frame_id=frame_id, url=url))
 
     def handle_execution_contexts_cleared(self, params: dict[str, Any] | None = None) -> None:
         """Handle Runtime.executionContextsCleared.

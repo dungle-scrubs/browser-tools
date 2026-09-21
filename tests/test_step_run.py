@@ -236,7 +236,7 @@ class TestOneSessionForTheWholeRun:
         import contextlib
 
         @contextlib.contextmanager
-        def fake_session(instance, target, url, registry_path, endpoint):
+        def fake_session(instance, target, url, registry_path, endpoint, all_frames=False):
             opened.append((instance, target, url, endpoint))
             yield handler
 
@@ -784,7 +784,7 @@ class TestTheRunOwnsTheSessionItOpened:
         import contextlib as _ctx
 
         @_ctx.contextmanager
-        def fake_cdp_session(port, spec=None, by=None, external=False):
+        def fake_cdp_session(port, spec=None, by=None, external=False, all_frames=False):
             try:
                 yield handler
             finally:
@@ -959,6 +959,30 @@ class TestTheGraceIsOneBudgetForTheWholeUnwind:
             "making several can run arbitrarily far past the deadline"
         )
         assert first <= DEADLINE_GRACE_SECONDS
+
+    def test_the_first_call_gets_no_more_than_the_grace_at_any_clock(
+        self, monkeypatch
+    ):
+        """The flake this pins, reproduced without waiting for the right clock.
+
+        `left` used to be `(now + DEADLINE_GRACE_SECONDS) - now`, which is
+        not exactly the grace in binary floating point. On a runner about a
+        minute past boot the round trip overshoots roughly 2% of the time,
+        and CI duly failed with `5.000000000000014 <= 5.0`. The clock value
+        below is one of the draws that does it.
+        """
+        import browser_tools.cdp_handler as cdp_handler
+        from browser_tools.cdp_handler import DEADLINE_GRACE_SECONDS, CDPRuntime
+
+        clock = 63.01849439829268
+        assert (clock + DEADLINE_GRACE_SECONDS) - clock > DEADLINE_GRACE_SECONDS, (
+            "this clock value no longer overshoots, so the test proves nothing"
+        )
+        monkeypatch.setattr(cdp_handler.time, "monotonic", lambda: clock)
+
+        runtime = CDPRuntime(None)
+        runtime._deadline = clock - 1
+        assert runtime.bounded_timeout(30) <= DEADLINE_GRACE_SECONDS
 
     def test_a_spent_budget_still_leaves_enough_to_send_one_call(self):
         from browser_tools.cdp_handler import TEARDOWN_FLOOR_SECONDS, CDPRuntime
@@ -1219,6 +1243,30 @@ class TestTheDoublesMatchTheRealHandler:
             "test_step_dispatch.py:FakeHandler",
             "test_shared_session.py:FakeHandler",
         } <= found, f"the walk stopped finding handler doubles: {sorted(found)}"
+
+    def test_a_double_that_replaces_cdphandler_takes_its_arguments(self):
+        """The guard above covers attributes. This one covers the constructor.
+
+        Two doubles are monkeypatched over `curated.CDPHandler`, so they are
+        constructed with whatever `_cdp_handler_session` passes. Adding
+        `all_frames` to `CDPHandler` broke both, and the attribute guard could
+        not see it: a missing keyword argument is a `TypeError` at
+        construction, not a missing name.
+        """
+        import inspect
+
+        from browser_tools.cdp_handler import CDPHandler
+
+        real = set(inspect.signature(CDPHandler.__init__).parameters) - {"self"}
+        for module in ("test_curated_verbs", "test_interaction_targeting"):
+            double = __import__(module).FakeHandler
+            taken = set(inspect.signature(double.__init__).parameters) - {"self"}
+            missing = sorted(real - taken)
+            assert not missing, (
+                f"{module}.FakeHandler stands in for CDPHandler and does not "
+                f"take {missing}. Every verb that constructs one fails with a "
+                "TypeError the moment production passes it."
+            )
 
     def test_every_double_inherits_the_shared_surface(self):
         offenders = self._doubles_declared_without_the_surface()

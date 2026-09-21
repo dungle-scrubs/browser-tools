@@ -131,7 +131,7 @@ class TestAVerbRunsOnASessionItWasGiven:
         )
 
         @contextlib.contextmanager
-        def fake_session(port, target=None, *, external=False):
+        def fake_session(port, target=None, *, external=False, all_frames=False):
             opened.append((port, target, external))
             yield FakeHandler()
 
@@ -149,7 +149,7 @@ class TestAVerbRunsOnASessionItWasGiven:
         monkeypatch.setattr(curated, "_resolve_port", lambda *a, **k: 9222)
 
         @contextlib.contextmanager
-        def fake_session(port, target=None, *, external=False):
+        def fake_session(port, target=None, *, external=False, all_frames=False):
             opened.append(external)
             yield FakeHandler()
 
