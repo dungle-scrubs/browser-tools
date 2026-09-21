@@ -25,7 +25,7 @@
     motivation.
 - **Requirement check:** the brief declared seven requirements.
   `delegate/scripts/verify-result.ts` reported all seven met, no gaps.
-- **Brief:** `docs/rfc/03_run-many-steps-in-one-invocation.review-brief.md`,
+- **Brief:** `docs/rfc/03_run-many-steps-in-one-invocation.review-brief-01.md`,
   committed beside this file so the review is auditable against what it was asked.
 
 **Editor's note on paths.** The reviewer ran against the drafting session's task

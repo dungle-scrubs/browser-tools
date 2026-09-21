@@ -5,7 +5,7 @@ type: feature
 status: Draft
 author: "Kevin Frilot"
 date: 2026-09-21
-version: 3
+version: 4
 ---
 
 # RFC-03: Run many steps in one invocation
@@ -74,7 +74,12 @@ consumer in the product. `get_selected_frame` and
 `get_selected_execution_context_id` have three call sites: `cdp_handler.py:816`,
 inside `select_frame` itself, printing the context id back in its own confirmation
 text; and `cdp_handler.py:856` and `:863`, both inside `_handle_get_frame_storage`.
-On the CLI that is `storage get`, which already has `--key`. So `--key` serves every
+On the CLI that is `storage get`, which already has `--key`. Two further reads of
+the selection exist and neither changes this. `frame_manager.py:240` is
+`get_selected_execution_context_id` reading `get_selected_frame`, internal to the
+pair. `cdp_handler.py:794` reads `selected_frame_id` off the frame manager
+directly, to print a `[selected]` marker in `frames list`; that is display, not a
+frame-scoped read. So `--key` serves every
 consumer of frame selection that exists, not a fraction of them, and a Step Run
 wins nothing here today.
 
@@ -170,17 +175,31 @@ Problem statement, item 2, withdraws that: continuity has one consumer today and
 `--key` already serves it.
 
 **That flow contains only handler-routed verbs**, so a second flow was measured
-covering the five that open their own One-Shot Session today, which are the five
-this RFC requires to be re-routed: `passthrough`, `wait`, `console-list`,
-`network-list`, `screenshot`. Ten steps, none carrying an intrinsic wait:
+over the One-Shot Session transport. Ten steps, none carrying an intrinsic wait,
+20 runs each side:
 
-| Shape | Median of 5 runs |
-|---|---|
-| Ten invocations | **787.8 ms** |
-| One browser-level connection, one attached session | **82.7 ms** |
-| Saving | **705.1 ms, 90%** |
+| Shape | Median of 20 runs | Range |
+|---|---|---|
+| Ten invocations | **870.1 ms** | 843.1 to 989.4 |
+| One browser-level connection, one attached session | **83.0 ms** | 57.6 to 84.4 |
+| Saving | **787.1 ms, 90%** | |
 
-Per step, 78.8 ms falls to 8.3 ms.
+Per step, 87.0 ms falls to 8.3 ms. Pairing the fastest ten-invocation run against
+the slowest one-session run still gives 90%, so the figure does not depend on
+picking favourable runs.
+
+**What flow B covers, precisely.** Its ten steps are eight raw `Domain.method`
+calls and two `screenshot`s. It exercises the passthrough and `screenshot`
+transports. It does **not** contain `wait`, `console-list` or `network-list`,
+whose cost is dominated by their own windows (2 seconds by default for the list
+verbs, 30 for `wait`), which one invocation does not remove. Version 3 claimed
+flow B covered "the five"; it covers two of them, and this is the correction.
+
+**One asymmetry, in the direction that favours a critic.** The floor side issues
+bare `cdp.send` calls, so it skips work the ten-invocation side pays: the
+screenshot blank-frame retry (`curated.py:534-546`), the file write, and JSON
+rendering of each result. The true floor for a built verb is therefore somewhat
+above 83.0 ms.
 
 The two flows disagree, 50% against 90%, and the whole difference is the intrinsic
 waits. The per-step tax removed is about the same in both, roughly 70 to 85 ms.
@@ -218,7 +237,7 @@ run [INSTANCE] -    [--timeout SECONDS] [--endpoint URL]
 source MUST be given; giving neither, or both, is a usage error (exit 2).
 
 Both sources are REQUIRED. A file is reviewable, diffable, and re-runnable, which
-is what a flow worth keeping needs. stdin is what a caller that generates a flow
+is what a flow you keep and re-run needs. stdin is what a caller that generates a flow
 and does not want a temporary file needs, and some agent harnesses cannot easily
 write one.
 
@@ -421,15 +440,50 @@ The rule, in three parts:
    `console-list`, `network-list` and `wait` mean inside a run exactly what they
    mean outside it. The cost is one extra CDP round trip per domain per step, which
    is about 1 ms against the 85 ms a step already saves.
+
+   Two cases sit under this rule and the build MUST handle both.
+
+   A raw passthrough step naming an enable, for example `raw Network.enable '{}'`,
+   is **not** covered. The rule governs the enables a verb issues on the caller's
+   behalf, which the caller did not write and cannot see. An enable the caller
+   typed is the step's whole output, and undoing it would make the step a no-op.
+   A caller who turns a domain on by hand turns it off by hand, with a later
+   passthrough step.
+
+   A disable that fails MUST NOT fail the step. Some domains have no `disable`,
+   which is why the enable path already suppresses `CDPError` (`events.py:347-350`,
+   `list_verbs.py:106-108`). The disable path gets the same guard: suppress the
+   error, carry on to the next step. The cost of a missed disable is a later step
+   losing its first enable, which rule 1 already names as the known exception;
+   the cost of propagating it is a run that fails after its work succeeded.
 3. **Every step MUST remove every event handler it registered before it ends.** The
    existing verbs already do this in a `finally` (`events.py:367-368`,
    `list_verbs.py:114-116`); a Step Run makes it normative rather than incidental,
    because a leaked handler now survives into later steps instead of dying with the
    process.
 
-Together these give the property a caller needs: **a step behaves the same inside a
-Step Run as it does as its own invocation, except for frame selection, which is the
-one piece of state a run deliberately carries forward.**
+Together these give a caller most of the property they need, and the exception has
+to be stated rather than glossed.
+
+**A step behaves the same inside a Step Run as it does as its own invocation, with
+two exceptions.** The first is frame selection, which a run deliberately carries
+forward. The second follows from rule 1 and is narrower but real: **a step that
+reads from the `Page` or `Runtime` domain does not get a first enable.** Those two
+stay enabled for the run, so a step re-enabling either gets a no-op.
+
+That is not hypothetical. `console-list` subscribes to `Runtime.consoleAPICalled`
+(`list_verbs.py:57`) and enables the domain its event names imply
+(`list_verbs.py:100-108`), so `Runtime` is exactly a domain a step enables. The
+practical damage is small, because `consoleAPICalled` is delivered live rather
+than replayed, so a second `console-list` still collects what fires during its own
+window. The visible case is a step that depends on replay: `wait --event
+Runtime.executionContextCreated` after any `Runtime`-enabling step sees nothing,
+where the same command alone sees the contexts that already exist.
+
+The exemption is kept anyway, because the alternative is worse: disabling `Page`
+or `Runtime` between steps breaks the frame manager, and frame-selection
+continuity is a property this RFC specifies. The cost is this paragraph, and the
+Manual entry carries it too.
 
 The alternative considered and rejected was to let domain enables persist and
 document the difference. It is cheaper to implement and it makes two documented
@@ -471,12 +525,27 @@ follows is what a caller can rely on.
   only inside `if resolved:`; there is no `else`, so a failed re-resolution leaves
   the previous id in place. Across one invocation that is nearly unreachable. Across
   a run it means a later step reads a frame whose URL no longer matches the pattern
-  the caller selected, and reports success. **The run MUST clear the selected frame
-  id when re-resolution after a navigation finds no match**, so the next
-  frame-scoped step fails with "No frame selected" instead of reading the wrong
-  frame. Note that the direct path already behaves correctly:
+  the caller selected, and reports success. **The frame manager MUST clear the
+  selected frame id when re-resolution after a navigation finds no match**, so the
+  next frame-scoped step fails with "No frame selected" instead of reading the
+  wrong frame. The direct path already behaves this way:
   `select_frame_by_url` clears the id on a no-match (`frame_manager.py:207-208`).
   It is the navigation path alone that does not.
+
+  **The fix belongs in the frame manager, not in the run.** Re-resolution happens
+  inside `handle_frame_navigated` (`frame_manager.py:349-353`), which has no
+  concept of a Step Run and should not acquire one. So this is the single
+  behavior change this RFC makes outside a run, and the "nothing changes outside"
+  claim below is worded to admit it. It is a correctness fix that is right in
+  either context: a stale id after a failed re-resolution is wrong in a bare
+  invocation too, merely almost unreachable there because the process ends first.
+
+  **The URL pattern is kept, not dropped.** After the clear,
+  `_selected_url_pattern` stays set, matching what a detach already does
+  (`frame_manager.py:313-314`) rather than what `reset_frame` does
+  (`frame_manager.py:212-215`). The caller selected by pattern, so a later
+  navigation that brings a matching frame back re-points the selection at it. Only
+  `frames reset` and a new `frames select` clear the pattern.
 - **A detach clears the frame id but keeps the pattern.**
   `frame_manager.py:313-314` sets `_selected_frame_id` to `None` and leaves
   `_selected_url_pattern` set. `get_selected_frame` returns `None` as soon as the id
@@ -486,14 +555,15 @@ follows is what a caller can rely on.
   later navigated event can re-point the selection through the retained pattern. The
   RFC states this rather than smoothing it over: a caller reading the sequence needs
   to know the selection can come back.
-- **A Step Run changes exactly one thing about the behavior above: the no-match
-  clear.** Everything else is the frame manager's behavior today, reachable across
-  steps because a run is one CDPRuntime. The no-match clear is a correction, not a
-  redefinition: across one invocation a stale id after a failed re-resolution is
-  nearly unreachable, and across a run it would silently read the wrong frame.
+- **One behavior changes, and it changes everywhere: the no-match clear.**
+  Everything else above is the frame manager's behavior today, reachable across
+  steps because a run is one CDPRuntime.
 
-Outside a Step Run nothing changes. A `frames select` in a bare invocation still
-dies with that process, and The Manual still documents `--key`.
+Outside a Step Run one thing changes and one does not. The no-match clear above
+applies to every invocation, because it lives in the frame manager. Everything
+else is untouched: a `frames select` in a bare invocation still dies with that
+process, and The Manual still documents `--key` as the way to read a frame's
+storage in a single command.
 
 ### UID validity across steps
 
@@ -550,9 +620,27 @@ differently inside a run than outside it. This repository already carries one li
 example of two lists disagreeing about one verb; see Design, "The step surface",
 on `window-border`. A reused parser cannot drift from itself.
 
-Because the parser is reused, there is no case where a malformed step is discovered
-after step 1 has run. That case has no row in Error Handling because the design
-excludes it, not because it was overlooked.
+**Reusing argparse is not sufficient on its own, and the requirement extends past
+it.** Required per-verb inputs are deliberately left optional at the argparse layer
+and validated afterwards in `_run`: `--uid` for `click` and `fill`
+(`cli.py:607-608`, `:621-624`), `--text` for `fill` (`:623-624`), the `storage`
+sub-action (`:678-679`), `--dir` and the removed sub-action for `screencast`
+(`:704-717`), and the `--target`/`--url` exclusion (`:505-506`, `:520-521`,
+`:536-537`, `:550-551`). `cli.py:246-249` states that split is on purpose, so the
+parser accepts a bare verb. A step `click` with no `--uid` therefore parses
+cleanly and fails only later.
+
+So validation MUST run **both** layers for every step: the reused `argparse`
+parser, and the same per-verb precondition checks `_run` applies. Those checks MUST
+be reached through one shared function that `_run` also calls, never copied, for
+the same drift reason.
+
+**Two mechanics the implementer has to handle, named here rather than left
+implicit.** `argparse` reports a parse failure by writing to stderr and raising
+`SystemExit`, which would end the run rather than report a step. Validation MUST
+intercept both: capture the parser's stderr and convert `SystemExit` into the
+step's usage error, so the diagnostic names the step's line number instead of
+appearing as a bare parser message about a program the caller did not invoke.
 
 **Instance detection reads the registry once, before step 1.** A bare leading token
 is an instance name only when the registry knows it (`GUIDE.txt:21-22`,
@@ -582,8 +670,26 @@ A step fails when it would have exited 1 as a bare invocation.
 
 **Refusals are not bypassed by being inside a run.** The focus guard, the
 `--endpoint` loopback rule, the `Browser.close` and `Browser.crash` refusals, and
-profile exclusivity apply to a step exactly as they apply to a bare invocation. Because refusals are usage errors (exit 2), a Step List containing one is refused
-at validation and the run executes nothing.
+profile exclusivity apply to a step exactly as they apply to a bare invocation. A
+Step Run MUST NOT provide a path around any of them.
+
+**They do not all land in the same place, and version 3 wrongly said they did.**
+Three classes:
+
+1. **Statically checkable, exit 2, caught at validation.** The refused method
+   names, `Target.activateTarget`, `Page.bringToFront`, and
+   `Target.createTarget` with `background:false` (`passthrough.py:240-253`). A
+   Step List containing one of these is refused before step 1 and the run
+   executes nothing.
+2. **Needs the live browser, exit 1, caught at its own step.** Input sent to a
+   background tab. `passthrough.py:256-264` sends `Runtime.evaluate` and reads
+   `document.visibilityState` before deciding, so it cannot be known up front, and
+   `GUIDE.txt:226-228` gives it exit 1, not exit 2. It is an ordinary runtime step
+   failure and takes the exit-1 row of the Error Handling table.
+3. **Unreachable inside a run.** The `Browser.close` and `Browser.crash` refusals
+   fire only over `--endpoint` (`passthrough.py:297-298`), and a step cannot carry
+   `--endpoint`. Profile exclusivity belongs to `launch`, which is not a step.
+   There is nothing to validate in either case.
 
 ### Timeouts
 
@@ -782,13 +888,27 @@ RUNNING MANY STEPS IN ONE INVOCATION
       remembers the pattern you gave it, so after a navigation it re-points at
       whatever frame now matches. If nothing matches any more, the selection is
       cleared and the next frame-scoped step fails rather than reading the wrong
-      frame. It also goes away when the selected frame goes away.
+      frame. The selected frame going away clears it too, but the pattern is
+      kept either way, so a later navigation that brings a matching frame back
+      selects it again. Only `frames reset` and a new `frames select` change the
+      pattern.
 
-      EVERYTHING ELSE BEHAVES AS IT WOULD ALONE. A step inside a run does what
-      the same command does on its own. Domains a step turns on are turned off
-      when that step ends, so a second `console-list` in one run sees what the
-      first one saw. Frame selection is the single exception, and it is the
-      exception on purpose.
+      EVERYTHING ELSE BEHAVES AS IT WOULD ALONE, WITH ONE EXCEPTION. A step
+      inside a run does what the same command does on its own. Domains a step
+      turns on are turned off when that step ends, so a second `network-list`
+      in one run sees what the first one saw.
+
+      The exception is the Page and Runtime domains. A run needs them on
+      throughout to track frames, so they are never turned off between steps.
+      A step that relies on being the first to turn one of them on does not
+      get that. `wait --event Runtime.executionContextCreated` after any step
+      that touched Runtime reports nothing, where the same command on its own
+      reports the contexts that already exist; `console-list` is in the same
+      position, because it turns Runtime on too. Run either one on its own.
+
+      A raw step you write yourself is yours to undo. `raw Network.enable {}`
+      stays on until a later step turns it off; the rule above covers only the
+      domains a verb turns on for you.
 
       UIDS ARE UNCHANGED. A UID is still valid until the page navigates, no
       longer and no shorter. One process does not extend it. Because no step can
@@ -906,6 +1026,18 @@ interpreter option was live; Decisions, item 1, closed it.
 **YAML.** Declined on packaging: it needs a dependency, and the default install
 depends on `websockets` only.
 
+**A fail-closed output envelope**, where a failed run's document is shaped so an
+old caller parsing it cannot mistake it for a whole run, rather than relying on
+the caller reading the exit code first. Not chosen. The ordered caller contract in
+"The Run Document" describes the hazard and does not mechanically prevent it: a
+caller that reads the `steps` array and ignores both the exit code and
+`run.status` still reads a partial run as a complete one. The trade accepted here
+is that the document stays directly composable, because each step's `result` is
+byte-identical to what that step prints alone, which is the property that lets a
+caller parse a run at all. An envelope that broke that composability to protect a
+caller doing two wrong things at once was judged the worse trade. Recorded because
+the option was real and the protection is genuinely weaker without it.
+
 **Keeping the frame selection in the registry** so a bare `frames select` survives
 between invocations, with no new verb. Declined. It would make a registry entry
 carry live CDP state that the browser can invalidate at any moment, with no process
@@ -920,7 +1052,7 @@ process and the continuity ends with it.
 
 ## Decisions
 
-All four questions this RFC raised were put to Kevin on 2026-09-21 and answered.
+All five questions this RFC raised were put to Kevin on 2026-09-21 and answered.
 Each took the recommendation, so the Design sections above stand as written and
 nothing in them changed as a result. None of these is machine-made.
 
@@ -990,6 +1122,75 @@ None. The five questions this RFC raised are recorded in Decisions above.
 
 ## Changes in this revision
 
+**Version 4** (2026-09-21) is the revision after a second adversarial review by
+`muse-spark-1.3-contributor@muse`, again cross-family, against the version 3
+snapshot at commit `3662093`. Its verdict and every finding are in
+`docs/rfc/03_run-many-steps-in-one-invocation.review-02.md`. The verdict was
+"accept with changes": four blocking findings, four major, seven minor, all
+verified against source before being applied. What changed:
+
+1. **Flow B is retaken at n=20** (N-J3). Five runs over a 42% spread could not
+   carry a 90% headline. Retaken at 20 runs a side: **870.1 ms** across ten
+   invocations against **83.0 ms** over one session, still 90%, and 90% again when
+   the fastest ten-invocation run is paired against the slowest one-session run.
+   The retake also exposed a latent defect in the harness, which held a literal
+   port that had been correct by luck until the launcher handed the fresh instance
+   a different one. The first n=20 attempt drove another browser and was
+   discarded. The harness now resolves its port from the registry by instance
+   name, refuses to run when the name is absent or the instance is not alive, and
+   re-checks the port after the run. The measurements file records the discarded
+   attempt and what it does and does not void: the version 3 n=5 figures measured
+   the right browser and are superseded, not wrong.
+2. **The flow B coverage claim is narrowed** (N-J2). Its ten steps are eight raw
+   `Domain.method` calls and two `screenshot`s. It covers two One-Shot Session
+   verbs, not five. `wait`, `console-list` and `network-list` are dominated by
+   their own windows, which one invocation does not remove, and Motivation now
+   says so rather than implying the saving extends to them.
+3. **The floor-side asymmetry is disclosed** (N-J2, second half). The one-session harness issues
+   bare `cdp.send` calls, skipping the screenshot blank-frame retry
+   (`curated.py:534-546`), the file write, and JSON rendering. The true floor for
+   a built verb sits above 83.0 ms, and Motivation states this in the direction
+   that favours a critic.
+4. **The References parenthetical no longer contradicts Design** (N-B1). It said
+   RFC-01 was not amended; Design amends it twice. The parenthetical now names
+   both amendments.
+5. **Refusals are split into three classes** (N-B2). Version 3 treated every
+   refusal as a statically-checkable usage error and exited 2 before connecting.
+   One class is not static: the hidden-tab refusal needs a live browser read
+   (`passthrough.py:256-264`, `GUIDE.txt:226-228`), so it cannot be pre-checked
+   and exits 1 as an operational failure at the step that hits it. A third class,
+   verbs unreachable inside a run at all, is named separately.
+6. **The frame no-match clear moves into the frame manager** (N-B3, N-m4). A run
+   is not the right owner: the stale-id hazard is the frame manager's, and a
+   caller-side clear leaves every other caller exposed. The URL pattern is kept
+   on a no-match, matching what detach already does, so a later navigation that
+   brings a matching frame back re-selects it.
+7. **Parser reuse extends to the semantic checks** (N-B4). Reusing the `argparse`
+   parsers is not enough: `_run` carries checks `argparse` cannot express
+   (`cli.py:607-608`, `:621-624`, `:678-679`, `:704-717`, `:505-506`), and a step
+   validator that skips them accepts steps the same command rejects on its own.
+   The section also states the mechanic, since the parsers raise `SystemExit` and
+   write to stderr, which a run MUST intercept rather than let terminate it.
+8. **The `Runtime` exemption reopens the replay hole for `console-list`** (N-J4).
+   `console-list` subscribes to `Runtime.consoleAPICalled` (`list_verbs.py:57`),
+   so leaving `Runtime` enabled across steps costs it the same replay that
+   `wait --event` loses. Both are now named in the same place, with the same
+   remedy: run that step on its own.
+9. **The rejected fail-closed envelope is recorded** (N-J1) in Alternatives
+   Considered, rather than being absent from a document that specifies the
+   envelope it beat.
+10. **An explicit enable and a failing disable are specified** (N-m5, N-m6). The
+    per-step disable rule governs the enables a verb issues for the caller, not an
+    enable the caller typed as a passthrough step, and a disable that fails is
+    suppressed rather than failing the step, matching what the enable path already
+    does (`events.py:347-350`, `list_verbs.py:106-108`).
+11. Minor: the question count reads "five", not "four" (N-m1). The normative
+    `GUIDE.txt` entry now carries the Page and Runtime exemption, which Design
+    requires and the entry omitted (N-m2), and the resurrection case for a
+    selection whose frame goes away, which the entry flattened to "goes away"
+    (N-m3). The frame-selection call-site list adds the two further reads it
+    omitted, neither of which changes the one-consumer conclusion (N-m7).
+
 **Version 3** (2026-09-21) is the revision after an adversarial review by
 `muse-spark-1.3-contributor@muse`, a cross-family reviewer chosen with the Claude
 family excluded because a Claude model drafted this RFC. The review returned
@@ -1018,10 +1219,10 @@ in `docs/rfc/03_run-many-steps-in-one-invocation.review-01.md`. What changed:
    MUST clear it. Detach keeping the pattern is stated too.
 5. **The evidence gap in the saving is closed by measurement** (M2). Version 2's
    harnesses exercised only handler-routed verbs. A second flow was measured
-   covering the five One-Shot Session verbs: 787.8 ms across ten invocations
-   against 82.7 ms over one session, a 90% saving. The five that need the most
-   rework show the larger saving, not a smaller one. Motivation now carries both
-   flows and says why the percentages differ.
+   over the One-Shot Session transport: 787.8 ms across ten invocations against
+   82.7 ms over one session, a 90% saving. Motivation now carries both flows and
+   says why the percentages differ. **Version 4 supersedes those two figures at
+   n=20** and narrows the coverage claim, which was too broad.
 6. **The step parser MUST reuse the existing `argparse` parsers** (M3), which is
    the condition attached to decision 5. **Instance detection reads the registry
    once, before step 1** (M4).
@@ -1055,7 +1256,7 @@ itself is accepted is a separate call, and Kevin has not made it.
 
 ### Normative
 
-- RFC-01, "Merge chrome-agent core into browser-tools", `docs/rfc/01_merge-chrome-agent-core-into-browser-tools.rfc.md`. Scope boundary at `:36`; the long-lived recorder declined at `:43`; "CLI surface (normative)"; "Refusals and exit codes" (not amended by this RFC; see Design, "Amendment to The Manual"); "Packaging"; "The agent manual".
+- RFC-01, "Merge chrome-agent core into browser-tools", `docs/rfc/01_merge-chrome-agent-core-into-browser-tools.rfc.md`. Scope boundary at `:36`; the long-lived recorder declined at `:43`; "CLI surface (normative)"; "Refusals and exit codes", **amended by this RFC**: Design, "Two amendments", scopes the `:204` success-field rule per step inside a run; "Packaging"; "The agent manual".
 - `CONTEXT.md`. **One-Shot Session**, **CDPRuntime**, **UID**, **Bounded Capture**, **The Manual**. **Step Run** and **Step List** are added by this RFC.
 - `src/browser_tools/GUIDE.txt`. The verb surface the step surface is derived from. The UID rule at `:197-209`; output and exit codes at `:333-346`; the `storage get --key` workaround at `:128-131`.
 - `src/browser_tools/extras.py`. The packaging discipline and the `MissingExtraError` wording. Neither is invoked by this RFC, which adds no dependency.
@@ -1064,7 +1265,8 @@ itself is accepted is a separate call, and Kevin has not made it.
 ### Informative
 
 - `docs/rfc/03_run-many-steps-in-one-invocation.measurements.md`. Every figure in Motivation, the harnesses, the environment, the reproduction of the frame-selection loss, and the stale-`bt` finding.
-- `docs/rfc/03_run-many-steps-in-one-invocation.review-01.md`. The adversarial review that produced version 3, by `muse-spark-1.3-contributor@muse`, a cross-family reviewer chosen with the Claude family excluded because a Claude model drafted the RFC. It carries the verdict, every finding, and what version 3 did with each one.
+- `docs/rfc/03_run-many-steps-in-one-invocation.review-01.md`. The adversarial review that produced version 3, by `muse-spark-1.3-contributor@muse`, a cross-family reviewer chosen with the Claude family excluded because a Claude model drafted the RFC. It carries the verdict, every finding, and what version 3 did with each one. Its brief is `.review-brief-01.md` beside it.
+- `docs/rfc/03_run-many-steps-in-one-invocation.review-02.md`. The adversarial review that produced version 4, by the same reviewer on the same route, against the version 3 snapshot at commit `3662093`. It carries the verdict, every finding, and what version 4 did with each one. Its brief is `.review-brief-02.md` beside it.
 - `src/browser_tools/frame_manager.py:89-90` (selection state), `:207-208` (the direct path clears on a no-match), `:223-224` and `:229-230` (a cleared id short-circuits before the pattern fallback), `:313-314` (the **detach** handler, which clears the id and keeps the pattern), `:349-353` (the **navigation** re-resolution, which assigns only on a match and today clears nothing).
 - `src/browser_tools/cdp_handler.py:404-413` (the handler's page-level, sessionless connection), `:816`, `:856`, `:863` (every call site that consumes frame selection: one inside `select_frame`, two inside `get_frame_storage`).
 - `src/browser_tools/core/cdp_client.py:158-161`. Event dispatch and the `sessionId` filter that makes the two connection models incompatible.

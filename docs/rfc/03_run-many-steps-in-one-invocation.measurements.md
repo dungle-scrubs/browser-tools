@@ -14,7 +14,7 @@ reproducible without reaching outside the repository.
 | Python | 3.14.6 (`.venv/bin/python`) |
 | Chrome | `Chrome/153.0.8010.50`, launched `--headless` |
 | Machine | Apple M5 Max, 128 GB |
-| Instance | `browser-tools-01`, port 9222, no profile, stopped after each run |
+| Instance | `browser-tools-01`, no profile, stopped after each run. Port 9222 for every series except the flow B n=20 retake, which got 9223; the launch JSON is quoted where it matters. |
 
 ### Which `bt` produced these numbers
 
@@ -97,14 +97,13 @@ of the per-invocation tax.
 Every verb in flow A already runs over a `CDPHandler`. That is the limit of what
 flow A evidences, and it is why flow B exists.
 
-## Flow B: the five One-Shot Session verbs
+## Flow B: the One-Shot Session transport
 
-Added to answer the review's finding M2: flow A said nothing about `passthrough`,
-`wait`, `console-list`, `network-list` and `screenshot`, which open their own
-One-Shot Session today and which RFC-03 requires to be re-routed.
+Added to answer the version 2 review's finding M2: flow A said nothing about the
+verbs that open their own One-Shot Session today. Narrowed to answer the version 3
+review's finding N-J2, which is right about what these ten steps cover.
 
-Ten steps, identical in both shapes, all routed through a One-Shot Session, and
-none carrying an intrinsic wait:
+Ten steps, identical in both shapes, none carrying an intrinsic wait:
 
 ```
 Runtime.evaluate, Page.getNavigationHistory, Page.getLayoutMetrics,
@@ -112,17 +111,73 @@ DOM.getDocument, screenshot, Runtime.evaluate, Browser.getVersion,
 Page.getFrameTree, screenshot, Network.getAllCookies
 ```
 
+Eight raw `Domain.method` calls and two `screenshot`s. **That is two of the five
+One-Shot Session verbs, `passthrough` and `screenshot`, not all five.** `wait`,
+`console-list` and `network-list` are absent on purpose: their cost is dominated
+by their own duration windows, 2 seconds by default for the list verbs and 30 for
+`wait` (`GUIDE.txt:115-122`, `:159-166`), which one invocation does not remove.
+Measuring them here would report their windows, not the transport.
+
 | Shape | n | min ms | median | max ms |
 |---|---|---|---|---|
-| Ten invocations | 5 | 776.4 | **787.8 ms** | 831.9 |
-| One browser-level connection, one attached session | 5 | 59.1 | **82.7 ms** | 83.8 |
-| Saving | | | **705.1 ms, 90%** | |
+| Ten invocations | 20 | 843.1 | **870.1 ms** | 989.4 |
+| One browser-level connection, one attached session | 20 | 57.6 | **83.0 ms** | 84.4 |
+| Saving | | | **787.1 ms, 90%** | |
 
-Per step: **78.8 ms falls to 8.3 ms.**
+Per step: **87.0 ms falls to 8.3 ms.**
 
-The floor probe uses the connection model RFC-03 version 3 specifies: one
-browser-level CDP connection plus one attached flattened `Target` session, through
-the existing `one_shot_page_session`. It implements nothing the RFC specifies.
+The n=20 samples answer the version 3 review's finding N-J3, which objected to a
+90% headline drawn from five runs over a 42% spread. The figure does not depend on
+picking favourable runs: the fastest ten-invocation run (843.1 ms) against the
+slowest one-session run (84.4 ms) is still a 90.0% saving.
+
+The floor probe uses the connection model RFC-03 specifies: one browser-level CDP
+connection plus one attached flattened `Target` session, through the existing
+`one_shot_page_session`. It implements nothing the RFC specifies.
+
+### One asymmetry, in the direction that favours a critic
+
+The floor side issues bare `cdp.send` calls. It therefore skips work the
+ten-invocation side pays for: the screenshot blank-frame retry loop
+(`curated.py:534-546`), the file write, and JSON rendering of each result. **The
+true floor for a built `run` verb is somewhat above 83.0 ms.** The measurement
+bounds the transport saving, not the finished verb.
+
+### A discarded run, and the defect it exposed
+
+The n=20 series above is the second attempt. The first was discarded, because the
+harness drove the wrong browser.
+
+`oneshot_floor_probe.py` held `PORT = 9222` as a literal. That had been correct by
+luck: 9222 is the first port the launcher hands out, and every earlier series got
+it (`launch.json`, `launch2.json`, `launch3.json` all record port 9222). The n=20
+retake launched a fresh instance, and by then another browser on this machine held
+9222, so the launcher gave `browser-tools-01` port **9223**
+(`launch-flowB.json`). The floor side ran its ten steps against a browser that was
+not the one the ten-invocation side was timing, on a different page, with a
+different profile. The two sides were not the same work, so that attempt's data
+was discarded and is not in this file.
+
+Ten reads reached the wrong browser, twenty times: two `Page.captureScreenshot`,
+one `Network.getAllCookies`, and seven other read-only `Domain.method` calls.
+Every one was a read; nothing was mutated, nothing was navigated, and the browser
+was not stopped. Every response was discarded in the probe. Only elapsed
+milliseconds were printed or written, so no page content, cookie value or
+screenshot reached any file.
+
+The harness now resolves its port from the registry by instance name, refuses to
+run when the name is absent from the registry or the instance is not alive, and
+re-reads the port after the run, voiding the measurement if it moved. The n=20
+figures above were taken with that version against port 9223, confirmed before
+and after.
+
+**What this does and does not void.** It voids only the discarded attempt. The
+version 3 n=5 flow B figures, 787.8 ms against 82.7 ms, were taken against
+`browser-tools-01` on port 9222 when that instance did hold 9222 (`launch3.json`),
+so they measured the right browser. They are superseded by the n=20 series because
+five runs over a 42% spread cannot carry a 90% headline, which is finding N-J3,
+not because they are wrong. Flow A and the enable probe were also on 9222 with the
+registry agreeing (`launch.json`, `launch2.json`), and are unaffected.
 
 ## Reading flow A and flow B together
 
@@ -130,8 +185,9 @@ The two disagree, 50% against 90%, and the reason is entirely the intrinsic wait
 
 | | Flow A | Flow B |
 |---|---|---|
-| Ten invocations | 1696.3 ms | 787.8 ms |
-| One session | 849.1 ms | 82.7 ms |
+| n | 5 | 20 |
+| Ten invocations | 1696.3 ms | 870.1 ms |
+| One session | 849.1 ms | 83.0 ms |
 | Of which intrinsic wait | about 800 ms | 0 ms |
 | Saving | 50% | 90% |
 
@@ -140,10 +196,9 @@ percentage differs because flow A's floor is mostly the browser waiting on purpo
 **90% is the honest figure for a flow with no waits in it, and 50% for a flow with
 two.** Neither is the headline on its own; the per-step figure is.
 
-Flow B also answers the review's concern in the RFC's favour. The five verbs that
-need the most rework show the larger saving, not a smaller one.
-
-One bound in the direction that favours a critic: flow A's floor probe runs
+Two bounds in the direction that favours a critic. Flow B's floor side skips
+verb-level work the invocation side pays, so its floor is understated; the section
+above states which work. And flow A's floor probe runs
 `select_frame` twice where a true single-session run needs it once, because the
 earlier selection would persist. The overstatement is a few milliseconds.
 
@@ -362,8 +417,10 @@ if __name__ == "__main__":
 
 ```bash
 #!/bin/zsh
-# Ten steps, every one routed through a One-Shot Session today, as ten invocations.
-# The same ten run over one session in oneshot_floor_probe.py.
+# Ten steps over the One-Shot Session transport, as ten invocations.
+# Eight raw Domain.method calls and two screenshots: passthrough and screenshot,
+# not all five One-Shot Session verbs. The same ten run over one session in
+# oneshot_floor_probe.py.
 set -u
 zmodload zsh/datetime
 BT=/Users/kevin/dev/browser-tools/.venv/bin/bt
@@ -385,33 +442,64 @@ printf '%.1f\n' $(( (t1 - t0) * 1000 ))
 
 ### `oneshot_floor_probe.py`, flow B over one session
 
+The version shown is the corrected one, which resolves its port from the registry.
+Earlier runs used a literal `PORT = 9222`; see "A discarded run, and the defect it
+exposed" above for which data that affects.
+
 ```python
 """Floor for the five verbs that route through a One-Shot Session today.
 
-RFC-03 M2: the original harnesses exercised only handler-routed verbs, so the
-1.70 s -> 0.85 s figure said nothing about `passthrough`, `wait`, `console-list`,
-`network-list` and `screenshot`. This runs the SAME ten steps as flow-oneshot.sh
-over the connection model RFC-03 version 3 specifies: one browser-level CDP
-connection plus one attached flattened Target session.
+RFC-03 finding M2: the original harnesses exercised only handler-routed verbs, so
+the flow A figure said nothing about `passthrough`, `wait`, `console-list`,
+`network-list` and `screenshot`. This runs the same ten steps as flow-oneshot.sh
+over the connection model RFC-03 specifies: one browser-level CDP connection plus
+one attached flattened Target session.
 
 It implements nothing RFC-03 specifies. It measures what the same work costs once
 the per-invocation tax is paid once.
+
+WHY THIS TAKES AN INSTANCE NAME
+-------------------------------
+An earlier version hardcoded PORT = 9222. Another session launched a browser on
+9222 with a real logged-in profile, this probe's own browser was given a different
+port, and the probe drove the wrong browser for twenty runs. The numbers were void
+and it sent a cookie-read to a browser it did not own.
+
+So the port is never assumed. It is resolved from the registry for the named
+instance, and the probe refuses to run if that instance is missing or not alive.
+Pass the instance name; there is no default.
 """
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import statistics
 import sys
 import time
 
+from browser_tools import lifecycle
 from browser_tools.one_shot import one_shot_page_session
 
-PORT = 9222
+
+def resolve_port(instance: str) -> int:
+    """Port for this instance, from the registry. Never a literal."""
+    rows = [r for r in lifecycle.status(registry_path=None) if r["name"] == instance]
+    if not rows:
+        raise SystemExit(
+            f"refusing to run: no instance named {instance!r} in the registry. "
+            f"Launch one and pass its name."
+        )
+    row = rows[0]
+    if not row.get("alive"):
+        raise SystemExit(f"refusing to run: instance {instance!r} is not alive.")
+    return int(row["port"])
 
 
 async def ten_steps(cdp, sid: str) -> None:
-    s = lambda m, p=None: cdp.send(method=m, params=p or {}, session_id=sid)
+    async def s(method: str, params: dict | None = None):
+        return await cdp.send(method=method, params=params or {}, session_id=sid)
+
     await s("Runtime.evaluate", {"expression": "1+1"})
     await s("Page.getNavigationHistory")
     await s("Page.getLayoutMetrics")
@@ -424,21 +512,36 @@ async def ten_steps(cdp, sid: str) -> None:
     await s("Network.getAllCookies")
 
 
-async def one_run() -> float:
+async def one_run(port: int) -> float:
     t0 = time.perf_counter()
-    async with one_shot_page_session(PORT, None, None) as (cdp, sid):
+    async with one_shot_page_session(port, None, None) as (cdp, sid):
         await ten_steps(cdp, sid)
     return (time.perf_counter() - t0) * 1000
 
 
-async def main() -> None:
-    runs = [await one_run() for _ in range(5)]
+async def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("instance", help="registry instance name; the port comes from it")
+    ap.add_argument("--runs", type=int, default=20)
+    args = ap.parse_args()
+
+    port = resolve_port(args.instance)
+    print(f"# instance={args.instance} port={port} runs={args.runs}", file=sys.stderr)
+
+    runs = [await one_run(port) for _ in range(args.runs)]
+
+    # The instance must still be the same one on the same port afterwards. A port
+    # that changed hands mid-run invalidates every number above.
+    if resolve_port(args.instance) != port:
+        raise SystemExit("port changed during the run; the measurement is void")
+
     for i, ms in enumerate(runs, 1):
         print(f"oneshot-floor-10-step-one-session\t{i}\t{ms:.1f}")
-    print(f"# median {statistics.median(runs):.1f} ms over {len(runs)} runs", file=sys.stderr)
+    print(f"# median {statistics.median(runs):.1f} ms", file=sys.stderr)
+    return 0
 
 
-asyncio.run(main())
+raise SystemExit(asyncio.run(main()))
 ```
 
 ### `enable_probe.py`, the domain-enable replay test
@@ -717,7 +820,63 @@ floor-10-step-one-process	4	846.9
 floor-10-step-one-process	5	852.0
 ```
 
-### `raw-oneshot.tsv`
+### `raw-oneshot20.tsv`
+
+Flow B, ten invocations, n=20.
+
+```
+oneshot-cli-10-step-ten-processes	1	876.5
+oneshot-cli-10-step-ten-processes	2	868.7
+oneshot-cli-10-step-ten-processes	3	888.8
+oneshot-cli-10-step-ten-processes	4	876.8
+oneshot-cli-10-step-ten-processes	5	882.8
+oneshot-cli-10-step-ten-processes	6	872.9
+oneshot-cli-10-step-ten-processes	7	861.7
+oneshot-cli-10-step-ten-processes	8	862.9
+oneshot-cli-10-step-ten-processes	9	866.0
+oneshot-cli-10-step-ten-processes	10	879.5
+oneshot-cli-10-step-ten-processes	11	887.4
+oneshot-cli-10-step-ten-processes	12	914.3
+oneshot-cli-10-step-ten-processes	13	871.5
+oneshot-cli-10-step-ten-processes	14	847.8
+oneshot-cli-10-step-ten-processes	15	843.1
+oneshot-cli-10-step-ten-processes	16	862.3
+oneshot-cli-10-step-ten-processes	17	848.7
+oneshot-cli-10-step-ten-processes	18	860.9
+oneshot-cli-10-step-ten-processes	19	989.4
+oneshot-cli-10-step-ten-processes	20	867.5
+# median 870.1 ms over 20 runs
+```
+
+### `raw-oneshot-floor20.tsv`
+
+Flow B, one session, n=20, against port 9223 confirmed before and after.
+
+```
+oneshot-floor-10-step-one-session	1	57.6
+oneshot-floor-10-step-one-session	2	83.7
+oneshot-floor-10-step-one-session	3	82.5
+oneshot-floor-10-step-one-session	4	66.6
+oneshot-floor-10-step-one-session	5	84.4
+oneshot-floor-10-step-one-session	6	82.9
+oneshot-floor-10-step-one-session	7	66.7
+oneshot-floor-10-step-one-session	8	83.1
+oneshot-floor-10-step-one-session	9	83.0
+oneshot-floor-10-step-one-session	10	67.0
+oneshot-floor-10-step-one-session	11	83.4
+oneshot-floor-10-step-one-session	12	84.0
+oneshot-floor-10-step-one-session	13	66.1
+oneshot-floor-10-step-one-session	14	83.3
+oneshot-floor-10-step-one-session	15	83.3
+oneshot-floor-10-step-one-session	16	66.8
+oneshot-floor-10-step-one-session	17	83.1
+oneshot-floor-10-step-one-session	18	82.7
+oneshot-floor-10-step-one-session	19	66.8
+oneshot-floor-10-step-one-session	20	83.9
+# median 83.0 ms over 20 runs
+```
+
+### `raw-oneshot.tsv` (superseded, n=5)
 
 Flow B, ten invocations.
 
@@ -729,7 +888,7 @@ oneshot-cli-10-step-ten-processes	4	831.9
 oneshot-cli-10-step-ten-processes	5	791.9
 ```
 
-### `raw-oneshot-floor.tsv`
+### `raw-oneshot-floor.tsv` (superseded, n=5)
 
 Flow B, one session.
 
