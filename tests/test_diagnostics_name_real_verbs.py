@@ -48,9 +48,7 @@ from browser_tools.tool_registry import TOOLS
 SRC = Path(__file__).resolve().parent.parent / "src" / "browser_tools"
 
 BUILDERS = frozenset({"make_error", "make_text"})
-RAISERS = frozenset(
-    {"LifecycleError", "UsageError", "PassthroughUsageError", "HiddenTargetError"}
-)
+RAISERS = frozenset({"LifecycleError", "UsageError", "PassthroughUsageError", "HiddenTargetError"})
 
 #: Internal tool names and upstream program names. None is a CLI verb, so none can
 #: appear in a diagnostic a caller reads. Derived from the tool registry, plus the
@@ -197,6 +195,6 @@ def test_collection_reaches_nested_modules_and_exception_messages() -> None:
 
     joined = {text for _f, _l, text in messages}
     assert any("No frame selected" in t for t in joined), "builder calls not collected"
-    assert any(
-        "does not look like Domain.method" in t for t in joined
-    ), "exception constructions not collected"
+    assert any("does not look like Domain.method" in t for t in joined), (
+        "exception constructions not collected"
+    )
