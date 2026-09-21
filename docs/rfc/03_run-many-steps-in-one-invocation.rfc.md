@@ -2,10 +2,10 @@
 number: 03
 title: "Run many steps in one invocation"
 type: feature
-status: Draft
+status: Accepted
 author: "Kevin Frilot"
 date: 2026-09-21
-version: 4
+version: 5
 ---
 
 # RFC-03: Run many steps in one invocation
@@ -1122,6 +1122,28 @@ None. The five questions this RFC raised are recorded in Decisions above.
 
 ## Changes in this revision
 
+**Version 5** (2026-09-21) is the acceptance. Kevin accepted the RFC as it
+stood at version 4. Two things follow.
+
+The status is `Accepted`. No normative text changed with it; version 4 is what
+was accepted, and the specification is what gets built.
+
+`N-J1` is settled by the same decision. The version 3 reviewer noted that the
+ordered caller contract describes the partial-run hazard without containing it,
+and that a fail-closed envelope was available and not chosen. Version 4
+recorded the rejected alternative in Alternatives Considered rather than
+deciding it, because the trade was Kevin's. Accepting version 4 accepts the
+composable envelope: a step's `result` stays byte-identical to what that step
+prints alone, and a caller reads the exit code and `run.status` before the step
+entries. The rejected alternative stays recorded, so a later reader can see the
+trade rather than assume nobody weighed it.
+
+**Step Run** and **Step List** are still not in `CONTEXT.md`. Abstract requires
+them when the RFC is built, not when it is accepted, and the glossary should
+not name domain nouns that no code yet uses. They land with the first
+implementation phase.
+
+
 **Version 4** (2026-09-21) is the revision after a second adversarial review by
 `muse-spark-1.3-contributor@muse`, again cross-family, against the version 3
 snapshot at commit `3662093`. Its verdict and every finding are in
@@ -1249,8 +1271,7 @@ the Run Document, the amendment to The Manual's exit-1 stdout rule, packaging, a
 the normative `GUIDE.txt` entry. Every figure in Motivation was measured for this
 draft; see the measurements file.
 
-Status is **Draft**. The five questions inside the RFC are settled; whether the RFC
-itself is accepted is a separate call, and Kevin has not made it.
+Status is **Accepted**, by Kevin on 2026-09-21.
 
 ## References
 
