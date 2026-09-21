@@ -66,7 +66,7 @@ all = [
 Homepage = "https://github.com/dungle-scrubs/browser-tools"
 Repository = "https://github.com/dungle-scrubs/browser-tools"
 Issues = "https://github.com/dungle-scrubs/browser-tools/issues"
-Changelog = "https://github.com/dungle-scrubs/browser-tools/blob/main/CHANGELOG.md"
+Changelog = "https://github.com/dungle-scrubs/browser-tools/releases"
 
 [project.scripts]
 browser-tools = "browser_tools.cli:main"
