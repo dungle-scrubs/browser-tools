@@ -47,6 +47,30 @@ glossary rather than left to name code that does not exist.
   `--duration` or the `--max-frames` cap, whichever comes first. The frame
   buffer is process-local, so nothing outlives the invocation and no verb pair
   can span two processes.
+- **Step Run** - the whole of `run`: one invocation, one CDP connection, one
+  attached session, many steps. It is the only place a browser-driving verb
+  runs over a session it did not open. Nothing outlives the invocation, so it
+  holds the same property Bounded Capture does and is not a session daemon.
+  The run resolves the instance, the endpoint and the page once, before step
+  one; a step may name none of them. It stops at the first failing step and
+  rolls nothing back, because a step that has run has already reached the
+  browser. `--timeout` bounds the whole run and defaults to no deadline,
+  since every step already bounds itself.
+- **Step List** - what a Step Run runs: an ordered list of verb phrases, one
+  per line, read from a file or stdin. It is data, not code. There are no
+  variables, no conditions, no loops, and no way for one step to use another
+  step's output, so reading an untrusted Step List is no more dangerous than
+  accepting untrusted `bt` arguments. Lines are split the way a shell splits
+  them, and `#` starts a comment. The whole list is validated against the
+  same parser and the same preconditions a bare invocation uses, before step
+  one runs, so a malformed list is exit 2 with nothing sent.
+- **Run Document** - the single JSON document a Step Run prints, on success
+  and on failure alike: a `run` object carrying the step count, how many
+  completed, and the status, and a `steps` array with one entry per step
+  *attempted*. A step's `result` is what that step prints alone, unchanged,
+  which is what lets a caller parse a run with what it already has. Steps
+  never reached are absent. The caller contract is ordered, and The Manual
+  says so: read the exit code first, then `run.status`, then the steps.
 - **UID** - the handle a snapshot gives a node, used by `click` and `fill`
   to address it. Valid for the lifetime of the document that produced it.
 - **CPU Profiler** - `browser-tools-profiler`, the second console script the
@@ -71,7 +95,11 @@ glossary rather than left to name code that does not exist.
 - **CDPRuntime** - the deep half of the CDP layer: owns the background
   thread, event loop, WebSocket connection, frame manager, and screencast
   recorder. Each CLI invocation builds one, uses it, and tears it down;
-  nothing keeps it alive between calls. `CDPHandler` is the composition
+  nothing keeps it alive between calls. One invocation is one runtime, not
+  one verb: a Step Run's steps all share the runtime the run opened, which
+  is why a `frames select` step governs the steps after it. It also carries
+  the run's deadline, so `--timeout` reaches a wait a step is already
+  sitting in rather than only the gaps between steps. `CDPHandler` is the composition
   root and 18-tool handler registry above it, reaching the browser through
   the runtime's `client` / `frame_manager` / `screencast` seam instead of
   owning connection state. Both classes live in `cdp_handler`.
@@ -91,8 +119,12 @@ glossary rather than left to name code that does not exist.
   instead of four byte-identical copies. A matching `cli_cdp_errors`
   decorator maps the seam's own failures (ambiguous/not-found target, no
   page, CDP, connection, unknown instance) to `LifecycleError`; each verb's
-  own errors (`UsageError`, `WaitTimeout`) pass through untouched. The
-  implementation module is `one_shot`.
+  own errors (`UsageError`, `WaitTimeout`) pass through untouched. Inside a
+  Step Run the seam is not entered per verb: the run attaches once and every
+  step runs over `(client, sessionId)`, so the same verb body serves both
+  shapes. `domains_enabled` lives here for that reason - a step gives back
+  every domain it turned on, except `Page` and `Runtime`, which belong to the
+  run. The implementation module is `one_shot`.
 - **Lifecycle** - the layer that owns profiles, the profile root, engine
   routing, and the registry call sites the verbatim vendored modules cannot
   carry. `launch`, `status`, `stop`, `cleanup` and `retire_instance` live
