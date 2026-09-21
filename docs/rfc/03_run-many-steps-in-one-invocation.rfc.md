@@ -5,7 +5,7 @@ type: feature
 status: Accepted
 author: "Kevin Frilot"
 date: 2026-09-21
-version: 5
+version: 6
 ---
 
 # RFC-03: Run many steps in one invocation
@@ -450,6 +450,16 @@ The rule, in three parts:
    A caller who turns a domain on by hand turns it off by hand, with a later
    passthrough step.
 
+   **The two rules collide, and the caller's enable wins** (version 6). A raw
+   `Network.enable` step followed by a `network-list` step satisfies both
+   descriptions at once, and CDP cannot separate them: a second `Network.enable`
+   succeeds exactly like a first, so the reply says nothing about who turned the
+   domain on. The run therefore records the domains its raw steps named, and a
+   later curated step MUST NOT disable one of them. The cost is that the curated
+   step does not get a first enable on that domain, which is the same exception
+   rule 1 already carries for `Page` and `Runtime`. The alternative costs the
+   caller a step that silently did nothing.
+
    A disable that fails MUST NOT fail the step. Some domains have no `disable`,
    which is why the enable path already suppresses `CDPError` (`events.py:347-350`,
    `list_verbs.py:106-108`). The disable path gets the same guard: suppress the
@@ -464,6 +474,19 @@ The rule, in three parts:
 
 Together these give a caller most of the property they need, and the exception has
 to be stated rather than glossed.
+
+**After a navigation step, a run MUST wait before it reads** (version 6).
+`Page.navigate` returns when the navigation commits, and the frame tree updates
+from the event that follows. A step placed straight after a navigate can run
+before that event arrives and read the frames of the page the run just left.
+
+The manual MUST name `wait-idle` for this and MUST NOT name
+`wait --event Page.loadEventFired`. `wait` reports events that arrive after it
+subscribes, and it subscribes when its own step starts, so a load that fired in
+the gap after the navigate step is gone and the wait times out on a page that has
+finished loading. Keeping `Page` enabled across the run does not help: an enabled
+domain delivers events, it does not replay them. `wait-idle` reads the page's
+current state rather than waiting for an edge, so it cannot miss one.
 
 **A step behaves the same inside a Step Run as it does as its own invocation, with
 two exceptions.** The first is frame selection, which a run deliberately carries
@@ -514,6 +537,12 @@ follows is what a caller can rely on.
 - `storage get` with no `--key` MUST succeed after a `frames select` step in the
   same run. The `--key` workaround at `GUIDE.txt:128-131` becomes unnecessary
   inside a run. `--key` keeps working and keeps meaning a frame URL pattern.
+- **`--key` MUST NOT change the run's selection** (version 6). The key names the
+  frame for that one read. The read selects, reads, and puts the previous pattern
+  back, so the sentence two bullets down stays true: only `frames reset` and a new
+  `frames select` change the pattern. Outside a run the difference is invisible,
+  because the selection dies with the process; inside one, a read that kept what
+  it borrowed would silently re-point every later frame-scoped step.
 - **Across a navigation the selection follows its pattern when the pattern still
   matches.** `frames select` stores the URL pattern as well as the frame id
   (`frame_manager.py:89-90`). On a frame-navigated event the manager re-resolves
@@ -1121,6 +1150,55 @@ nothing in them changed as a result. None of these is machine-made.
 None. The five questions this RFC raised are recorded in Decisions above.
 
 ## Changes in this revision
+
+**Version 6** (2026-09-21) records what the build found. The verb is implemented
+and merged; these are corrections to the specification, each one already in
+`GUIDE.txt` and in the suite. All four came from the second adversarial review of
+the implementation, in `.scratch/rfc-03-phase4/review-report.md`.
+
+1. **The caller's enable wins** (Design, rule 2). Rule 1 and rule 3 both described
+   a raw `Network.enable` step followed by a `network-list` step, and the
+   implementation resolved the collision by disabling the caller's domain. The
+   precedence is now stated rather than left to whichever rule the code read
+   first.
+2. **`--key` borrows the selection** (Design, frame selection). `storage get
+   --key K` called `select_frame`, which changed the persistent pattern. In a
+   one-shot invocation that is invisible. In a run it re-pointed every later
+   frame-scoped step, contradicting the bullet that says only `frames reset` and
+   `frames select` change the pattern.
+3. **The navigation wait is `wait-idle`** (Design). The manual's post-navigation
+   advice offered `wait --event Page.loadEventFired` as an equal. It is not: the
+   wait subscribes when its own step starts, so a load delivered in the gap is
+   already gone and the wait fails a run whose page had finished loading.
+4. **`#` starts a comment only at the start of a line.** `CONTEXT.md` said "`#`
+   starts a comment", which reads as trailing comments too. The parser drops
+   whole comment lines only, and it is right to: `shlex`'s comment mode also
+   truncates `--text abc#def`, which no shell does.
+
+Further corrections changed code and not this specification. The initial
+execution-context replay was lost because `Runtime.enable` preceded its handler
+registration. `Page.navigatedWithinDocument` was unhandled, so a single-page app
+kept the URL it first loaded. `Runtime.executionContextsCleared` was unhandled,
+so every frame kept a destroyed context id.
+
+The rest are all one defect wearing five faces: `_frames` and the `children`
+lists are two representations of one tree, and nothing held them together. A
+frame could be in the map and not in the tree, and `_resolve_frame_by_url`
+walked the map while `frames list` walked the tree, so `storage get` would read
+a frame the caller had been told did not exist. The rule is now stated and
+tested as one invariant - **a frame the map holds is reachable from the root,
+exactly once, and a selection resolves in the order `frames list` prints** -
+and five paths that broke it are fixed: a parent detach stranded its children, a
+re-attach stranded the old frame's descendants, a re-attach under a new parent
+left the old one still holding the frame, a frame whose `frameNavigated`
+preceded its `frameAttached` was never linked in, and an attach that would make
+a frame its own ancestor built an island. The invariant is asserted after every
+sequence in `TestTheTwoViewsOfTheFrameTreeAgree`, and an exhaustive search over
+every plausible three-, four- and five-event sequence finds no violation.
+
+Each of these is a pre-existing defect that the landed contract turned from
+invisible into observable: before a run, the frame manager died with the
+process a moment later.
 
 **Version 5** (2026-09-21) is the acceptance. Kevin accepted the RFC as it
 stood at version 4. Two things follow.

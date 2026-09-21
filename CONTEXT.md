@@ -61,9 +61,12 @@ glossary rather than left to name code that does not exist.
   variables, no conditions, no loops, and no way for one step to use another
   step's output, so reading an untrusted Step List is no more dangerous than
   accepting untrusted `bt` arguments. Lines are split the way a shell splits
-  them, and `#` starts a comment. The whole list is validated against the
-  same parser and the same preconditions a bare invocation uses, before step
-  one runs, so a malformed list is exit 2 with nothing sent.
+  them. A line whose first non-blank character is `#` is a comment; `#`
+  anywhere else is an ordinary character, so a URL fragment or a `--text`
+  value carrying one does not need quoting for that reason. The whole list is
+  validated against the same parser and the same preconditions a bare
+  invocation uses, before step one runs, so a malformed list is exit 2 with
+  nothing sent.
 - **Run Document** - the single JSON document a Step Run prints, on success
   and on failure alike: a `run` object carrying the step count, how many
   completed, and the status, and a `steps` array with one entry per step
