@@ -397,3 +397,113 @@ were MISSED on the first run and each named a real gap:
 | let a destroy cross the session boundary | nothing exercised a frame that changed Frame Session while holding a context id its old session also used |
 | subscribe a child's Runtime events after the enable | no test asserted the ordering for a child session, only for the page session |
 | file every child's contexts under the last session id | the tests called the handlers directly instead of through the subscription, so the binding was never exercised. The frame's own `execution_context_id` is set either way; only a later destroy reads the map back and finds nothing |
+
+## Phase 2b, reaching inside with a snapshot and a click
+
+### The premise the RFC had slightly wrong
+
+RFC-04 says a `backendDOMNodeId` "is unique per document, not per page".
+Measured, it is unique **per renderer process**, and the difference decides
+the design.
+
+A host page with two cross-origin iframes, `docs/rfc/04_probes` style:
+
+```
+page renderer backend ids  (7): [1, 4, 7, 8, 9, 10, 11]
+  child ?a=1              (7): [1, 3, 5, 8, 9, 10, 11]
+    OVERLAP with the page:     [1, 8, 9, 10, 11]
+  child ?a=2              (7): [2, 4, 12, 15, 16, 17, 18]
+    OVERLAP with the page:     [4]
+```
+
+Five of seven ids collide for the first child. Same-process frames do not
+collide at all - they share one renderer and one sequence, which is why the
+existing same-process stitch worked under a single token and why nobody had
+hit this. So the frame id in the document token is required, and it is
+required for cross-process frames specifically.
+
+### The defect reproduced first
+
+One build over a parent tree plus a child tree, both starting their backend
+ids at 1:
+
+```
+  RootWebArea    uid=PARENTTOKEN-1
+  Iframe         uid=PARENTTOKEN-2
+  RootWebArea    uid=PARENTTOKEN-x3     <- collided, unaddressable
+  textbox        uid=PARENTTOKEN-x4     <- collided, unaddressable
+```
+
+The child's nodes take the parent's token and their colliding ids fall back
+to `x<ordinal>`, which no interaction can address.
+
+### After
+
+```
+snapshot                          snapshot --frames all
+[uid=11681FA1B43C-1] RootWebArea  [uid=11681FA1B43C-1] RootWebArea "host"
+  ...                               ...
+    [uid=...-8] Iframe                [uid=11681FA1B43C-8] Iframe
+                                        [uid=96E57E41B1AB-2] RootWebArea "leaf"
+                                          [uid=96E57E41B1AB-7] button "ChildButton"
+                                          [uid=96E57E41B1AB-1] textbox
+```
+
+End to end in one run, clicking the host's button and the cross-origin
+child's button and filling the child's input:
+
+```
+  1 [ok] click --uid 7778C1F22838-8   Clicked at (49, 450)
+  2 [ok] click --uid C49A36316218-8   Clicked at (42, 130)
+  3 [ok] fill  --uid C49A36316218-1   value now 'typed-into-the-child'
+  5 [ok] storage get (child frame)    localStorage: {"c":"CHILD"}
+  7 [ok] storage get (host frame)     localStorage: {"h":"HOST"}
+```
+
+Each button's own handler wrote to its own renderer's localStorage, so the
+clicks landed where the UIDs said and not merely somewhere plausible. The
+child's coordinates are frame-relative because the dispatch goes to the
+child's renderer, which is the space that renderer reports and accepts.
+
+### A regression this work caused and fixed
+
+Giving each frame its own token immediately broke `click` inside a
+**same-process** iframe, which had worked: the UID now carried the child's
+token and the guard compared it against the main frame's.
+
+```
+error: cannot interact with uid '20807ACF0247-15': minted against a
+previous document (the page navigated since); take a new snapshot
+```
+
+The guard now checks a UID against every document live in the page, which
+is `Page.getFrameTree` walked rather than its root read. Same-process click
+verified again afterwards: the child's handler fired.
+
+### The message that blamed the wrong thing
+
+A UID minted with `--frames all` and used without it was refused as stale.
+Taking another snapshot mints the same UID and fails the same way, so the
+stated remedy could not work. The two cases are told apart by asking the
+browser for its `iframe` targets, on the failure path only - the same shape
+as the `frames select` diagnosis for #127.
+
+### Cost
+
+`docs/rfc/04_probes/snapshot_cost.sh`, mean of 9 runs per row.
+
+| page | `snapshot` | `snapshot --frames all` |
+|---|---|---|
+| no iframe | 121.9 ms | 126.9 ms |
+| ten cross-origin iframes | 128.2 ms | 155.9 ms |
+
+Reachable `button` nodes on the ten-iframe page: 0 by default, 10 with the
+flag.
+
+### Mutation
+
+`docs/rfc/04_probes/mutate_cross_frame.py`, 12 mutants, all CAUGHT. Two were
+MISSED first time: one was my own mutant not expressing the rule it named,
+and the other found that nothing drove `_dispatch_native` for `click` at all
+- `_send_for_uid` was tested directly, so removing its only call site
+changed nothing the suite could see.

@@ -42,13 +42,13 @@ from browser_tools.native_interaction import (
 from browser_tools.native_snapshot import (
     PAGE_GET_FRAME_TREE,
     NativeSnapshotReader,
-    doc_token_from_loader_id,
+    doc_token,
 )
 
 LOADER_ID = "D0C0FFEE1234ABCDEF0123456789ABCD"
-DOC = doc_token_from_loader_id(LOADER_ID)
+DOC = doc_token("", LOADER_ID)
 OTHER_LOADER_ID = "0B50LETE5678FEDCBA9876543210FEDC"
-OTHER_DOC = doc_token_from_loader_id(OTHER_LOADER_ID)
+OTHER_DOC = doc_token("", OTHER_LOADER_ID)
 
 TEXTBOX = f"{DOC}-40"
 BUTTON = f"{DOC}-50"

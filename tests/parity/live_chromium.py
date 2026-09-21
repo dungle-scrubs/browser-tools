@@ -107,34 +107,47 @@ class PlaywrightChromiumSession:
         the native parity engines read the cross-frame node set the flipped native
         backend serves.
         """
-        from browser_tools.native_snapshot import stitch_ax_frames
+        from browser_tools.native_snapshot import (
+            ChildFrameTree,
+            doc_token_from_frame,
+            stitch_ax_frames,
+        )
 
         top = self._cdp.send("Accessibility.getFullAXTree")
         self._cdp.send("Page.enable")
         frame_tree = self._cdp.send("Page.getFrameTree")
+        top_frame = frame_tree.get("frameTree", {}).get("frame", {})
 
-        frame_ids: list[str] = []
+        pairs: list[tuple[dict[str, Any], dict[str, Any]]] = []
 
-        def walk(node: dict[str, Any], is_root: bool) -> None:
+        def walk(node: dict[str, Any]) -> None:
             frame = node.get("frame", {})
-            frame_id = frame.get("id")
-            if not is_root and frame_id is not None:
-                frame_ids.append(str(frame_id))
             for child in node.get("childFrames", []) or []:
-                walk(child, False)
+                child_frame = child.get("frame", {})
+                if child_frame.get("id") is not None:
+                    pairs.append((child_frame, frame))
+                walk(child)
 
-        walk(frame_tree.get("frameTree", {}), True)
+        walk(frame_tree.get("frameTree", {}))
 
-        child_frames: list[tuple[int, dict[str, Any]]] = []
-        for frame_id in frame_ids:
+        child_frames: list[ChildFrameTree] = []
+        for child_frame, parent_frame in pairs:
+            frame_id = str(child_frame.get("id"))
             owner = self._cdp.send("DOM.getFrameOwner", {"frameId": frame_id})
             backend = owner.get("backendNodeId")
             if not isinstance(backend, int):
                 continue
             child = self._cdp.send("Accessibility.getFullAXTree", {"frameId": frame_id})
-            child_frames.append((backend, child))
+            child_frames.append(
+                ChildFrameTree(
+                    owner_backend_node_id=backend,
+                    owner_doc_token=doc_token_from_frame(parent_frame),
+                    doc_token=doc_token_from_frame(child_frame),
+                    result=child,
+                )
+            )
 
-        return stitch_ax_frames(top, child_frames)
+        return stitch_ax_frames(top, child_frames, top_doc_token=doc_token_from_frame(top_frame))
 
     def evaluate(self, script: str) -> Any:
         return self._page.evaluate(script)

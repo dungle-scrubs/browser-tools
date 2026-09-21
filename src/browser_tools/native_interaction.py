@@ -81,7 +81,7 @@ from collections.abc import Awaitable, Callable, Generator
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
-from .native_snapshot import parse_uid, read_doc_token, read_doc_token_sync
+from .native_snapshot import parse_uid, read_live_doc_tokens, read_live_doc_tokens_sync
 
 if TYPE_CHECKING:
     from .native_snapshot import NativeSnapshotReader
@@ -329,15 +329,20 @@ class NativeInteractor:
     reader: NativeSnapshotReader
     _last_methods: tuple[str, ...] = field(default=(), repr=False)
 
-    def _backend_for(self, uid: str, live_token: str) -> int:
-        """Check ``uid`` against the live document and return its backend node.
+    def _backend_for(self, uid: str, live_tokens: set[str]) -> int:
+        """Check ``uid`` against the live documents and return its backend node.
+
+        Against all of them, not against the main frame's. A UID minted
+        inside an iframe carries that iframe's document token, and a page
+        holds as many live documents as it has frames. Checking one token
+        refused a node that was on the screen.
 
         Raises:
-            UidResolutionError: The UID belongs to a previous document, or
+            UidResolutionError: The UID belongs to no live document, or
                 names no DOM node.
         """
         doc_token, backend = parse_uid(uid)
-        if doc_token != live_token:
+        if doc_token not in live_tokens:
             raise UidResolutionError(
                 uid,
                 "minted against a previous document (the page navigated since); "
@@ -348,12 +353,12 @@ class NativeInteractor:
         return backend
 
     def resolve(self, send: SyncSend, uid: str) -> int:
-        """Backend DOM node ``uid`` names, checked against the live document."""
-        return self._backend_for(uid, read_doc_token_sync(send))
+        """Backend DOM node ``uid`` names, checked against the live documents."""
+        return self._backend_for(uid, read_live_doc_tokens_sync(send))
 
     async def resolve_async(self, send: AsyncSend, uid: str) -> int:
         """Awaitable :meth:`resolve`."""
-        return self._backend_for(uid, await read_doc_token(send))
+        return self._backend_for(uid, await read_live_doc_tokens(send))
 
     # -- synchronous drivers (parity harness, tests) ----------------------- #
 
