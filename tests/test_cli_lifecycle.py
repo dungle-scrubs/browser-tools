@@ -330,6 +330,15 @@ class TestStatusStopCleanup:
             finally:
                 fcntl.flock(holder.fileno(), fcntl.LOCK_UN)
 
+    def test_registry_lock_reentry_is_scoped_to_the_lock(self, registry_path, tmp_path):
+        first = tmp_path / "one"
+        second = tmp_path / "two"
+        with lifecycle.registry_lock(registry_path, lock_root=str(first)):
+            with lifecycle.registry_lock(registry_path, lock_root=str(first), timeout=0.2):
+                pass
+            other = str(second / "registry.lock")
+            assert other not in lifecycle._registry_lock_depth.held
+
     def test_cleanup_keeps_entry_on_unattributable_listener(self, registry_path, monkeypatch):
         # An entry whose port answers but which /proc attribution cannot tie
         # to the recorded dir (macOS has no /proc) reads alive and must survive
