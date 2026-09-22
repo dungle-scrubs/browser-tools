@@ -1,0 +1,3 @@
+HeapProfiler.enable '{}'
+HeapProfiler.takeHeapSnapshot '{"reportProgress": false}'
+wait --event HeapProfiler.addHeapSnapshotChunk --timeout 10

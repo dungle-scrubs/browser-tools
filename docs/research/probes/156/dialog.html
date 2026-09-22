@@ -1,0 +1,13 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>dialog fixture</title>
+<style>body{font:16px system-ui;padding:24px} button{font-size:18px;padding:10px 20px;margin:6px}</style>
+</head>
+<body>
+<button id="alertbtn" onclick="window.__r='alert:'+String(alert('ALERT-FIXTURE'))">Raise alert</button>
+<button id="confirmbtn" onclick="window.__r='confirm:'+String(confirm('CONFIRM-FIXTURE'))">Raise confirm</button>
+<button id="promptbtn" onclick="window.__r='prompt:'+String(prompt('PROMPT-FIXTURE','default'))">Raise prompt</button>
+<button id="plain" onclick="window.__r='plain:clicked'">Plain button</button>
+<p id="log">idle</p>
+</body>
+</html>

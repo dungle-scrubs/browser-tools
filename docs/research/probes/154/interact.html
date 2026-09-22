@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>interaction fixture</title>
+<style>
+  body { font: 16px system-ui; margin: 0; padding: 24px; }
+  #hero { width: 600px; height: 300px; background: #446; color: #fff;
+          display: flex; align-items: center; justify-content: center; font-size: 36px; }
+  button { font-size: 20px; padding: 12px 24px; margin-top: 16px; }
+  #grow { height: 0; background: #fa0; }
+</style>
+</head>
+<body>
+<div id="hero">LCP ELEMENT</div>
+<button id="slow">Slow click</button>
+<div id="grow"></div>
+<p id="log">idle</p>
+<script>
+// A deliberately slow interaction handler, so INPBreakdown has a long
+// interaction to attribute. This is the case a load-only audit cannot see.
+document.getElementById('slow').addEventListener('click', () => {
+  const end = performance.now() + 320;
+  let n = 0;
+  while (performance.now() < end) { n += Math.sqrt(n + 1); }
+  document.getElementById('grow').style.height = '200px';
+  document.getElementById('log').textContent = 'clicked:' + Math.round(n);
+});
+</script>
+</body>
+</html>

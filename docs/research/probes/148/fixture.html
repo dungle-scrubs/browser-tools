@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>bt verb-gap fixture</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 0; padding: 16px; }
+  .tall { height: 4000px; background: linear-gradient(#eef, #fee); }
+  #hovertarget { padding: 12px; background: #ddd; display: inline-block; }
+  #hovertarget:hover { background: #0a0; color: #fff; }
+  #hoverstate { font-weight: bold; }
+</style>
+</head>
+<body>
+<h1 id="top">bt verb-gap fixture</h1>
+
+<form id="f" onsubmit="event.preventDefault(); document.getElementById('submitted').textContent='SUBMITTED:'+one.value+'|'+two.value;">
+  <label>One <input id="one" name="one" type="text"></label>
+  <label>Two <input id="two" name="two" type="text"></label>
+  <label>File <input id="file" name="file" type="file"></label>
+  <button id="go" type="submit">Go</button>
+</form>
+<p id="submitted"></p>
+
+<p><span id="hovertarget">Hover me</span> <span id="hoverstate">no-hover</span></p>
+
+<p>
+  <button id="alertbtn" onclick="window.__dialogResult = String(alert('ALERT-FIXTURE'))">Raise alert</button>
+  <button id="confirmbtn" onclick="window.__dialogResult = String(confirm('CONFIRM-FIXTURE'))">Raise confirm</button>
+  <button id="promptbtn" onclick="window.__dialogResult = String(prompt('PROMPT-FIXTURE','default'))">Raise prompt</button>
+</p>
+
+<p><a id="newtab" href="/second.html" target="_blank" rel="noopener">Open second page in a tab</a></p>
+
+<p id="late"></p>
+<div class="tall" id="filler">scroll region</div>
+<p id="bottom">BOTTOM MARKER</p>
+
+<script>
+  console.log('fixture console log line');
+  console.error('fixture console error line');
+  document.getElementById('hovertarget').addEventListener('mouseover', function () {
+    document.getElementById('hoverstate').textContent = 'HOVERED';
+  });
+  document.getElementById('one').addEventListener('keydown', function (e) {
+    document.getElementById('submitted').textContent = 'KEYDOWN:' + e.key;
+  });
+  setTimeout(function () {
+    document.getElementById('late').textContent = 'LATE TEXT APPEARED';
+  }, 1500);
+  fetch('/data.json').then(function (r) { return r.json(); }).then(function (j) {
+    console.log('fetched', j.ok);
+  });
+</script>
+</body>
+</html>

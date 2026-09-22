@@ -1,0 +1,9 @@
+{
+  "name": "148-01",
+  "port": 9228,
+  "pid": 14106,
+  "engine": "chrome",
+  "profile": null,
+  "browser_version": "Chrome/153.0.8010.53",
+  "user_data_dir": "/tmp/chrome-agent/session-p6llm3py"
+}
