@@ -70,9 +70,27 @@ def _camoufox_is_fetched() -> bool:
     return any(path.is_dir() and any(path.iterdir()) for path in candidates)
 
 
+#: Opt-in, because this is the one live browser the suite cannot make safe.
+#: Camoufox ships as an application bundle and has no plain-binary form, so
+#: launching it executes an app bundle's inner binary directly. Under the
+#: repeated launches of a full suite run that aborts in macOS application
+#: registration, killing the browser and raising a system crash dialog each
+#: time. The Chrome tests avoid this by being pointed at a headless shell
+#: (``tests/conftest.py``, ``pytest_configure``); Camoufox cannot be. So a real
+#: Camoufox launch happens only when someone asks for it.
+LIVE_CAMOUFOX_ENV_VAR = "BROWSER_TOOLS_LIVE_CAMOUFOX"
+
+
+def _camoufox_live_is_wanted() -> bool:
+    """True when the operator asked for a real Camoufox and one is on disk."""
+    return bool(os.environ.get(LIVE_CAMOUFOX_ENV_VAR)) and _camoufox_is_fetched()
+
+
 requires_camoufox = pytest.mark.skipif(
-    not _camoufox_is_fetched(),
-    reason="the Camoufox browser is not fetched; run `camoufox fetch`",
+    not _camoufox_live_is_wanted(),
+    reason=(
+        f"a real Camoufox launch is opt-in; set {LIVE_CAMOUFOX_ENV_VAR}=1 and run `camoufox fetch`"
+    ),
 )
 
 
@@ -88,8 +106,8 @@ def live(tmp_path_factory: pytest.TempPathFactory) -> Iterator[dict[str, Any]]:
     set through ``MonkeyPatch`` directly. The registry is a temp file, so
     nothing here can see or stop an instance the user is running.
     """
-    if not _camoufox_is_fetched():
-        pytest.skip("the Camoufox browser is not fetched")
+    if not _camoufox_live_is_wanted():
+        pytest.skip(f"a real Camoufox launch is opt-in; set {LIVE_CAMOUFOX_ENV_VAR}=1")
     base = tmp_path_factory.mktemp("camoufox-live")
     registry = str(base / "registry.json")
     patch = pytest.MonkeyPatch()
@@ -157,4 +175,5 @@ def test_stop_retires_the_entry_and_ends_the_process(
 def test_the_skip_guard_can_say_no():
     """A guard that cannot refuse would make every skip above meaningless."""
     assert isinstance(_camoufox_is_fetched(), bool)
-    assert requires_camoufox.args[0] is not _camoufox_is_fetched()
+    assert isinstance(_camoufox_live_is_wanted(), bool)
+    assert requires_camoufox.args[0] is not _camoufox_live_is_wanted()

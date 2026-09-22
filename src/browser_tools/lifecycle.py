@@ -83,6 +83,13 @@ VALID_ENGINES = ("chrome", "camoufox")
 #: Override the registry location from the environment (used by the CLI front
 #: and tests). ``None`` keeps the vendored default (/tmp/chrome-agent/...).
 REGISTRY_ENV_VAR = "BROWSER_TOOLS_REGISTRY"
+#: An explicit Chrome binary, used when no ``--channel`` names one. It exists
+#: because auto-detection finds the application bundle, and a test suite that
+#: launches the developer's own Chrome crashes it: executing an app bundle's
+#: inner binary directly aborts in macOS application registration under
+#: repeated launches. Point this at a plain binary, such as Chrome for
+#: Testing or a headless shell, and nothing registers as an application.
+CHROME_BINARY_ENV_VAR = "BROWSER_TOOLS_CHROME_BINARY"
 
 #: Root for persistent per-profile user-data-dirs. It is durable storage, and
 #: deliberately outside the vendored session root (/tmp/chrome-agent) so the
@@ -547,6 +554,25 @@ def _channel_candidates(channel: str) -> list[str]:
         }
         return by_channel.get(channel, [])
     return []
+
+
+def chrome_binary_from_env() -> str | None:
+    """Return the Chrome binary named by the environment, if any.
+
+    Returns None when the variable is unset. Raises LifecycleError when it is
+    set to something that is not an executable file, because silently falling
+    back to auto-detection would launch a different browser than the caller
+    asked for, and the whole point of the variable is to stop that.
+    """
+    named = os.environ.get(CHROME_BINARY_ENV_VAR)
+    if not named:
+        return None
+    if not (os.path.isfile(named) and os.access(named, os.X_OK)):
+        raise LifecycleError(
+            f"{CHROME_BINARY_ENV_VAR} is set to {named!r}, which is not an "
+            "executable file. Unset it, or point it at a Chrome binary."
+        )
+    return named
 
 
 def resolve_channel_binary(channel: str | None) -> str | None:
@@ -1028,7 +1054,9 @@ def launch(
                 registry_path=registry_path,
             )
 
-        binary = resolve_channel_binary(channel)
+        # An explicit --channel is the caller saying which Chrome they mean, so
+        # it wins. The environment variable replaces auto-detection, not intent.
+        binary = resolve_channel_binary(channel) or chrome_binary_from_env()
 
         try:
             info = asyncio.run(
