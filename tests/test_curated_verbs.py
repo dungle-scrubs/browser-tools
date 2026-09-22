@@ -1016,11 +1016,20 @@ class TestCuratedInChrome:
         path = tmp_path / 'prose.txt'
         path.write_text(prose)
         page('eval', 'document.body.innerHTML="<textarea id=i>AB</textarea>"; '
-             'window.events=[]; for(const name of ["beforeinput","input","keydown","keyup"]) '
+             'window.events=[]; for(const name of ["beforeinput","input","keydown","keyup","keypress"]) '
              'i.addEventListener(name,e=>events.push(e.type)); i.focus(); i.setSelectionRange(1,1)')
         page('type', '--file', str(path))
         assert page('eval', 'document.querySelector("#i").value')['value'] == 'A'+prose+'B'
-        assert page('eval', 'window.events')['value'] == ['beforeinput', 'input']
+        # What the ticket requires: the input events a framework-controlled
+        # field listens for, and no key events at all. How many `input` events
+        # Chrome emits for one insertText is its own business and it is not one
+        # per line: a three-line insert measured 1 beforeinput, 1 textInput and
+        # 5 input. Asserting an exact list pinned that internal and went red
+        # on any multi-line payload.
+        events = page('eval', 'window.events')['value']
+        assert 'beforeinput' in events
+        assert 'input' in events
+        assert not [e for e in events if e.startswith('key')], events
 
     def test_wait_present_later_and_never(self, page):
         assert page('wait-text', 'Already here')['found']
