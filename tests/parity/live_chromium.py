@@ -27,7 +27,15 @@ from typing import Any
 
 
 def chromium_available() -> tuple[bool, str]:
-    """Report whether a Playwright Chromium can be launched here."""
+    """Report whether the Playwright package is importable here.
+
+    It does not check that a browser binary was ever downloaded, so it can
+    answer yes on a machine where the launch will fail. That is deliberate and
+    safe only because :class:`PlaywrightChromiumSession` raises on a failed
+    launch and every caller turns that into a skip naming the reason. It was
+    not safe while the session silently substituted the developer's own Chrome
+    for the missing one.
+    """
     try:
         from playwright.sync_api import sync_playwright  # noqa: F401
     except ImportError:
@@ -58,13 +66,36 @@ class PlaywrightChromiumSession:
         from playwright.sync_api import sync_playwright
 
         self._pw = sync_playwright().start()
-        # Prefer the Playwright-managed Chromium; fall back to an installed
-        # Google Chrome via the "chrome" channel when the bundled binary was
-        # not downloaded (``playwright install`` never run in this environment).
+        # The Playwright-managed Chromium, and nothing else.
+        #
+        # This used to fall back to the developer's installed Google Chrome
+        # through the ``chrome`` channel whenever the bundled build was
+        # missing. That substituted their own logged-in browser for the one
+        # under test, silently: the parity comparison then ran against a
+        # different build than the baseline it is checked against, and the
+        # suite stayed green while comparing the wrong thing. On macOS it was
+        # worse than wrong. Chrome's app bundle aborts during application
+        # registration when its inner binary is executed directly, so each
+        # fallback killed a Chrome and raised a system crash dialog on the
+        # developer's screen, attributed to whatever they last had open.
+        #
+        # Every caller already skips when this raises, naming the reason, and
+        # the ``parity`` marker is documented as "skips when no browser is
+        # available". Letting it raise is that documented behaviour. A missing
+        # browser is not a licence to reach for the user's.
         try:
             self._browser = self._pw.chromium.launch(headless=self._headless)
-        except Exception:
-            self._browser = self._pw.chromium.launch(headless=self._headless, channel="chrome")
+        except Exception as exc:
+            # ``__exit__`` never runs when ``__enter__`` raises, so the driver
+            # this method started has to be stopped here or it is leaked.
+            with contextlib.suppress(Exception):
+                self._pw.stop()
+            self._pw = None
+            raise RuntimeError(
+                f"{exc}\n\nThe parity suite needs the Playwright-managed "
+                "Chromium. Install it with:\n"
+                "    python -m playwright install chromium"
+            ) from exc
         self._context = self._browser.new_context()
         self._page = self._context.new_page()
         self._cdp = self._context.new_cdp_session(self._page)
