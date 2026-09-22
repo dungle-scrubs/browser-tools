@@ -544,6 +544,16 @@ class TestSixVerbsManual:
 
     def test_distinguishes_waits_and_network_windows(self, flat):
         for text in ['has network activity stopped?', 'has the DOM stopped changing?',
-                     'is this text here?', 'not a buffer', 'no key events',
-                     'five seconds', 'bodyOmitted', '--response-file']:
+                     'is this text here?', 'no key events',
+                     # Was 'not a buffer', which stopped being true when the run
+                     # took ownership of the Network domain: a run does buffer now.
+                     # What still distinguishes them is whose window each one sees.
+                     'see only events in their own windows',
+                     "network-get also sees the run's buffer",
+                     # Was 'five seconds', the old fixed window. The run now owns
+                     # the Network domain, so a step reads traffic an earlier step
+                     # caused, and the standalone window matches network-list.
+                     'default 2, matching network-list',
+                     'without reloading or losing page state',
+                     'bodyOmitted', '--response-file']:
             assert text in flat

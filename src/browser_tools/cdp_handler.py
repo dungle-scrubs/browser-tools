@@ -21,6 +21,8 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from collections.abc import Generator
 
+    from .curated_runtime import ResponseBuffer
+
 from .core.attach import AmbiguousTargetError, TargetNotFoundError
 from .lifecycle import LifecycleError
 
@@ -341,6 +343,7 @@ class CDPRuntime:
     _caller_enabled: frozenset[str] = frozenset()
     _all_frames: bool = False
     _frame_sessions: Any = None
+    network_responses: dict[str, ResponseBuffer] | None = None
 
     def __init__(
         self,
@@ -737,6 +740,28 @@ class CDPRuntime:
             logger.exception("CDP session setup failed for %s", self._browser_url)
             self._cdp_client = None
 
+    async def start_run_network(self) -> None:
+        """Subscribe before step 1, retaining responses for this runtime only."""
+        self.network_responses = {}
+        await self.capture_network_session(self._cdp_client.session_id)
+        if self._frame_sessions is not None:
+            self._frame_sessions.on_session_ready = self.capture_network_session
+            for session in list(self._frame_sessions.sessions.values()):
+                if session.ready:
+                    await self.capture_network_session(session.session_id)
+
+    async def capture_network_session(self, session_id: str) -> None:
+        from .attached_session import AttachedSessionClient
+        from .curated_runtime import ResponseBuffer
+
+        assert self.network_responses is not None
+        if session_id in self.network_responses:
+            return
+        cdp = AttachedSessionClient(self._cdp_client.raw, session_id)
+        buffer = ResponseBuffer()
+        self.network_responses[session_id] = buffer
+        await self._sessions.enter_async_context(buffer.capture(cdp, self.caller_enabled))
+
     async def _start_frame_sessions(self, cdp: Any, session_id: str) -> None:
         """Turn auto-attach on, or carry on without it.
 
@@ -988,6 +1013,10 @@ class CDPHandler:
         """See :meth:`CDPRuntime.record_caller_enable`."""
         self._rt.record_caller_enable(method)
 
+    def start_run_network(self) -> None:
+        """Enable and retain network responses before the first step runs."""
+        self.submit(self._rt.start_run_network())
+
     def require_session(self) -> tuple[Any, str]:
         """The runtime's ``(client, sessionId)``, or a refusal saying why not.
 
@@ -1137,6 +1166,8 @@ class CDPHandler:
             timeout = REQUEST_TIMEOUT_SECONDS
             if name == "wait-text":
                 timeout = max(timeout, arguments.get("timeout_ms", 5000) / 1000 + 5)
+            elif name == "network-get":
+                timeout = max(timeout, arguments.get("duration", 2.0) + 5)
             return future.result(timeout=self._rt.bounded_timeout(timeout))
         except Exception as exc:
             logger.warning("call_native(%s) error: %s", name, exc)
@@ -1251,6 +1282,10 @@ class CDPHandler:
                 cdp, arguments.get("url"), arguments.get("request_id"),
                 arguments.get("response_file"), selected.frame_id if selected else None,
                 selected.url if selected else None, self.caller_enabled,
+                duration=arguments.get("duration", actions.DEFAULT_NETWORK_DURATION),
+                reload=arguments.get("reload", False),
+                buffer=(self._rt.network_responses[cdp.session_id]
+                        if self._rt.network_responses is not None else None),
             )
         return make_text(json.dumps(result))
 

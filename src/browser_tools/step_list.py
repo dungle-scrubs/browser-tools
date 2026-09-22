@@ -260,7 +260,13 @@ def _check_nothing_was_retargeted(args: argparse.Namespace, line: int) -> None:
     for the full name sees neither, and the step drives a different page, or
     a different browser.
     """
+    from .cli import url_selects_page
+
+    if getattr(args, "reload", False):
+        raise _at(line, "network-get --reload is standalone only; a run preserves earlier steps")
     for attribute, flag in (("target", "--target"), ("url", "--url"), ("endpoint", "--endpoint")):
+        if attribute == "url" and not url_selects_page(args.command):
+            continue
         if getattr(args, attribute, None) is not None:
             raise _refuse_invocation_flag(flag, line)
 
@@ -307,8 +313,8 @@ def _validate_passthrough(
         raise _at(
             line,
             f"{method} cannot be a step: a run keeps {domain} enabled throughout "
-            "to track frames, and turning it off breaks every step after this "
-            "one without failing any of them. Measured: with Page disabled, a "
+            "to track frames and responses. Turning it off invalidates that state. "
+            "Measured: with Page disabled, a "
             "navigation went unseen, 'frames list' reported the page the run "
             f"had left, and 'storage get' read a frame that no longer existed "
             f"and exited 0. Run '{method}' on its own, outside a run.",

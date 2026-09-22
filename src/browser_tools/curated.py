@@ -159,6 +159,7 @@ def run_session(
     with _cdp_handler_session(
         port, spec, by, external=endpoint is not None, all_frames=all_frames
     ) as handler:
+        handler.start_run_network()
         yield handler
 
 
@@ -868,13 +869,21 @@ def wait_text(
 def network_get(
     *, instance: str | None, url: str | None = None, request_id: str | None = None,
     response_file: str | None = None, target: str | None = None,
+    duration: float = 2.0, reload: bool = False,
     registry_path: str | None = None, endpoint: str | None = None,
     handler: CDPHandler | None = None, all_frames: bool = False,
 ) -> dict[str, Any]:
-    """Reload and collect for five seconds, fetching the last matching response."""
+    """Fetch a response without navigating, with an optional standalone reload."""
     if (url is None) == (request_id is None):
         raise UsageError("network-get requires exactly one of --url SUB or --request-id ID")
+    import math
+
+    if not math.isfinite(duration) or duration < 0:
+        raise UsageError("network-get --duration must be finite and non-negative")
+    if handler is not None and reload:
+        raise UsageError("network-get --reload is standalone only")
     return _action("network-get", {"url": url, "request_id": request_id,
-                                  "response_file": response_file},
+                                  "response_file": response_file,
+                                  "duration": duration, "reload": reload},
                    instance=instance, target=target, url=None, registry_path=registry_path,
                    endpoint=endpoint, handler=handler, all_frames=all_frames)

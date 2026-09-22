@@ -84,8 +84,8 @@ async def _use(cdp: FakeCDP, domains: list[str], body: Any = None) -> None:
 class TestAStepGivesBackTheDomainsItTurnedOn:
     def test_one_domain_is_enabled_then_disabled(self):
         cdp = FakeCDP()
-        asyncio.run(_use(cdp, ["Network"]))
-        assert cdp.calls == ["Network.enable", "Network.disable"]
+        asyncio.run(_use(cdp, ["DOM"]))
+        assert cdp.calls == ["DOM.enable", "DOM.disable"]
 
     def test_the_disable_happens_after_the_body(self):
         cdp = FakeCDP()
@@ -93,20 +93,20 @@ class TestAStepGivesBackTheDomainsItTurnedOn:
         async def body():
             cdp.calls.append("<the step's work>")
 
-        asyncio.run(_use(cdp, ["Network"], body))
-        assert cdp.calls == ["Network.enable", "<the step's work>", "Network.disable"], (
+        asyncio.run(_use(cdp, ["DOM"], body))
+        assert cdp.calls == ["DOM.enable", "<the step's work>", "DOM.disable"], (
             "the domain was given back before the step had finished using it"
         )
 
     def test_a_domain_named_twice_is_enabled_once(self):
         cdp = FakeCDP()
-        asyncio.run(_use(cdp, ["Network", "Network"]))
-        assert cdp.calls == ["Network.enable", "Network.disable"]
+        asyncio.run(_use(cdp, ["DOM", "DOM"]))
+        assert cdp.calls == ["DOM.enable", "DOM.disable"]
 
     def test_several_domains_are_undone_in_reverse(self):
         cdp = FakeCDP()
-        asyncio.run(_use(cdp, ["Network", "Log"]))
-        assert cdp.calls == ["Network.enable", "Log.enable", "Log.disable", "Network.disable"]
+        asyncio.run(_use(cdp, ["DOM", "Log"]))
+        assert cdp.calls == ["DOM.enable", "Log.enable", "Log.disable", "DOM.disable"]
 
     def test_a_failing_body_still_gives_the_domain_back(self):
         cdp = FakeCDP()
@@ -115,15 +115,15 @@ class TestAStepGivesBackTheDomainsItTurnedOn:
             raise RuntimeError("the step failed")
 
         with pytest.raises(RuntimeError):
-            asyncio.run(_use(cdp, ["Network"], body))
-        assert "Network.disable" in cdp.calls, (
+            asyncio.run(_use(cdp, ["DOM"], body))
+        assert "DOM.disable" in cdp.calls, (
             "a step that failed kept the domain enabled, so the next step's "
             "enable is a no-op that replays nothing"
         )
 
 
-class TestThePageAndRuntimeExemption:
-    """The run's own two domains. A step may turn them on, never off."""
+class TestTheRunOwnedDomainExemption:
+    """The run's own three domains. A step may turn them on, never off."""
 
     @pytest.mark.parametrize("domain", sorted(RUN_OWNED_DOMAINS))
     def test_they_are_enabled_but_never_disabled(self, domain):
@@ -134,13 +134,13 @@ class TestThePageAndRuntimeExemption:
             "that breaks frame selection for every step after it."
         )
 
-    def test_the_exemption_is_exactly_page_and_runtime(self):
-        assert frozenset({"Page", "Runtime"}) == RUN_OWNED_DOMAINS
+    def test_the_exemption_is_exactly_page_runtime_and_network(self):
+        assert frozenset({"Page", "Runtime", "Network"}) == RUN_OWNED_DOMAINS
 
     def test_an_exempt_domain_beside_an_ordinary_one(self):
         cdp = FakeCDP()
-        asyncio.run(_use(cdp, ["Runtime", "Network"]))
-        assert cdp.calls == ["Runtime.enable", "Network.enable", "Network.disable"]
+        asyncio.run(_use(cdp, ["Runtime", "DOM"]))
+        assert cdp.calls == ["Runtime.enable", "DOM.enable", "DOM.disable"]
 
 
 class TestADomainThatCannotBeTurnedOnOrOff:
@@ -160,9 +160,9 @@ class TestADomainThatCannotBeTurnedOnOrOff:
         )
 
     def test_a_missing_disable_does_not_fail_the_step(self):
-        cdp = FakeCDP(no_disable={"Network"})
-        asyncio.run(_use(cdp, ["Network"]))
-        assert cdp.calls == ["Network.enable", "Network.disable"]
+        cdp = FakeCDP(no_disable={"DOM"})
+        asyncio.run(_use(cdp, ["DOM"]))
+        assert cdp.calls == ["DOM.enable", "DOM.disable"]
 
     def test_a_dropped_connection_during_cleanup_does_not_mask_the_failure(self):
         """The disable runs in a `finally`. Raising there would replace the
@@ -182,14 +182,14 @@ class TestADomainThatCannotBeTurnedOnOrOff:
             raise RuntimeError("the real failure")
 
         with pytest.raises(RuntimeError, match="the real failure"):
-            asyncio.run(_use(cdp, ["Network"], body))
-        assert "Network.disable" in sent
+            asyncio.run(_use(cdp, ["DOM"], body))
+        assert "DOM.disable" in sent
 
 
 class TestTheVerbsThatEnableDomains:
     """The rule reaches the verbs, not only the helper."""
 
-    def test_wait_gives_back_the_event_s_domain(self):
+    def test_wait_preserves_run_network(self):
         cdp = FakeCDP()
 
         async def drive():
@@ -200,7 +200,7 @@ class TestTheVerbsThatEnableDomains:
                 await task
 
         asyncio.run(drive())
-        assert cdp.calls == ["Network.enable", "Network.disable"]
+        assert cdp.calls == ["Network.enable"]
         assert cdp.handlers.get("Network.requestWillBeSent") == [], (
             "the wait left its handler registered, so it keeps pushing into a "
             "queue nobody reads for the rest of the run"
@@ -227,25 +227,22 @@ class TestTheVerbsThatEnableDomains:
             "a collection left its handlers registered"
         )
 
-    def test_network_list_gives_network_back(self):
+    def test_network_list_preserves_run_network(self):
         cdp = FakeCDP()
         asyncio.run(list_verbs.collect_on_session(cdp, "S1", list_verbs.NETWORK_EVENTS, 0))
         assert "Network.enable" in cdp.calls
-        assert "Network.disable" in cdp.calls, (
-            "a second network-list in one run would get a no-op enable and so "
-            "lose the events that fire during it"
+        assert "Network.disable" not in cdp.calls, (
+            "network-list disabled the run buffer"
         )
 
-    def test_two_collections_in_one_session_each_get_a_first_enable(self):
+    def test_two_network_collections_keep_the_run_buffer_enabled(self):
         """The property the whole rule exists for."""
         cdp = FakeCDP()
         asyncio.run(list_verbs.collect_on_session(cdp, "S1", list_verbs.NETWORK_EVENTS, 0))
         asyncio.run(list_verbs.collect_on_session(cdp, "S1", list_verbs.NETWORK_EVENTS, 0))
         assert cdp.calls == [
             "Network.enable",
-            "Network.disable",
             "Network.enable",
-            "Network.disable",
         ]
 
 
@@ -286,7 +283,6 @@ class TestEveryCommandGoesToTheRunsOwnSession:
             ("Network.enable", "S1"),
             ("Log.enable", "S1"),
             ("Log.disable", "S1"),
-            ("Network.disable", "S1"),
         ]
 
 
@@ -334,9 +330,9 @@ class TestAHandWrittenEnableIsNotUndone:
 
     Rule 1 says a step gives back every domain it turned on. Rule 3 says a
     domain the caller enabled by hand in a raw step is that step's whole
-    output and is not undone. A raw `Network.enable` step followed by a
-    `network-list` step satisfies both descriptions, and CDP cannot tell
-    them apart: a second `Network.enable` succeeds exactly like a first, so
+    output and is not undone. A raw `DOM.enable` step followed by a
+    `wait --event DOM.documentUpdated` step satisfies both descriptions, and CDP cannot tell
+    them apart: a second `DOM.enable` succeeds exactly like a first, so
     the reply says nothing about who turned the domain on.
 
     The caller's enable wins. `keep` carries the domains a raw step named,
@@ -349,27 +345,27 @@ class TestAHandWrittenEnableIsNotUndone:
         cdp = FakeCDP()
 
         async def drive():
-            async with domains_enabled(cdp, "S1", ["Network"], keep={"Network"}):
+            async with domains_enabled(cdp, "S1", ["DOM"], keep={"DOM"}):
                 pass
 
         asyncio.run(drive())
-        assert cdp.calls == ["Network.enable"]
+        assert cdp.calls == ["DOM.enable"]
 
     def test_a_domain_the_caller_did_not_name_is_still_given_back(self):
         cdp = FakeCDP()
 
         async def drive():
-            async with domains_enabled(cdp, "S1", ["Network", "Log"], keep={"Network"}):
+            async with domains_enabled(cdp, "S1", ["DOM", "Log"], keep={"DOM"}):
                 pass
 
         asyncio.run(drive())
-        assert cdp.calls == ["Network.enable", "Log.enable", "Log.disable"]
+        assert cdp.calls == ["DOM.enable", "Log.enable", "Log.disable"]
 
     def test_keeping_a_domain_the_step_never_enables_changes_nothing(self):
         cdp = FakeCDP()
 
         async def drive():
-            async with domains_enabled(cdp, "S1", ["Log"], keep={"Network"}):
+            async with domains_enabled(cdp, "S1", ["Log"], keep={"DOM"}):
                 pass
 
         asyncio.run(drive())
@@ -379,13 +375,13 @@ class TestAHandWrittenEnableIsNotUndone:
         cdp = FakeCDP()
 
         async def drive():
-            await cdp.send("Network.enable", session_id="S1")
+            await cdp.send("DOM.enable", session_id="S1")
             await list_verbs.collect_on_session(
-                cdp, "S1", list_verbs.NETWORK_EVENTS, 0, frozenset({"Network"})
+                cdp, "S1", ["DOM.documentUpdated"], 0, frozenset({"DOM"})
             )
 
         asyncio.run(drive())
-        assert "Network.disable" not in cdp.calls, (
+        assert "DOM.disable" not in cdp.calls, (
             "the collection disabled the domain the caller's own step turned "
             "on, which makes that step a no-op"
         )
@@ -394,14 +390,14 @@ class TestAHandWrittenEnableIsNotUndone:
         cdp = FakeCDP()
 
         async def drive():
-            await cdp.send("Network.enable", session_id="S1")
+            await cdp.send("DOM.enable", session_id="S1")
             with pytest.raises(events.WaitTimeout):
                 await events.wait_on_session(
-                    cdp, "S1", "Network.requestWillBeSent", None, 0.05, frozenset({"Network"})
+                    cdp, "S1", "DOM.documentUpdated", None, 0.05, frozenset({"DOM"})
                 )
 
         asyncio.run(drive())
-        assert "Network.disable" not in cdp.calls
+        assert "DOM.disable" not in cdp.calls
 
 
 class TestTheRunRemembersWhichDomainsTheCallerEnabled:
@@ -1165,5 +1161,5 @@ class TestAStepCannotTurnOffWhatTheRunOwns:
         """A domain the caller turned on is the caller's to turn off."""
         from browser_tools import step_list
 
-        steps = step_list.validate("Network.disable\n")
-        assert steps[0].as_method()[0] == "Network.disable"
+        steps = step_list.validate("DOM.disable\n")
+        assert steps[0].as_method()[0] == "DOM.disable"

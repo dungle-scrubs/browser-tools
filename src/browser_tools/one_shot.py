@@ -49,7 +49,7 @@ from .core.registry import InstanceNotFoundError
 from .lifecycle import LifecycleError
 
 #: Domains the run's ``CDPRuntime`` owns for the whole run (RFC-03, "Domain-
-#: enable state"). A step may enable either - it needs them on - but MUST NOT
+#: enable state"). A step may enable any of them - it needs them on - but MUST NOT
 #: disable one: the frame manager reads ``Page`` events, so a step that turned
 #: ``Page`` off would break frame selection for every later step.
 #:
@@ -59,7 +59,16 @@ from .lifecycle import LifecycleError
 #: nothing, so `wait --event Runtime.executionContextCreated` after any
 #: Runtime-touching step reports nothing where the same command alone reports
 #: the contexts already there.
-RUN_OWNED_DOMAINS = frozenset({"Page", "Runtime"})
+#: Network stays enabled so later steps can retrieve earlier responses. Every
+#: run now pays for network event delivery and metadata retention, even without
+#: network-get. Chrome also retains bodies within its own limits; this does not
+#: promise that a body survives eviction or a renderer change. Unlike Runtime,
+#: Network does not replay past responses on enable. A later wait/network-list
+#: still observes only its own window, while network-get reads the run buffer.
+#: A raw Network.disable step is refused, as for Page and Runtime. Raw
+#: buffer-setting commands can still affect how long Chrome retains bodies. These exemptions also apply standalone,
+#: where detaching the session releases the domain and its body storage.
+RUN_OWNED_DOMAINS = frozenset({"Page", "Runtime", "Network"})
 
 
 @contextlib.asynccontextmanager
@@ -89,15 +98,15 @@ async def domains_enabled(
     nothing to undo.
 
     ``keep`` exists because CDP cannot answer the question this function
-    would otherwise have to ask. A second ``Network.enable`` succeeds exactly
+    would otherwise have to ask. A second ``Log.enable`` succeeds exactly
     like a first one, so the reply says nothing about who turned the domain
-    on. Without ``keep``, a `network-list` step after a raw `Network.enable`
-    step disabled the caller's domain on its way out.
+    on. Without ``keep``, a `wait --event Log.entryAdded` step after a raw
+    `Log.enable` step would disable the caller's domain on its way out.
 
     That makes the two rules collide, and the precedence is stated rather
     than left implicit: **the caller's enable wins**. The cost is that a
     curated step after a hand-written enable does not get a first enable on
-    that domain, which is the same exception `Page` and `Runtime` already
+    that domain, which is the same exception the run-owned domains already
     carry. The alternative costs the caller a step that silently did nothing.
 
     Failures either way are suppressed. Some domains have no ``enable`` at

@@ -7,9 +7,13 @@ import base64
 import contextlib
 import json
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncGenerator
 
 from .lifecycle import LifecycleError
+from .one_shot import domains_enabled
 from .usage import UsageError
 
 KEYS: dict[str, tuple[str, int, str]] = {
@@ -43,7 +47,7 @@ _PUNCTUATION = {
     "]}": ("BracketRight", 221),
     "'\"": ("Quote", 222),
 }
-NETWORK_WINDOW_SECONDS = 5.0
+DEFAULT_NETWORK_DURATION = 2.0
 MAX_INLINE_BODY_BYTES = 1024 * 1024
 
 
@@ -258,6 +262,85 @@ def response_document(
     return result
 
 
+class ResponseBuffer:
+    """Response metadata and completion state for one attached session.
+
+    Bodies stay in Chrome until requested. This buffer preserves arrival order;
+    the last matching response observed at lookup wins, and is never consumed.
+    """
+
+    def __init__(self) -> None:
+        self.responses: list[dict[str, Any]] = []
+        self.finished: set[str] = set()
+        self.failed: dict[str, str] = {}
+        self.changed = asyncio.Event()
+
+    def received(self, event: dict[str, Any]) -> None:
+        self.responses.append(event)
+        self.changed.set()
+
+    def completed(self, event: dict[str, Any]) -> None:
+        self.finished.add(event["requestId"])
+        self.changed.set()
+
+    def broken(self, event: dict[str, Any]) -> None:
+        self.failed[event["requestId"]] = event.get("errorText", "loading failed")
+        self.changed.set()
+
+    @contextlib.asynccontextmanager
+    async def capture(
+        self, cdp: Any, keep: frozenset[str] = frozenset()
+    ) -> AsyncGenerator[ResponseBuffer]:
+        listeners = {
+            "Network.responseReceived": self.received,
+            "Network.loadingFinished": self.completed,
+            "Network.loadingFailed": self.broken,
+        }
+        for event, callback in listeners.items():
+            cdp.on(event, callback)
+        try:
+            async with domains_enabled(cdp.raw, cdp.session_id, ("Network",), keep):
+                yield self
+        finally:
+            for event, callback in listeners.items():
+                cdp.off(event, callback)
+
+    async def match(
+        self, url: str | None, request_id: str | None, frame_id: str | None,
+        duration: float,
+    ) -> tuple[dict[str, Any], int]:
+        deadline = asyncio.get_running_loop().time() + duration
+        while True:
+            # No await between clearing, inspecting, and subscribing to changes.
+            self.changed.clear()
+            matches = [event for event in self.responses
+                       if (frame_id is None or event.get("frameId") == frame_id)
+                       and ((url is not None and url in event["response"]["url"])
+                            or (request_id is not None and request_id == event["requestId"]))]
+            if matches:
+                last = matches[-1]
+                identity = last["requestId"]
+                if identity in self.failed:
+                    raise LifecycleError(f"request {identity} failed: {self.failed[identity]}")
+                if identity in self.finished:
+                    return last, len(matches)
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                if matches:
+                    raise LifecycleError(
+                        f"response {matches[-1]['requestId']} did not finish in "
+                        f"network-get's {duration:g}-second window"
+                    )
+                raise LifecycleError(
+                    f"no matching response in network-get's {duration:g}-second window; "
+                    "trigger traffic in an earlier step or use standalone --reload; "
+                    "request ids from another invocation cannot retrieve bodies"
+                )
+            # Recheck state at the deadline, including a just-arrived event.
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(self.changed.wait(), remaining)
+
+
 async def network_get(
     cdp: Any,
     url: str | None,
@@ -266,62 +349,22 @@ async def network_get(
     frame_id: str | None,
     frame_url: str | None,
     keep: frozenset[str],
+    duration: float = DEFAULT_NETWORK_DURATION,
+    reload: bool = False,
+    buffer: ResponseBuffer | None = None,
 ) -> dict[str, Any]:
-    """Reload after subscribing, then take the last response in a five-second window."""
-    matches: list[dict[str, Any]] = []
-    finished: set[str] = set()
-    failed: dict[str, str] = {}
-
-    def received(event: dict[str, Any]) -> None:
-        if frame_id is not None and event.get("frameId") != frame_id:
-            return
-        if (url is not None and url in event["response"]["url"]) or (
-            request_id is not None and request_id == event["requestId"]
-        ):
-            matches.append(event)
-
-    def completed(event: dict[str, Any]) -> None:
-        finished.add(event["requestId"])
-
-    def broken(event: dict[str, Any]) -> None:
-        failed[event["requestId"]] = event.get("errorText", "loading failed")
-
-    listeners = {
-        "Network.responseReceived": received,
-        "Network.loadingFinished": completed,
-        "Network.loadingFailed": broken,
-    }
-    for event, callback in listeners.items():
-        cdp.on(event, callback)
-    enabled = False
-    try:
-        await cdp.send("Network.enable")
-        enabled = True
-        if frame_id is None:
-            await cdp.send("Page.reload")
-        else:
-            navigation = await cdp.send("Page.navigate", {"url": frame_url, "frameId": frame_id})
-            if navigation.get("errorText"):
-                raise LifecycleError(f"cannot reload selected frame: {navigation['errorText']}")
-        await asyncio.sleep(NETWORK_WINDOW_SECONDS)
-        if not matches:
-            if request_id is not None:
-                # Preserve Chrome's own diagnostic for an expired session's id.
-                await cdp.send("Network.getResponseBody", {"requestId": request_id})
-            raise LifecycleError("no matching response during network-get's 5-second reload window")
-        last = matches[-1]
-        identity = last["requestId"]
-        if identity in failed:
-            raise LifecycleError(f"request {identity} failed: {failed[identity]}")
-        if identity not in finished:
-            raise LifecycleError(
-                f"response {identity} did not finish in network-get's 5-second window"
-            )
-        body = await cdp.send("Network.getResponseBody", {"requestId": identity})
-        return response_document(last, body, len(matches), response_file)
-    finally:
-        for event, callback in listeners.items():
-            cdp.off(event, callback)
-        if enabled and "Network" not in keep:
-            with contextlib.suppress(Exception):
-                await cdp.send("Network.disable")
+    """Read the run's responses, or observe an independent bounded window."""
+    if buffer is None:
+        async with ResponseBuffer().capture(cdp, keep) as captured:
+            if reload:
+                if frame_id is None:
+                    await cdp.send("Page.reload")
+                else:
+                    navigation = await cdp.send("Page.navigate", {"url": frame_url, "frameId": frame_id})
+                    if navigation.get("errorText"):
+                        raise LifecycleError(f"cannot reload selected frame: {navigation['errorText']}")
+            return await network_get(cdp, url, request_id, response_file, frame_id,
+                                     frame_url, keep, duration, buffer=captured)
+    last, matched = await buffer.match(url, request_id, frame_id, duration)
+    body = await cdp.send("Network.getResponseBody", {"requestId": last["requestId"]})
+    return response_document(last, body, matched, response_file)

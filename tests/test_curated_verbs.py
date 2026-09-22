@@ -703,7 +703,7 @@ class TestSixVerbContracts:
          {"substring": "Ready", "timeout_ms": 321},
          {"found": True, "substring": "Ready", "waitedMs": 20}),
         (["network-get", "--url", "/api"], "network-get",
-         {"url": "/api", "request_id": None, "response_file": None},
+         {"url": "/api", "request_id": None, "response_file": None, "duration": 2.0, "reload": False},
          {"requestId": "1.2", "url": "/api", "status": 200, "mimeType": "text/plain",
           "bytes": 2, "matched": 1, "body": "ok", "base64Encoded": False}),
     ])
@@ -899,8 +899,21 @@ def test_network_limits_count_utf8_bytes():
     assert 'bodyOmitted' in result
 
 
+def network_client(raw):
+    from browser_tools.attached_session import AttachedSessionClient
+
+    original = raw.send
+
+    async def send(method, params=None, session_id=None, timeout=None):
+        return await original(method, params, session_id=session_id)
+
+    raw.send = send
+    return AttachedSessionClient(raw, 'S1')
+
+
 @pytest.mark.asyncio
-async def test_network_subscribes_before_enable_and_fetches_last(monkeypatch):
+@pytest.mark.parametrize("delay", [0, .1])
+async def test_network_subscribes_before_enable_and_returns_without_fixed_wait(monkeypatch, delay):
     from test_list_verbs import _RaceFakeCDP
 
     from browser_tools import curated_runtime
@@ -908,33 +921,34 @@ async def test_network_subscribes_before_enable_and_fetches_last(monkeypatch):
     def event(identity):
         return {'requestId': identity, 'frameId':'f', 'response':{
             'url':'https://a/api', 'status':200, 'mimeType':'text/plain'}}
-    cdp = _RaceFakeCDP([
+    events = [
         ('Network.responseReceived', event('1')),
         ('Network.loadingFinished', {'requestId':'1'}),
-    ], [
-        ('Network.responseReceived', event('2'), .001),
-        ('Network.loadingFinished', {'requestId':'2'}, .001),
-    ])
+    ]
+    cdp = _RaceFakeCDP(events if not delay else [],
+                       [(name, params, delay) for name, params in events] if delay else [])
     original = cdp.send
     bodies = []
-    async def send(method, params=None):
+    async def send(method, params=None, session_id=None):
         if method == 'Network.getResponseBody':
             bodies.append(params['requestId'])
             return {'body':'last', 'base64Encoded':False}
-        return await original(method, params)
+        return await original(method, params, session_id=session_id)
     monkeypatch.setattr(cdp, 'send', send)
-    monkeypatch.setattr(curated_runtime, 'NETWORK_WINDOW_SECONDS', .02)
-    result = await curated_runtime.network_get(cdp, '/api', None, None, None, None, frozenset())
+    import asyncio
+
+    result = await asyncio.wait_for(curated_runtime.network_get(
+        network_client(cdp), '/api', None, None, None, None, frozenset()), .5)
     assert cdp.handler_live_at_enable
-    assert cdp.calls.index('Network.enable') < cdp.calls.index('Page.reload')
-    assert bodies == ['2'] and result['matched'] == 2 and result['body'] == 'last'
-    assert 'Network.disable' in cdp.calls
+    assert 'Page.reload' not in cdp.calls
+    assert bodies == ['1'] and result['matched'] == 1 and result['body'] == 'last'
+    assert 'Network.disable' not in cdp.calls
     assert not any(cdp._handlers.values())
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('keep', [frozenset(), frozenset({'Network'})])
-async def test_network_expired_request_id_preserves_error_and_cleans_up(monkeypatch, keep):
+async def test_network_unknown_request_id_explains_session_scope_and_cleans_up(monkeypatch, keep):
     from test_list_verbs import _RaceFakeCDP
 
     from browser_tools import curated_runtime
@@ -942,15 +956,14 @@ async def test_network_expired_request_id_preserves_error_and_cleans_up(monkeypa
 
     cdp = _RaceFakeCDP([])
     original = cdp.send
-    async def send(method, params=None):
+    async def send(method, params=None, session_id=None):
         if method == 'Network.getResponseBody':
             raise CDPError('No resource with given identifier found')
-        return await original(method, params)
+        return await original(method, params, session_id=session_id)
     monkeypatch.setattr(cdp, 'send', send)
-    monkeypatch.setattr(curated_runtime, 'NETWORK_WINDOW_SECONDS', 0)
-    with pytest.raises(CDPError, match='No resource'):
-        await curated_runtime.network_get(cdp, None, 'old', None, None, None, keep)
-    assert ('Network.disable' in cdp.calls) == ('Network' not in keep)
+    with pytest.raises(LifecycleError, match='another invocation'):
+        await curated_runtime.network_get(network_client(cdp), None, 'old', None, None, None, keep, duration=0)
+    assert 'Network.disable' not in cdp.calls
     assert not any(cdp._handlers.values())
 
 
@@ -1050,7 +1063,31 @@ class TestCuratedInChrome:
         finally:
             page('eval', 'window.MutationObserver=OriginalObserver')
 
-    def test_network_reload_collects_last_response(self, page, tmp_path):
+    def test_network_get_step_reads_prior_response_without_losing_state(self, page, tmp_path):
+        steps = tmp_path / 'network.steps'
+        steps.write_text(
+            "eval \"window.marker='kept'; fetch('data:text/plain,run-response').then(r=>r.text())\" --await\n"
+            "network-get --url data:text/plain,run-response\n"
+            "eval window.marker\n"
+        )
+        result = page('run', str(steps))
+        assert result['run']['status'] == 'ok'
+        assert result['steps'][1]['result']['body'] == 'run-response'
+        assert result['steps'][2]['result']['value'] == 'kept'
+        print(json.dumps(result))
+
+    def test_network_standalone_preserves_state_and_returns_on_match(self, page):
+        import time
+
+        page('eval', "window.marker='kept'; setTimeout(()=>fetch('data:text/plain,delayed-body'), 500)")
+        start = time.monotonic()
+        result = page('network-get', '--url', 'data:text/plain,delayed-body', '--duration', '4')
+        elapsed = time.monotonic() - start
+        assert result['body'] == 'delayed-body'
+        assert elapsed < 2, elapsed
+        assert page('eval', 'window.marker')['value'] == 'kept'
+
+    def test_network_explicit_reload_fetches_response(self, page, tmp_path):
         import threading
         from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -1076,13 +1113,15 @@ class TestCuratedInChrome:
         thread.start()
         try:
             page('Page.navigate', json.dumps({'url': f'http://127.0.0.1:{server.server_port}/'}))
-            result = page('network-get', '--url', '/api?')
-            assert result['matched'] == 2 and result['body'] == '/api?last'
-            assert result['bytes'] == 9
+            page('eval', "window.marker='before-reload'")
+            result = page('network-get', '--url', '/api?first', '--reload')
+            assert page('eval', 'window.marker')['type'] == 'undefined'
+            assert result['matched'] == 1 and result['body'] == '/api?first'
+            assert result['bytes'] == 10
             path = tmp_path / 'response.txt'
-            saved = page('network-get', '--url', '/api?', '--response-file', str(path))
-            assert saved['responseFile'] == str(path) and path.read_bytes() == b'/api?last'
-            assert 'No resource' in page('network-get', '--request-id', result['requestId'], status=1)
+            saved = page('network-get', '--url', '/api?first', '--reload', '--response-file', str(path))
+            assert saved['responseFile'] == str(path) and path.read_bytes() == b'/api?first'
+            assert 'another invocation' in page('network-get', '--request-id', result['requestId'], '--duration', '0', status=1)
         finally:
             server.shutdown()
             thread.join(timeout=2)
@@ -1101,16 +1140,15 @@ async def test_network_window_failure_paths(outcome, monkeypatch):
     if outcome == 'failed':
         events.append(('Network.loadingFailed', {'requestId':'1','errorText':'net::ERR_FAILED'}))
     cdp = _RaceFakeCDP(events)
-    monkeypatch.setattr(curated_runtime, 'NETWORK_WINDOW_SECONDS', 0)
     with pytest.raises(LifecycleError, match={'none':'no matching', 'unfinished':'did not finish', 'failed':'net::ERR_FAILED'}[outcome]):
-        await curated_runtime.network_get(cdp, '/api', None, None, None, None, frozenset())
+        await curated_runtime.network_get(network_client(cdp), '/api', None, None, None, None, frozenset(), duration=0)
     assert not any(cdp._handlers.values())
-    assert 'Network.disable' in cdp.calls
+    assert 'Network.disable' not in cdp.calls
     assert 'Network.getResponseBody' not in cdp.calls
 
 
 @pytest.mark.asyncio
-async def test_network_cancellation_removes_listeners_and_disables(monkeypatch):
+async def test_network_cancellation_removes_listeners_and_preserves_network(monkeypatch):
     import asyncio
 
     from test_list_verbs import _RaceFakeCDP
@@ -1118,13 +1156,13 @@ async def test_network_cancellation_removes_listeners_and_disables(monkeypatch):
     from browser_tools import curated_runtime
 
     cdp = _RaceFakeCDP([])
-    task = asyncio.create_task(curated_runtime.network_get(cdp, '/api', None, None, None, None, frozenset()))
+    task = asyncio.create_task(curated_runtime.network_get(network_client(cdp), '/api', None, None, None, None, frozenset()))
     await asyncio.sleep(0)
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
     assert not any(cdp._handlers.values())
-    assert 'Network.disable' in cdp.calls
+    assert 'Network.disable' not in cdp.calls
 
 
 @pytest.mark.asyncio

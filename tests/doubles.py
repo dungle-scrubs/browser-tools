@@ -46,6 +46,9 @@ class HandlerSurface:
     def run(self) -> None:
         """The runtime's own loop. A double is already `available`."""
 
+    def start_run_network(self) -> None:
+        """Begin the run-owned response capture."""
+
     def stop(self) -> None:
         """Close the session. A double that cares records it instead."""
 

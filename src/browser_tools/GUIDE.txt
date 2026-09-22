@@ -191,30 +191,41 @@ CURATED VERBS
       "has the DOM stopped changing?", and wait-text for "is this text here?".
 
   network-get (--url SUB | --request-id ID) [--response-file PATH] [--target SPEC]
-      Subscribe and enable Network, reload the selected page, collect for
-      five seconds, then fetch the last matching response on that same
-      session. A selected frame is navigated to its current URL instead.
-      The reload is intentional: callers need no separately timed trigger.
-      Requests started only by later interactions are outside this window.
+              [--duration SECONDS] [--reload]
       --url selects a response URL, not the page. Exactly one selector is
-      required; matched reports the number of matching responses. An absent,
-      failed or incomplete response is exit 1. An expired request id reports
-      Chrome's CDP error. IDs from another invocation cannot retrieve bodies.
-      Example: bt network-get --url /api/orders --response-file ./orders.json
+      required. A run enables Network before step 1 and retains responses
+      until the run ends. Use network-get --url after the step that triggers
+      a request; it reads that traffic without reloading or losing page state.
+      A Step List cannot substitute an earlier result, so URL matching is the
+      usual step form. --request-id works only for an id in this session.
+
+      Standalone, there is no run history. Subscribe and wait for new traffic
+      for at most --duration seconds (default 2, matching network-list).
+      Use --reload to trigger page-load requests after subscribing. A selected
+      frame is navigated to its current URL instead. Reload is standalone-only.
+      Without --reload, the caller or page must trigger traffic during the window.
+      In a run, --duration bounds waiting for a missing or unfinished response;
+      the whole-run deadline can end that wait sooner. Zero checks only what
+      is already buffered. Duration must be finite and non-negative.
+
+      Return as soon as the last matching response observed so far has finished.
+      Do not wait out the window to gather more matches. matched counts the
+      matching responses seen at lookup, including earlier run traffic.
+      An absent, failed or incomplete response is exit 1. Chrome can evict a
+      body even while metadata remains; fetching it then reports the CDP error.
+      IDs from another invocation cannot retrieve bodies.
+      Example: bt network-get --url /api/orders --reload --response-file ./orders.json
       Result fields: requestId, url, status, mimeType, bytes, matched,
       base64Encoded, and either body, responseFile or bodyOmitted.
       --response-file writes decoded bytes and reports an absolute responseFile.
       Without it, UTF-8 text of at most 1 MiB is inline as body. Larger or
       base64-encoded bodies have bodyOmitted naming --response-file as the
-      remedy; the body is never truncated. network-list reports a window,
-      not a buffer, and collects metadata without reloading or fetching bodies.
-      Its request ids cannot be carried into a separate network-get invocation.
+      remedy; the body is never truncated. network-list still reports metadata
+      from its own window. In a run, that traffic also enters the run buffer.
 
       All six verbs are Step List steps and share the run's deadline and
       frame selection. A step cannot name an instance, --endpoint, --target
-      or --url, including network-get's response selector. Its step form
-      therefore uses --request-id. This restriction comes from RFC-05's
-      amendment to RFC-03. Use standalone network-get for URL matching.
+      or a page-selecting --url. network-get's response-selecting --url is allowed.
 
   detect [--wait SECONDS | --no-wait]
       Run interstitial detection against the current page. --wait bounds the
@@ -378,31 +389,25 @@ RUNNING MANY STEPS IN ONE INVOCATION
       `load` - the new document has stopped fetching - which is the question
       this paragraph is about.
 
-      EVERYTHING ELSE BEHAVES AS IT WOULD ALONE, WITH ONE EXCEPTION. A step
-      inside a run does what the same command does on its own. Domains a step
-      turns on are turned off when that step ends, so a second `network-list`
-      in one run sees what the first one saw.
+      DOMAIN OWNERSHIP. Domains a step turns on are turned off when that
+      step ends, except Page, Runtime and Network. The run needs Page and
+      Runtime to track frames, and Network to retain responses across steps.
+      A step does not get a first enable on these domains.
+      `wait --event Runtime.executionContextCreated` after any step that
+      touched Runtime reports nothing, where the same command on its own
+      reports existing contexts; console-list has the same limitation.
+      Network does not replay prior responses. wait and network-list see only
+      events in their own windows; network-get also sees the run's buffer.
+      Every run pays for network events, retained metadata and Chrome's body
+      storage, even when no step asks for a response body. Chrome's retention
+      limits still apply; large traffic volumes can evict bodies.
 
-      The exception is the Page and Runtime domains. A run needs them on
-      throughout to track frames, so they are never turned off between steps.
-      A step that relies on being the first to turn one of them on does not
-      get that. `wait --event Runtime.executionContextCreated` after any step
-      that touched Runtime reports nothing, where the same command on its own
-      reports the contexts that already exist; `console-list` is in the same
-      position, because it turns Runtime on too. Run either one on its own.
-
-      A raw step you write yourself is yours to undo. `Network.enable {}`
-      stays on until a later step turns it off; the rule above covers only the
-      domains a verb turns on for you. It wins over that rule where the two
-      meet: a `network-list` step after a hand-written `Network.enable` leaves
-      the domain on, because turning it off would make your step a no-op. The
-      price is that the `network-list` is not the first enable, the same
-      position Page and Runtime are already in.
-
-      The two exceptions are the run's own: `Page.disable` and
-      `Runtime.disable` are usage errors as steps (exit 2), because turning
-      either off breaks every step after it without failing any of them. Run
-      either on its own, outside a run.
+      A raw enable you write yourself is yours to undo. `Log.enable {}` stays
+      on until a later step turns it off. A curated step leaves a domain you
+      enabled on, even when the normal cleanup rule would disable it.
+      The run-owned domains cannot be disabled by a step: Page.disable,
+      Runtime.disable and Network.disable are usage errors (exit 2).
+      Run those commands on their own, outside a run.
 
       UIDS ARE UNCHANGED. A UID is still valid until the page navigates, no
       longer and no shorter. One process does not extend it. Because no step can

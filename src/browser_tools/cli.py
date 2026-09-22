@@ -591,8 +591,13 @@ def _browser_args_from_remainder(remainder: list[str] | None) -> list[str]:
 
 
 #: Verbs whose ``--target`` and ``--url`` name the same thing two ways.
-_TARGET_OR_URL_VERBS = frozenset({"attach", "wait", "console-list", "network-list", "run",
+_TARGET_OR_URL_VERBS = frozenset({"attach", "wait", "console-list", "network-list", "run", "screenshot",
                                 "eval", "press", "hover", "type", "wait-text"})
+
+
+def url_selects_page(command: str) -> bool:
+    """Whether --url selects the invocation's page rather than a response."""
+    return command in _TARGET_OR_URL_VERBS
 
 
 def _add_rfc05_verbs(
@@ -604,7 +609,7 @@ def _add_rfc05_verbs(
         ("hover", "Move the native pointer over a snapshot UID"),
         ("type", "Insert text at the caret without key events"),
         ("wait-text", "Wait for a substring in rendered text"),
-        ("network-get", "Reload and fetch the last matching response in five seconds"),
+        ("network-get", "Fetch a response from the run or a bounded observation window"),
     ):
         parser = sub.add_parser(name, help=help_text)
         if name in {"eval", "press", "type", "wait-text"}:
@@ -631,6 +636,8 @@ def _add_rfc05_verbs(
         else:
             parser.add_argument("--request-id", metavar="ID")
             parser.add_argument("--response-file", metavar="PATH")
+            parser.add_argument("--duration", type=float, default=2.0, metavar="SECONDS")
+            parser.add_argument("--reload", action="store_true", help="Reload in standalone mode")
 
 
 def _rfc05_operands(args: argparse.Namespace, known_instances: set[str] | None) -> None:
@@ -689,6 +696,11 @@ def check_preconditions(args: argparse.Namespace, *, known_instances: set[str] |
         raise UsageError("type requires exactly one of text or --file FILE")
     if command == "wait-text" and args.timeout_ms < 0:
         raise UsageError("wait-text --timeout-ms must be non-negative")
+    if command == "network-get":
+        import math
+
+        if not math.isfinite(args.duration) or args.duration < 0:
+            raise UsageError("network-get --duration must be finite and non-negative")
     if command == "network-get" and (args.url is None) == (args.request_id is None):
         raise UsageError("network-get requires exactly one of --url SUB or --request-id ID")
 
@@ -984,7 +996,8 @@ def _curated_envelope(
             return curated.type_text(text=args.text, file=args.file, **common)
         if args.command == "wait-text":
             return curated.wait_text(substring=args.substring, timeout_ms=args.timeout_ms, **common)
-        return curated.network_get(request_id=args.request_id, response_file=args.response_file, **common)
+        return curated.network_get(request_id=args.request_id, response_file=args.response_file,
+                                   duration=args.duration, reload=args.reload, **common)
 
     if args.command == "snapshot":
         return curated.snapshot(

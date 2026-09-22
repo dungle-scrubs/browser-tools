@@ -227,7 +227,8 @@ class TestTheInvocationOwnsSomeFlags:
             *[(f"{verb} {flag} value", flag)
               for verb in ("eval 1", "press Enter", "hover --uid AB-1", "type hello",
                            "wait-text ready", "network-get --request-id 1.2")
-              for flag in ("--target", "--url", "--endpoint", "--targ", "--end")],
+              for flag in ("--target", "--url", "--endpoint", "--targ", "--end")
+              if not (verb.startswith("network-get") and flag == "--url")],
         ],
     )
     def test_a_step_may_not_carry_one(self, step, flag, no_instances):
