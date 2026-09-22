@@ -326,10 +326,11 @@ def supervisor_state(entry: dict[str, Any]) -> str | None:
     return "running" if ours else "missing"
 
 
-#: Thread-local depth for :func:`registry_lock`. `launch` holds the lock across
-#: the whole sequence including `annotate_entry`, and `stop`/`cleanup` nest the
-#: same way, so re-entry in one thread must pass through while a second thread
-#: or process still waits on the flock.
+#: Canonical lock paths held by this thread for :func:`registry_lock`. `launch`
+#: holds the lock across the whole sequence including `annotate_entry`, and
+#: `stop`/`cleanup` nest the same way, so re-entry for the same lock must pass
+#: through while a second thread or process still waits on the flock. Keyed by
+#: lock path so nesting a different registry still acquires its own lock.
 _registry_lock_depth = threading.local()
 
 
@@ -367,8 +368,12 @@ def registry_lock(
     ``LifecycleError`` when the lock is not acquired within ``timeout``.
     """
     root, lock_path = _registry_lock_path(registry_path, lock_root)
-    depth = getattr(_registry_lock_depth, "depth", 0)
-    if depth > 0:
+    key = str(lock_path.resolve())
+    held = getattr(_registry_lock_depth, "held", None)
+    if held is None:
+        held = set()
+        _registry_lock_depth.held = held
+    if key in held:
         yield
         return
     deadline = time.monotonic() + timeout
@@ -383,11 +388,11 @@ def registry_lock(
                         f"Registry at {root} is locked by another process. Waited {timeout:g}s."
                     ) from None
                 time.sleep(0.05)
-        _registry_lock_depth.depth = 1
+        held.add(key)
         try:
             yield
         finally:
-            _registry_lock_depth.depth = 0
+            held.discard(key)
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 

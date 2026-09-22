@@ -74,7 +74,13 @@ LIFECYCLE VERBS
   status [INSTANCE]
       Every registered instance with liveness, engine, profile and page
       targets, as JSON. With INSTANCE, only that one. It reports the registry,
-      so a browser driven with --endpoint does not appear.
+      so a browser driven with --endpoint does not appear. If status returns
+      [] while the browser you were using is still running, treat this as a
+      registry/process mismatch. Before another launch, verify that browser's
+      process identity, user-data-dir, and debugging port. To drive its
+      verified loopback endpoint, use --endpoint URL; see EXTERNAL BROWSERS.
+      This does not restore registry management. If identity cannot be
+      established, stop and report the mismatch.
 
   stop [INSTANCE] [--target SPEC]
       Stop a browser and retire its registry entry, or close one tab with
