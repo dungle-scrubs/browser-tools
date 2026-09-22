@@ -151,10 +151,16 @@ CURATED VERBS
       it also accepts a non-Promise. The result has value, type, url and
       targetId. A JavaScript exception is exit 1, with its description on
       stderr and nothing on stdout. Raw Runtime.evaluate does not enforce
-      that exception contract. Examples:
+      that exception contract.
+
+      --await awaits the value the expression returns. It does not make the
+      body an async function, so a top-level await is a SyntaxError even with
+      --await. Wrap it in an async arrow and await the call instead.
+      Examples:
         bt eval 'document.title'
         bt eval 'const n = 20; n * 2'
         bt eval 'Promise.resolve({ready: true})' --await
+        bt eval '(async () => (await fetch("/api")).status)()' --await
 
   press <key> [--modifiers NAME[,NAME...]] [--target SPEC | --url SUB]
       Dispatch keyDown then keyUp, including native default actions. <key>

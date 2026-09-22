@@ -537,6 +537,11 @@ class TestSixVerbsManual:
     def test_every_new_verb_has_a_worked_example(self, manual, verb):
         assert f'bt {verb} ' in manual
 
+    def test_states_what_await_does_not_do(self, flat):
+        """The limit is real and the manual used to leave it to be discovered."""
+        assert 'top-level await is a SyntaxError even with' in flat
+        assert 'async () =>' in flat
+
     def test_key_recipe_uses_press(self, manual):
         assert 'bt press Enter' in manual
         assert 'bt Input.dispatchKeyEvent' not in manual

@@ -36,6 +36,7 @@ def _running_loop() -> asyncio.AbstractEventLoop | None:
     except RuntimeError:
         return None
 
+
 #: Connection failures that are outcomes rather than defects: no browser on
 #: the port, and a target spec that names no page or more than one. They get a
 #: one-line message; everything else keeps its traceback.
@@ -820,9 +821,7 @@ class CDPRuntime:
             self._await_paint_ready_async(timeout_ms), self._loop
         )
         try:
-            return future.result(
-                timeout=self.bounded_timeout((timeout_ms / 1000.0) + 2.0)
-            )
+            return future.result(timeout=self.bounded_timeout((timeout_ms / 1000.0) + 2.0))
         except Exception:
             logger.debug("await_paint_ready timed out or failed", exc_info=True)
             return False
@@ -909,9 +908,7 @@ class CDPRuntime:
 
         future = asyncio.run_coroutine_threadsafe(_run(), self._loop)
         try:
-            return future.result(
-                timeout=self.bounded_timeout(detect_total_timeout(max_retries))
-            )
+            return future.result(timeout=self.bounded_timeout(detect_total_timeout(max_retries)))
         except TimeoutError:
             # Not swallowed into None. None means "no session to detect on",
             # and reporting a run that ran out of time as a missing session
@@ -1258,16 +1255,27 @@ class CDPHandler:
         if name == "eval":
             budget = self._rt.bounded_timeout(REQUEST_TIMEOUT_SECONDS)
             timeout_ms = int((budget if budget is not None else REQUEST_TIMEOUT_SECONDS) * 1000)
-            result = await actions.evaluate(cdp, arguments["source"], arguments["await_promise"], context_id,
-                                            timeout_ms=timeout_ms, page_cdp=page_cdp)
+            result = await actions.evaluate(
+                cdp,
+                arguments["source"],
+                arguments["await_promise"],
+                context_id,
+                timeout_ms=timeout_ms,
+                page_cdp=page_cdp,
+            )
         elif name == "press":
             await actions.focus_selected(cdp, context_id)
             params, names = actions.key_event(arguments["key"], arguments.get("modifiers"))
             await cdp.send("Input.dispatchKeyEvent", {"type": "keyDown", **params})
             await cdp.send("Input.dispatchKeyEvent", {"type": "keyUp", **params, "text": ""})
-            result = {"key": arguments["key"], "modifiers": names, "dispatched": ["keyDown", "keyUp"]}
+            result = {
+                "key": arguments["key"],
+                "modifiers": names,
+                "dispatched": ["keyDown", "keyUp"],
+            }
         elif name == "type":
             await actions.focus_selected(cdp, context_id)
+            await actions.refuse_type_without_a_target(cdp, context_id)
             await cdp.send("Input.insertText", {"text": arguments["text"]})
             result = {"chars": len(arguments["text"]), "source": arguments["source"]}
             if arguments.get("path") is not None:
@@ -1279,13 +1287,20 @@ class CDPHandler:
             result = await actions.wait_text(cdp, arguments["substring"], timeout_ms, context_id)
         else:
             result = await actions.network_get(
-                cdp, arguments.get("url"), arguments.get("request_id"),
-                arguments.get("response_file"), selected.frame_id if selected else None,
-                selected.url if selected else None, self.caller_enabled,
+                cdp,
+                arguments.get("url"),
+                arguments.get("request_id"),
+                arguments.get("response_file"),
+                selected.frame_id if selected else None,
+                selected.url if selected else None,
+                self.caller_enabled,
                 duration=arguments.get("duration", actions.DEFAULT_NETWORK_DURATION),
                 reload=arguments.get("reload", False),
-                buffer=(self._rt.network_responses[cdp.session_id]
-                        if self._rt.network_responses is not None else None),
+                buffer=(
+                    self._rt.network_responses[cdp.session_id]
+                    if self._rt.network_responses is not None
+                    else None
+                ),
             )
         return make_text(json.dumps(result))
 
@@ -1372,9 +1387,7 @@ class CDPHandler:
                 continue
             try:
                 owner_send = self.client_for_session(document.parent_session_id).send
-                owner = await owner_send(
-                    DOM_GET_FRAME_OWNER, {"frameId": document.frame_id}
-                )
+                owner = await owner_send(DOM_GET_FRAME_OWNER, {"frameId": document.frame_id})
                 backend = owner.get("backendNodeId")
                 if not isinstance(backend, int):
                     continue

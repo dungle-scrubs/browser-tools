@@ -199,9 +199,7 @@ class TestInstanceResolution:
         with pytest.raises(LifecycleError):
             curated.snapshot(instance="only-01", registry_path=registry_path)
 
-    def test_a_known_failure_does_not_wait_out_the_deadline(
-        self, monkeypatch, registry_path
-    ):
+    def test_a_known_failure_does_not_wait_out_the_deadline(self, monkeypatch, registry_path):
         """The runtime knows why. Reporting it late says less, slower."""
         _seed(registry_path, {"only-01": _entry()})
 
@@ -280,7 +278,9 @@ class TestHandlerToolDispatch:
 
     def test_wait_stable_passes_parsed_args(self, registry_path, fake_handler):
         _seed(registry_path, {"only-01": _entry()})
-        curated.wait_stable(instance=None, timeout_ms=7000, stable_ms=200, registry_path=registry_path)
+        curated.wait_stable(
+            instance=None, timeout_ms=7000, stable_ms=200, registry_path=registry_path
+        )
         assert fake_handler.instances[0].tool_calls == [
             ("wait_stable", {"timeout_ms": 7000, "stable_ms": 200})
         ]
@@ -288,7 +288,14 @@ class TestHandlerToolDispatch:
     def test_detect_runs_post_navigation_detection_and_formats(self, registry_path, fake_handler):
         _seed(registry_path, {"only-01": _entry()})
         FakeHandler.detection = {
-            "detections": [{"type": "cloudflare_challenge", "confidence": "high", "signal": "s", "details": "d"}],
+            "detections": [
+                {
+                    "type": "cloudflare_challenge",
+                    "confidence": "high",
+                    "signal": "s",
+                    "details": "d",
+                }
+            ],
             "auto_retried": True,
             "retries_used": 2,
         }
@@ -352,9 +359,7 @@ class TestHandlerToolDispatch:
         with pytest.raises(LifecycleError):
             curated.storage_get(instance=None, key=None, registry_path=registry_path)
 
-    def test_screencast_starts_waits_and_stops_over_one_handler(
-        self, registry_path, fake_handler
-    ):
+    def test_screencast_starts_waits_and_stops_over_one_handler(self, registry_path, fake_handler):
         """One invocation, one handler: the frame buffer is process-local."""
         _seed(registry_path, {"only-01": _entry()})
         FakeHandler.frames = 3
@@ -384,7 +389,10 @@ class TestHandlerToolDispatch:
         FakeHandler.frames = 10
         started = time.monotonic()
         curated.screencast(
-            instance=None, out_dir="/tmp/cast", duration=30.0, max_frames=10,
+            instance=None,
+            out_dir="/tmp/cast",
+            duration=30.0,
+            max_frames=10,
             registry_path=registry_path,
         )
         assert time.monotonic() - started < 5.0
@@ -422,9 +430,11 @@ _ONE_PX_PNG = base64.b64encode(
 
 
 def _make_fake_cdp_client_cls(shot_data="Zm9v", targets=None):
-    targets = targets if targets is not None else [
-        {"targetId": "T1", "type": "page", "url": "https://example.com"}
-    ]
+    targets = (
+        targets
+        if targets is not None
+        else [{"targetId": "T1", "type": "page", "url": "https://example.com"}]
+    )
     calls: list[tuple[str, dict | None, str | None]] = []
 
     class FakeCDPClient:
@@ -465,19 +475,20 @@ def fake_screenshot_transport(monkeypatch):
     def _install(shot_data="Zm9v", targets=None):
         fake_cls, calls = _make_fake_cdp_client_cls(shot_data=shot_data, targets=targets)
         monkeypatch.setattr("browser_tools.one_shot.CDPClient", fake_cls)
+
         async def _fake_get_ws_url_async(**kw):
             return "ws://fake/browser"
 
-        monkeypatch.setattr(
-            "browser_tools.one_shot.get_ws_url_async", _fake_get_ws_url_async
-        )
+        monkeypatch.setattr("browser_tools.one_shot.get_ws_url_async", _fake_get_ws_url_async)
         return calls
 
     return _install
 
 
 class TestScreenshot:
-    def test_capture_reaches_page_capture_screenshot(self, registry_path, fake_screenshot_transport):
+    def test_capture_reaches_page_capture_screenshot(
+        self, registry_path, fake_screenshot_transport
+    ):
         _seed(registry_path, {"only-01": _entry()})
         calls = fake_screenshot_transport(shot_data="Zm9v")
         out = curated.screenshot(instance=None, registry_path=registry_path)
@@ -589,7 +600,9 @@ class TestCliFront:
         _seed(self._registry_path, {"only-01": _entry()})
         rc = cli.main(["frames", "select", "checkout"])
         assert rc == cli.EXIT_OK
-        assert fake_handler.instances[0].tool_calls == [("select_frame", {"url_pattern": "checkout"})]
+        assert fake_handler.instances[0].tool_calls == [
+            ("select_frame", {"url_pattern": "checkout"})
+        ]
 
     def test_frames_without_action_exits_usage(self, capsys, fake_handler):
         _seed(self._registry_path, {"only-01": _entry()})
@@ -627,7 +640,13 @@ class TestCliFront:
         rc = cli.main(["wait-stable"])
         assert rc == cli.EXIT_OK
         assert fake_handler.instances[0].tool_calls == [
-            ("wait_stable", {"timeout_ms": curated.DEFAULT_WAIT_TIMEOUT_MS, "stable_ms": curated.DEFAULT_STABLE_MS})
+            (
+                "wait_stable",
+                {
+                    "timeout_ms": curated.DEFAULT_WAIT_TIMEOUT_MS,
+                    "stable_ms": curated.DEFAULT_STABLE_MS,
+                },
+            )
         ]
 
     def test_detect_via_cli(self, capsys, fake_handler):
@@ -687,26 +706,62 @@ class TestCliFront:
 # RFC-05: CLI results and native CDP semantics. Browser assertions below skip
 # only when the isolated browser cannot start.
 class TestSixVerbContracts:
-    @pytest.mark.parametrize(("argv", "name", "arguments", "result"), [
-        (["eval", "const a=2; a+1", "--await"], "eval",
-         {"source": "const a=2; a+1", "await_promise": True},
-         {"value": 3, "type": "number", "url": "https://example.com", "targetId": "T1"}),
-        (["press", "Enter", "--modifiers", "Meta"], "press",
-         {"key": "Enter", "modifiers": "Meta"},
-         {"key": "Enter", "modifiers": ["Meta"], "dispatched": ["keyDown", "keyUp"]}),
-        (["hover", "--uid", "AB-1"], "hover", {"uid": "AB-1"},
-         {"uid": "AB-1", "x": 12.5, "y": 30.0}),
-        (["type", "A quote: 'yes'\n{\"ok\":true}\n你好 🐈"], "type",
-         {"text": "A quote: 'yes'\n{\"ok\":true}\n你好 🐈", "source": "text"},
-         {"chars": 36, "source": "text"}),
-        (["wait-text", "Ready", "--timeout-ms", "321"], "wait-text",
-         {"substring": "Ready", "timeout_ms": 321},
-         {"found": True, "substring": "Ready", "waitedMs": 20}),
-        (["network-get", "--url", "/api"], "network-get",
-         {"url": "/api", "request_id": None, "response_file": None, "duration": 2.0, "reload": False},
-         {"requestId": "1.2", "url": "/api", "status": 200, "mimeType": "text/plain",
-          "bytes": 2, "matched": 1, "body": "ok", "base64Encoded": False}),
-    ])
+    @pytest.mark.parametrize(
+        ("argv", "name", "arguments", "result"),
+        [
+            (
+                ["eval", "const a=2; a+1", "--await"],
+                "eval",
+                {"source": "const a=2; a+1", "await_promise": True},
+                {"value": 3, "type": "number", "url": "https://example.com", "targetId": "T1"},
+            ),
+            (
+                ["press", "Enter", "--modifiers", "Meta"],
+                "press",
+                {"key": "Enter", "modifiers": "Meta"},
+                {"key": "Enter", "modifiers": ["Meta"], "dispatched": ["keyDown", "keyUp"]},
+            ),
+            (
+                ["hover", "--uid", "AB-1"],
+                "hover",
+                {"uid": "AB-1"},
+                {"uid": "AB-1", "x": 12.5, "y": 30.0},
+            ),
+            (
+                ["type", "A quote: 'yes'\n{\"ok\":true}\n你好 🐈"],
+                "type",
+                {"text": "A quote: 'yes'\n{\"ok\":true}\n你好 🐈", "source": "text"},
+                {"chars": 36, "source": "text"},
+            ),
+            (
+                ["wait-text", "Ready", "--timeout-ms", "321"],
+                "wait-text",
+                {"substring": "Ready", "timeout_ms": 321},
+                {"found": True, "substring": "Ready", "waitedMs": 20},
+            ),
+            (
+                ["network-get", "--url", "/api"],
+                "network-get",
+                {
+                    "url": "/api",
+                    "request_id": None,
+                    "response_file": None,
+                    "duration": 2.0,
+                    "reload": False,
+                },
+                {
+                    "requestId": "1.2",
+                    "url": "/api",
+                    "status": 200,
+                    "mimeType": "text/plain",
+                    "bytes": 2,
+                    "matched": 1,
+                    "body": "ok",
+                    "base64Encoded": False,
+                },
+            ),
+        ],
+    )
     def test_cli_exact_document(self, argv, name, arguments, result, fake_handler, capsys):
         fake_handler.native_responses[name] = make_text(json.dumps(result))
         assert cli.main([*argv, "--endpoint", "http://127.0.0.1:9222"]) == 0
@@ -718,21 +773,21 @@ class TestSixVerbContracts:
         import io
 
         prose = 'She said "don\'t".\n{"nested": [1, 2]}\nภาษาไทย 🐈\n'
-        path = tmp_path / 'message.txt'
-        path.write_text(prose, encoding='utf-8')
+        path = tmp_path / "message.txt"
+        path.write_text(prose, encoding="utf-8")
         argument = str(path) if source == "file" else "-"
         monkeypatch.setattr("sys.stdin", io.StringIO(prose))
         result = {"chars": len(prose), "source": "file", "path": argument}
-        fake_handler.native_responses['type'] = make_text(json.dumps(result))
-        assert cli.main(['type', '--file', argument, '--endpoint', 'http://127.0.0.1:9222']) == 0
+        fake_handler.native_responses["type"] = make_text(json.dumps(result))
+        assert cli.main(["type", "--file", argument, "--endpoint", "http://127.0.0.1:9222"]) == 0
         assert json.loads(capsys.readouterr().out) == result
-        assert fake_handler.instances[-1].native_calls[0][1]['text'] == prose
+        assert fake_handler.instances[-1].native_calls[0][1]["text"] == prose
 
     @pytest.mark.parametrize("verb", ["press", "hover", "type"])
     def test_hidden_tab_refused(self, verb, fake_handler, monkeypatch):
         monkeypatch.setattr(fake_handler, "page_visibility_state", lambda self: "hidden")
-        argv = {'press': ['Enter'], 'hover': ['--uid', 'AB-1'], 'type': ['hello']}[verb]
-        assert cli.main([verb, *argv, '--endpoint', 'http://127.0.0.1:9222']) == 1
+        argv = {"press": ["Enter"], "hover": ["--uid", "AB-1"], "type": ["hello"]}[verb]
+        assert cli.main([verb, *argv, "--endpoint", "http://127.0.0.1:9222"]) == 1
         assert fake_handler.instances[-1].native_calls == []
 
 
@@ -749,30 +804,53 @@ def test_eval_throw_regression_at_cli(monkeypatch, fake_handler, capsys):
 
     from browser_tools import curated_runtime
 
-    detail = {'text': 'Uncaught', 'exception': {'description': 'Error: regression-marker'}}
-    raw_client, _ = make_fake_cdp_client_cls(responder=lambda *_: {'exceptionDetails': detail})
-    monkeypatch.setattr('browser_tools.one_shot.CDPClient', raw_client)
-    monkeypatch.setattr('browser_tools.one_shot.get_ws_url_async', AsyncMock(return_value='ws://fake/browser'))
-    assert cli.main(['Runtime.evaluate', json.dumps({'expression': 'throw new Error("regression-marker")'}),
-                     '--endpoint', 'http://127.0.0.1:9222']) == 0
-    assert 'exceptionDetails' in json.loads(capsys.readouterr().out)
+    detail = {"text": "Uncaught", "exception": {"description": "Error: regression-marker"}}
+    raw_client, _ = make_fake_cdp_client_cls(responder=lambda *_: {"exceptionDetails": detail})
+    monkeypatch.setattr("browser_tools.one_shot.CDPClient", raw_client)
+    monkeypatch.setattr(
+        "browser_tools.one_shot.get_ws_url_async", AsyncMock(return_value="ws://fake/browser")
+    )
+    assert (
+        cli.main(
+            [
+                "Runtime.evaluate",
+                json.dumps({"expression": 'throw new Error("regression-marker")'}),
+                "--endpoint",
+                "http://127.0.0.1:9222",
+            ]
+        )
+        == 0
+    )
+    assert "exceptionDetails" in json.loads(capsys.readouterr().out)
     cdp = AsyncMock()
-    cdp.send.side_effect = [{}, {'exceptionDetails': detail},
-                            {'targetInfo': {'url': 'https://page', 'targetId': 'T1'}}]
+    cdp.send.side_effect = [
+        {},
+        {"exceptionDetails": detail},
+        {"targetInfo": {"url": "https://page", "targetId": "T1"}},
+    ]
 
     def call_native(self, name, args):
         try:
-            result = asyncio.run(curated_runtime.evaluate(cdp, args['source'], False, None))
+            result = asyncio.run(curated_runtime.evaluate(cdp, args["source"], False, None))
             return make_text(json.dumps(result))
         except LifecycleError as exc:
             return make_error(str(exc))
 
-    monkeypatch.setattr(fake_handler, 'call_native', call_native)
-    assert cli.main(['eval', '(() => { throw new Error("regression-marker"); })()',
-                     '--endpoint', 'http://127.0.0.1:9222']) == 1
+    monkeypatch.setattr(fake_handler, "call_native", call_native)
+    assert (
+        cli.main(
+            [
+                "eval",
+                '(() => { throw new Error("regression-marker"); })()',
+                "--endpoint",
+                "http://127.0.0.1:9222",
+            ]
+        )
+        == 1
+    )
     captured = capsys.readouterr()
-    assert captured.out == ''
-    assert 'Error: regression-marker' in captured.err
+    assert captured.out == ""
+    assert "Error: regression-marker" in captured.err
 
 
 @pytest.mark.asyncio
@@ -782,14 +860,22 @@ async def test_eval_value_and_await_are_cdp_parameters():
     from browser_tools import curated_runtime
 
     cdp = AsyncMock()
-    cdp.send.side_effect = [{}, {'result': {'value': {'a': [1]}, 'type': 'object'}},
-                            {'targetInfo': {'url': 'https://page', 'targetId': 'T1'}}]
-    result = await curated_runtime.evaluate(cdp, '({a:[1]})', True, 7)
+    cdp.send.side_effect = [
+        {},
+        {"result": {"value": {"a": [1]}, "type": "object"}},
+        {"targetInfo": {"url": "https://page", "targetId": "T1"}},
+    ]
+    result = await curated_runtime.evaluate(cdp, "({a:[1]})", True, 7)
     params = cdp.send.call_args_list[1].args[1]
-    assert params['returnByValue'] is True
-    assert params['awaitPromise'] is True
-    assert params['contextId'] == 7
-    assert result == {'value': {'a': [1]}, 'type': 'object', 'url': 'https://page', 'targetId': 'T1'}
+    assert params["returnByValue"] is True
+    assert params["awaitPromise"] is True
+    assert params["contextId"] == 7
+    assert result == {
+        "value": {"a": [1]},
+        "type": "object",
+        "url": "https://page",
+        "targetId": "T1",
+    }
 
 
 @pytest.mark.asyncio
@@ -799,36 +885,61 @@ async def test_eval_statements_use_completion_without_retrying_execution():
     from browser_tools import curated_runtime
 
     cdp = AsyncMock()
-    cdp.send.side_effect = [{'exceptionDetails': {'text': 'SyntaxError'}}, {},
-                            {'exceptionDetails': {'text': 'thrown once'}}]
-    with pytest.raises(LifecycleError, match='thrown once'):
-        await curated_runtime.evaluate(cdp, 'const x = 1; throw x', False, None)
+    cdp.send.side_effect = [
+        {"exceptionDetails": {"text": "SyntaxError"}},
+        {},
+        {"exceptionDetails": {"text": "thrown once"}},
+    ]
+    with pytest.raises(LifecycleError, match="thrown once"):
+        await curated_runtime.evaluate(cdp, "const x = 1; throw x", False, None)
     assert cdp.send.await_count == 3
-    expression = cdp.send.call_args_list[2].args[1]['expression']
-    assert expression.startswith('(() =>') and 'return eval(' in expression
+    expression = cdp.send.call_args_list[2].args[1]["expression"]
+    assert expression.startswith("(() =>") and "return eval(" in expression
 
 
-@pytest.mark.parametrize('key', ['Enter', 'Tab', 'Escape', 'Backspace', 'Delete',
-    'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'PageUp', 'PageDown',
-    *[f'F{i}' for i in range(1,13)], 'a', 'A', '1', '!', ' ', 'é'])
+@pytest.mark.parametrize(
+    "key",
+    [
+        "Enter",
+        "Tab",
+        "Escape",
+        "Backspace",
+        "Delete",
+        "ArrowLeft",
+        "ArrowRight",
+        "ArrowUp",
+        "ArrowDown",
+        "Home",
+        "End",
+        "PageUp",
+        "PageDown",
+        *[f"F{i}" for i in range(1, 13)],
+        "a",
+        "A",
+        "1",
+        "!",
+        " ",
+        "é",
+    ],
+)
 def test_press_key_table_carries_default_action_fields(key):
     from browser_tools.curated_runtime import key_event
 
     event, _ = key_event(key, None)
-    assert {'code', 'windowsVirtualKeyCode', 'nativeVirtualKeyCode', 'text'} <= event.keys()
-    if key == 'Enter':
-        assert event['text'] == '\r' and event['windowsVirtualKeyCode'] == 13
+    assert {"code", "windowsVirtualKeyCode", "nativeVirtualKeyCode", "text"} <= event.keys()
+    if key == "Enter":
+        assert event["text"] == "\r" and event["windowsVirtualKeyCode"] == 13
     if len(key) == 1:
-        assert event['text'] == key
+        assert event["text"] == key
 
 
 def test_press_modifier_mask_and_duplicate_names():
     from browser_tools.curated_runtime import key_event
 
-    event, names = key_event('a', 'Control,Shift,Control')
-    assert event['modifiers'] == 10
-    assert names == ['Control', 'Shift']
-    assert event['text'] == ''
+    event, names = key_event("a", "Control,Shift,Control")
+    assert event["modifiers"] == 10
+    assert names == ["Control", "Shift"]
+    assert event["text"] == ""
 
 
 @pytest.mark.asyncio
@@ -839,14 +950,30 @@ async def test_native_press_sends_down_and_up_and_type_one_insert():
 
     handler = CDPHandler(None)
     cdp = AsyncMock()
-    await handler._dispatch_curated_action(cdp, 'press', {'key': 'Enter', 'modifiers': None})
+
+    async def send(method, params=None, **kwargs):
+        # The focus guard reads the active element. Answer it with a real
+        # payload rather than a bare mock, so the guard runs its actual path
+        # instead of falling through its unreadable-state escape.
+        if method == "Runtime.evaluate":
+            return {"result": {"value": "editable", "type": "string"}}
+        return {}
+
+    cdp.send.side_effect = send
+    await handler._dispatch_curated_action(cdp, "press", {"key": "Enter", "modifiers": None})
     events = [call.args[1] for call in cdp.send.call_args_list]
-    assert [event['type'] for event in events] == ['keyDown', 'keyUp']
-    assert events[0]['text'] == '\r'
+    assert [event["type"] for event in events] == ["keyDown", "keyUp"]
+    assert events[0]["text"] == "\r"
     cdp.reset_mock()
-    response = await handler._dispatch_curated_action(cdp, 'type', {'text': 'a\n🐈', 'source': 'text'})
-    cdp.send.assert_awaited_once_with('Input.insertText', {'text': 'a\n🐈'})
-    assert json.loads(''.join(extract_text_items(response))) == {'chars': 3, 'source': 'text'}
+    response = await handler._dispatch_curated_action(
+        cdp, "type", {"text": "a\n🐈", "source": "text"}
+    )
+    # Two calls now: the focus guard reads the active element and is told an
+    # editable one has focus, then the insert happens.
+    sent = [call.args[0] for call in cdp.send.call_args_list]
+    assert sent == ["Runtime.evaluate", "Input.insertText"], sent
+    assert cdp.send.call_args_list[-1].args[1] == {"text": "a\n🐈"}
+    assert json.loads("".join(extract_text_items(response))) == {"chars": 3, "source": "text"}
 
 
 @pytest.mark.asyncio
@@ -856,47 +983,67 @@ async def test_hover_uses_live_uid_box_and_native_mouse():
     from browser_tools.native_interaction import NativeInteractor
     from browser_tools.native_snapshot import NativeSnapshotReader, doc_token
 
-    send = AsyncMock(side_effect=[
-        {'frameTree': {'frame': {'id': 'f', 'loaderId': 'l'}}},
-        {'node': {'nodeType': 1}}, {},
-        {'model': {'content': [10,20,30,20,30,60,10,60]}}, {},
-    ])
-    point = await NativeInteractor(NativeSnapshotReader()).hover_async(send, f'{doc_token("f","l")}-3')
-    assert point == (20,40)
-    assert send.call_args_list[-2].args[0] == 'DOM.getBoxModel'
-    send.assert_awaited_with('Input.dispatchMouseEvent', {'type':'mouseMoved','x':20,'y':40,'buttons':0})
+    send = AsyncMock(
+        side_effect=[
+            {"frameTree": {"frame": {"id": "f", "loaderId": "l"}}},
+            {"node": {"nodeType": 1}},
+            {},
+            {"model": {"content": [10, 20, 30, 20, 30, 60, 10, 60]}},
+            {},
+        ]
+    )
+    point = await NativeInteractor(NativeSnapshotReader()).hover_async(
+        send, f"{doc_token('f', 'l')}-3"
+    )
+    assert point == (20, 40)
+    assert send.call_args_list[-2].args[0] == "DOM.getBoxModel"
+    send.assert_awaited_with(
+        "Input.dispatchMouseEvent", {"type": "mouseMoved", "x": 20, "y": 40, "buttons": 0}
+    )
 
 
-@pytest.mark.parametrize(('size', 'encoded', 'omitted'), [
-    (1024*1024, False, False), (1024*1024+1, False, True), (4, True, True), (0, False, False),
-])
+@pytest.mark.parametrize(
+    ("size", "encoded", "omitted"),
+    [
+        (1024 * 1024, False, False),
+        (1024 * 1024 + 1, False, True),
+        (4, True, True),
+        (0, False, False),
+    ],
+)
 def test_network_body_limits_and_file_bytes(size, encoded, omitted, tmp_path):
     from browser_tools.curated_runtime import response_document
 
-    data = b'\xff\x00\x01\x02' if encoded else b'x' * size
-    payload = {'body': base64.b64encode(data).decode() if encoded else data.decode(), 'base64Encoded': encoded}
-    event = {'requestId': '1.2', 'response': {'url':'https://a/api', 'status':200, 'mimeType':'text/plain'}}
+    data = b"\xff\x00\x01\x02" if encoded else b"x" * size
+    payload = {
+        "body": base64.b64encode(data).decode() if encoded else data.decode(),
+        "base64Encoded": encoded,
+    }
+    event = {
+        "requestId": "1.2",
+        "response": {"url": "https://a/api", "status": 200, "mimeType": "text/plain"},
+    }
     result = response_document(event, payload, 2, None)
-    assert result['bytes'] == len(data) and result['matched'] == 2
-    assert ('bodyOmitted' in result) == omitted
-    assert ('body' in result) != omitted
+    assert result["bytes"] == len(data) and result["matched"] == 2
+    assert ("bodyOmitted" in result) == omitted
+    assert ("body" in result) != omitted
     if omitted:
-        assert '--response-file' in result['bodyOmitted']
-    path = tmp_path / 'nested' / 'body'
+        assert "--response-file" in result["bodyOmitted"]
+    path = tmp_path / "nested" / "body"
     written = response_document(event, payload, 2, str(path))
-    assert written['responseFile'] == str(path)
+    assert written["responseFile"] == str(path)
     assert path.read_bytes() == data
-    assert 'body' not in written and 'bodyOmitted' not in written
+    assert "body" not in written and "bodyOmitted" not in written
 
 
 def test_network_limits_count_utf8_bytes():
     from browser_tools.curated_runtime import response_document
 
-    text = 'é' * (512*1024+1)
-    event = {'requestId':'1','response':{'url':'u','status':200,'mimeType':'text/plain'}}
-    result = response_document(event, {'body':text}, 1, None)
-    assert result['bytes'] == len(text.encode('utf-8'))
-    assert 'bodyOmitted' in result
+    text = "é" * (512 * 1024 + 1)
+    event = {"requestId": "1", "response": {"url": "u", "status": 200, "mimeType": "text/plain"}}
+    result = response_document(event, {"body": text}, 1, None)
+    assert result["bytes"] == len(text.encode("utf-8"))
+    assert "bodyOmitted" in result
 
 
 def network_client(raw):
@@ -908,46 +1055,58 @@ def network_client(raw):
         return await original(method, params, session_id=session_id)
 
     raw.send = send
-    return AttachedSessionClient(raw, 'S1')
+    return AttachedSessionClient(raw, "S1")
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("delay", [0, .1])
+@pytest.mark.parametrize("delay", [0, 0.1])
 async def test_network_subscribes_before_enable_and_returns_without_fixed_wait(monkeypatch, delay):
     from test_list_verbs import _RaceFakeCDP
 
     from browser_tools import curated_runtime
 
     def event(identity):
-        return {'requestId': identity, 'frameId':'f', 'response':{
-            'url':'https://a/api', 'status':200, 'mimeType':'text/plain'}}
+        return {
+            "requestId": identity,
+            "frameId": "f",
+            "response": {"url": "https://a/api", "status": 200, "mimeType": "text/plain"},
+        }
+
     events = [
-        ('Network.responseReceived', event('1')),
-        ('Network.loadingFinished', {'requestId':'1'}),
+        ("Network.responseReceived", event("1")),
+        ("Network.loadingFinished", {"requestId": "1"}),
     ]
-    cdp = _RaceFakeCDP(events if not delay else [],
-                       [(name, params, delay) for name, params in events] if delay else [])
+    cdp = _RaceFakeCDP(
+        events if not delay else [],
+        [(name, params, delay) for name, params in events] if delay else [],
+    )
     original = cdp.send
     bodies = []
+
     async def send(method, params=None, session_id=None):
-        if method == 'Network.getResponseBody':
-            bodies.append(params['requestId'])
-            return {'body':'last', 'base64Encoded':False}
+        if method == "Network.getResponseBody":
+            bodies.append(params["requestId"])
+            return {"body": "last", "base64Encoded": False}
         return await original(method, params, session_id=session_id)
-    monkeypatch.setattr(cdp, 'send', send)
+
+    monkeypatch.setattr(cdp, "send", send)
     import asyncio
 
-    result = await asyncio.wait_for(curated_runtime.network_get(
-        network_client(cdp), '/api', None, None, None, None, frozenset()), .5)
+    result = await asyncio.wait_for(
+        curated_runtime.network_get(
+            network_client(cdp), "/api", None, None, None, None, frozenset()
+        ),
+        0.5,
+    )
     assert cdp.handler_live_at_enable
-    assert 'Page.reload' not in cdp.calls
-    assert bodies == ['1'] and result['matched'] == 1 and result['body'] == 'last'
-    assert 'Network.disable' not in cdp.calls
+    assert "Page.reload" not in cdp.calls
+    assert bodies == ["1"] and result["matched"] == 1 and result["body"] == "last"
+    assert "Network.disable" not in cdp.calls
     assert not any(cdp._handlers.values())
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('keep', [frozenset(), frozenset({'Network'})])
+@pytest.mark.parametrize("keep", [frozenset(), frozenset({"Network"})])
 async def test_network_unknown_request_id_explains_session_scope_and_cleans_up(monkeypatch, keep):
     from test_list_verbs import _RaceFakeCDP
 
@@ -956,14 +1115,18 @@ async def test_network_unknown_request_id_explains_session_scope_and_cleans_up(m
 
     cdp = _RaceFakeCDP([])
     original = cdp.send
+
     async def send(method, params=None, session_id=None):
-        if method == 'Network.getResponseBody':
-            raise CDPError('No resource with given identifier found')
+        if method == "Network.getResponseBody":
+            raise CDPError("No resource with given identifier found")
         return await original(method, params, session_id=session_id)
-    monkeypatch.setattr(cdp, 'send', send)
-    with pytest.raises(LifecycleError, match='another invocation'):
-        await curated_runtime.network_get(network_client(cdp), None, 'old', None, None, None, keep, duration=0)
-    assert 'Network.disable' not in cdp.calls
+
+    monkeypatch.setattr(cdp, "send", send)
+    with pytest.raises(LifecycleError, match="another invocation"):
+        await curated_runtime.network_get(
+            network_client(cdp), None, "old", None, None, None, keep, duration=0
+        )
+    assert "Network.disable" not in cdp.calls
     assert not any(cdp._handlers.values())
 
 
@@ -973,119 +1136,170 @@ class TestCuratedInChrome:
     @pytest.fixture
     def drive(self, curated_browser, capsys):
         def invoke(*argv, status=0):
-            code = cli.main([*argv, '--endpoint', curated_browser])
+            code = cli.main([*argv, "--endpoint", curated_browser])
             captured = capsys.readouterr()
             assert code == status, captured.err
             if status:
-                assert captured.out == ''
+                assert captured.out == ""
                 return captured.err
             return json.loads(captured.out)
+
         return invoke
 
     @pytest.fixture
     def page(self, drive):
         import urllib.parse
 
-        html = '''<!doctype html><style>#h {color:rgb(1,2,3)} #h:hover {color:rgb(9,8,7)}</style>
+        html = """<!doctype html><style>#h {color:rgb(1,2,3)} #h:hover {color:rgb(9,8,7)}</style>
         <form onsubmit="event.preventDefault();window.submitted=true">
         <input id="i" value="existing"><button>Submit</button></form>
         <button id="h">Hover me</button><p id="p">Already here</p>
         <script>window.events=[];for(const name of ['beforeinput','input','keydown','keyup'])
-        i.addEventListener(name,e=>events.push(e.type));</script>'''
-        drive('Page.navigate', json.dumps({'url': 'data:text/html,' + urllib.parse.quote(html)}))
-        drive('wait-text', 'Already here')
+        i.addEventListener(name,e=>events.push(e.type));</script>"""
+        drive("Page.navigate", json.dumps({"url": "data:text/html," + urllib.parse.quote(html)}))
+        drive("wait-text", "Already here")
         return drive
 
     def test_throw_has_exit_one_while_raw_has_zero(self, page):
         source = 'throw new Error("regression-marker")'
-        raw = page('Runtime.evaluate', json.dumps({'expression': source}))
-        assert 'exceptionDetails' in raw
-        assert 'regression-marker' in page('eval', source, status=1)
+        raw = page("Runtime.evaluate", json.dumps({"expression": source}))
+        assert "exceptionDetails" in raw
+        assert "regression-marker" in page("eval", source, status=1)
 
-    @pytest.mark.parametrize(('source', 'value'), [
-        ('1+2', 3), ('({a:[1,2]})', {'a':[1,2]}),
-        ('const x = "a;b"; const y = {f: () => 4}; [x, y.f()]', ['a;b',4]),
-        ('Promise.resolve(9)', 9), ('12', 12),
-        ('const n=1; return n+1', 2),
-    ])
+    @pytest.mark.parametrize(
+        ("source", "value"),
+        [
+            ("1+2", 3),
+            ("({a:[1,2]})", {"a": [1, 2]}),
+            ('const x = "a;b"; const y = {f: () => 4}; [x, y.f()]', ["a;b", 4]),
+            ("Promise.resolve(9)", 9),
+            ("12", 12),
+            ("const n=1; return n+1", 2),
+        ],
+    )
     def test_eval_completion_and_await(self, page, source, value):
-        assert page('eval', source, '--await')['value'] == value
+        assert page("eval", source, "--await")["value"] == value
 
     def test_enter_submits_form(self, page):
-        page('eval', 'document.querySelector("#i").focus()')
-        page('press', 'Enter')
-        assert page('eval', 'window.submitted')['value'] is True
+        page("eval", 'document.querySelector("#i").focus()')
+        page("press", "Enter")
+        assert page("eval", "window.submitted")["value"] is True
 
     def test_hover_sets_css_rule(self, page):
         import re
 
-        tree = page('snapshot')['snapshot']
+        tree = page("snapshot")["snapshot"]
         uid = re.search(r'\[uid=([^\]]+)\] button "Hover me"', tree).group(1)
-        page('hover', '--uid', uid)
-        assert page('eval', 'getComputedStyle(document.querySelector("#h")).color')['value'] == 'rgb(9, 8, 7)'
+        page("hover", "--uid", uid)
+        assert (
+            page("eval", 'getComputedStyle(document.querySelector("#h")).color')["value"]
+            == "rgb(9, 8, 7)"
+        )
+
+    def test_type_refuses_when_nothing_editable_has_focus(self, drive, page):
+        """A verb that dispatched anyway would report chars for a dropped insert."""
+        page("eval", 'document.body.innerHTML="<input id=i2>"; document.activeElement.blur(); "ok"')
+        message = drive("type", "zzz", status=1)
+        assert "nothing editable has focus" in message
+        assert "BODY" in message
+        assert page("eval", 'document.getElementById("i2").value')["value"] == ""
+
+    def test_type_still_reaches_a_focused_field(self, page):
+        """The refusal must not cost the ordinary case."""
+        page(
+            "eval",
+            'document.body.innerHTML="<input id=i2>"; document.getElementById("i2").focus(); "ok"',
+        )
+        assert page("type", "zzz")["chars"] == 3
+        assert page("eval", 'document.getElementById("i2").value')["value"] == "zzz"
+
+    def test_press_and_hover_documents_are_what_the_browser_returns(self, page):
+        """These two were only ever asserted against a canned double's reply."""
+        import re
+
+        page("eval", 'document.querySelector("#i").focus()')
+        pressed = page("press", "Enter")
+        assert pressed == {"key": "Enter", "modifiers": [], "dispatched": ["keyDown", "keyUp"]}
+
+        tree = page("snapshot")["snapshot"]
+        uid = re.search(r'\[uid=([^\]]+)\] button "Hover me"', tree).group(1)
+        hovered = page("hover", "--uid", uid)
+        assert set(hovered) == {"uid", "x", "y"}
+        assert hovered["uid"] == uid
+        assert isinstance(hovered["x"], float) and isinstance(hovered["y"], float)
+        assert hovered["x"] > 0 and hovered["y"] > 0
 
     def test_prose_inserts_at_caret_and_fires_input_not_keys(self, page, tmp_path):
         prose = 'She said "don\'t".\n{"ok": true}\nภาษาไทย 🐈'
-        path = tmp_path / 'prose.txt'
+        path = tmp_path / "prose.txt"
         path.write_text(prose)
-        page('eval', 'document.body.innerHTML="<textarea id=i>AB</textarea>"; '
-             'window.events=[]; for(const name of ["beforeinput","input","keydown","keyup","keypress"]) '
-             'i.addEventListener(name,e=>events.push(e.type)); i.focus(); i.setSelectionRange(1,1)')
-        page('type', '--file', str(path))
-        assert page('eval', 'document.querySelector("#i").value')['value'] == 'A'+prose+'B'
+        page(
+            "eval",
+            'document.body.innerHTML="<textarea id=i>AB</textarea>"; '
+            'window.events=[]; for(const name of ["beforeinput","input","keydown","keyup","keypress"]) '
+            "i.addEventListener(name,e=>events.push(e.type)); i.focus(); i.setSelectionRange(1,1)",
+        )
+        page("type", "--file", str(path))
+        assert page("eval", 'document.querySelector("#i").value')["value"] == "A" + prose + "B"
         # What the ticket requires: the input events a framework-controlled
         # field listens for, and no key events at all. How many `input` events
         # Chrome emits for one insertText is its own business and it is not one
         # per line: a three-line insert measured 1 beforeinput, 1 textInput and
         # 5 input. Asserting an exact list pinned that internal and went red
         # on any multi-line payload.
-        events = page('eval', 'window.events')['value']
-        assert 'beforeinput' in events
-        assert 'input' in events
-        assert not [e for e in events if e.startswith('key')], events
+        events = page("eval", "window.events")["value"]
+        assert "beforeinput" in events
+        assert "input" in events
+        assert not [e for e in events if e.startswith("key")], events
 
     def test_wait_present_later_and_never(self, page):
-        assert page('wait-text', 'Already here')['found']
-        page('eval', 'setTimeout(()=>document.querySelector("#p").textContent="Later",500)')
-        assert page('wait-text', 'Later')['found']
-        assert 'timed out' in page('wait-text', 'Never here', '--timeout-ms', '20', status=1)
+        assert page("wait-text", "Already here")["found"]
+        page("eval", 'setTimeout(()=>document.querySelector("#p").textContent="Later",500)')
+        assert page("wait-text", "Later")["found"]
+        assert "timed out" in page("wait-text", "Never here", "--timeout-ms", "20", status=1)
 
     def test_wait_does_not_lose_text_during_observer_installation(self, page):
-        page('eval', '''window.OriginalObserver=MutationObserver;
+        page(
+            "eval",
+            """window.OriginalObserver=MutationObserver;
           window.MutationObserver=class extends OriginalObserver {
             observe(node, options) {
               document.querySelector('#p').textContent='Arrived during setup';
               super.observe(node, options);
             }
-          }''')
+          }""",
+        )
         try:
-            assert page('wait-text', 'Arrived during setup', '--timeout-ms', '1000')['found']
+            assert page("wait-text", "Arrived during setup", "--timeout-ms", "1000")["found"]
         finally:
-            page('eval', 'window.MutationObserver=OriginalObserver')
+            page("eval", "window.MutationObserver=OriginalObserver")
 
     def test_network_get_step_reads_prior_response_without_losing_state(self, page, tmp_path):
-        steps = tmp_path / 'network.steps'
+        steps = tmp_path / "network.steps"
         steps.write_text(
             "eval \"window.marker='kept'; fetch('data:text/plain,run-response').then(r=>r.text())\" --await\n"
             "network-get --url data:text/plain,run-response\n"
             "eval window.marker\n"
         )
-        result = page('run', str(steps))
-        assert result['run']['status'] == 'ok'
-        assert result['steps'][1]['result']['body'] == 'run-response'
-        assert result['steps'][2]['result']['value'] == 'kept'
+        result = page("run", str(steps))
+        assert result["run"]["status"] == "ok"
+        assert result["steps"][1]["result"]["body"] == "run-response"
+        assert result["steps"][2]["result"]["value"] == "kept"
         print(json.dumps(result))
 
     def test_network_standalone_preserves_state_and_returns_on_match(self, page):
         import time
 
-        page('eval', "window.marker='kept'; setTimeout(()=>fetch('data:text/plain,delayed-body'), 500)")
+        page(
+            "eval",
+            "window.marker='kept'; setTimeout(()=>fetch('data:text/plain,delayed-body'), 500)",
+        )
         start = time.monotonic()
-        result = page('network-get', '--url', 'data:text/plain,delayed-body', '--duration', '4')
+        result = page("network-get", "--url", "data:text/plain,delayed-body", "--duration", "4")
         elapsed = time.monotonic() - start
-        assert result['body'] == 'delayed-body'
+        assert result["body"] == "delayed-body"
         assert elapsed < 2, elapsed
-        assert page('eval', 'window.marker')['value'] == 'kept'
+        assert page("eval", "window.marker")["value"] == "kept"
 
     def test_network_explicit_reload_fetches_response(self, page, tmp_path):
         import threading
@@ -1096,32 +1310,36 @@ class TestCuratedInChrome:
                 pass
 
             def do_GET(self):
-                if self.path == '/':
-                    data = b'''<script>fetch('/api?first').then(()=>fetch('/api?last'))</script>'''
-                    mime = 'text/html'
+                if self.path == "/":
+                    data = b"""<script>fetch('/api?first').then(()=>fetch('/api?last'))</script>"""
+                    mime = "text/html"
                 else:
                     data = self.path.encode()
-                    mime = 'text/plain'
+                    mime = "text/plain"
                 self.send_response(200)
-                self.send_header('Content-Type', mime)
-                self.send_header('Content-Length', str(len(data)))
+                self.send_header("Content-Type", mime)
+                self.send_header("Content-Length", str(len(data)))
                 self.end_headers()
                 self.wfile.write(data)
 
-        server = ThreadingHTTPServer(('127.0.0.1', 0), Fixture)
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Fixture)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:
-            page('Page.navigate', json.dumps({'url': f'http://127.0.0.1:{server.server_port}/'}))
-            page('eval', "window.marker='before-reload'")
-            result = page('network-get', '--url', '/api?first', '--reload')
-            assert page('eval', 'window.marker')['type'] == 'undefined'
-            assert result['matched'] == 1 and result['body'] == '/api?first'
-            assert result['bytes'] == 10
-            path = tmp_path / 'response.txt'
-            saved = page('network-get', '--url', '/api?first', '--reload', '--response-file', str(path))
-            assert saved['responseFile'] == str(path) and path.read_bytes() == b'/api?first'
-            assert 'another invocation' in page('network-get', '--request-id', result['requestId'], '--duration', '0', status=1)
+            page("Page.navigate", json.dumps({"url": f"http://127.0.0.1:{server.server_port}/"}))
+            page("eval", "window.marker='before-reload'")
+            result = page("network-get", "--url", "/api?first", "--reload")
+            assert page("eval", "window.marker")["type"] == "undefined"
+            assert result["matched"] == 1 and result["body"] == "/api?first"
+            assert result["bytes"] == 10
+            path = tmp_path / "response.txt"
+            saved = page(
+                "network-get", "--url", "/api?first", "--reload", "--response-file", str(path)
+            )
+            assert saved["responseFile"] == str(path) and path.read_bytes() == b"/api?first"
+            assert "another invocation" in page(
+                "network-get", "--request-id", result["requestId"], "--duration", "0", status=1
+            )
         finally:
             server.shutdown()
             thread.join(timeout=2)
@@ -1129,22 +1347,40 @@ class TestCuratedInChrome:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('outcome', ['none', 'unfinished', 'failed'])
+@pytest.mark.parametrize("outcome", ["none", "unfinished", "failed"])
 async def test_network_window_failure_paths(outcome, monkeypatch):
     from test_list_verbs import _RaceFakeCDP
 
     from browser_tools import curated_runtime
 
-    events = [] if outcome == 'none' else [('Network.responseReceived', {
-        'requestId':'1','response':{'url':'/api','status':200,'mimeType':'text/plain'}})]
-    if outcome == 'failed':
-        events.append(('Network.loadingFailed', {'requestId':'1','errorText':'net::ERR_FAILED'}))
+    events = (
+        []
+        if outcome == "none"
+        else [
+            (
+                "Network.responseReceived",
+                {
+                    "requestId": "1",
+                    "response": {"url": "/api", "status": 200, "mimeType": "text/plain"},
+                },
+            )
+        ]
+    )
+    if outcome == "failed":
+        events.append(("Network.loadingFailed", {"requestId": "1", "errorText": "net::ERR_FAILED"}))
     cdp = _RaceFakeCDP(events)
-    with pytest.raises(LifecycleError, match={'none':'no matching', 'unfinished':'did not finish', 'failed':'net::ERR_FAILED'}[outcome]):
-        await curated_runtime.network_get(network_client(cdp), '/api', None, None, None, None, frozenset(), duration=0)
+    with pytest.raises(
+        LifecycleError,
+        match={"none": "no matching", "unfinished": "did not finish", "failed": "net::ERR_FAILED"}[
+            outcome
+        ],
+    ):
+        await curated_runtime.network_get(
+            network_client(cdp), "/api", None, None, None, None, frozenset(), duration=0
+        )
     assert not any(cdp._handlers.values())
-    assert 'Network.disable' not in cdp.calls
-    assert 'Network.getResponseBody' not in cdp.calls
+    assert "Network.disable" not in cdp.calls
+    assert "Network.getResponseBody" not in cdp.calls
 
 
 @pytest.mark.asyncio
@@ -1156,31 +1392,43 @@ async def test_network_cancellation_removes_listeners_and_preserves_network(monk
     from browser_tools import curated_runtime
 
     cdp = _RaceFakeCDP([])
-    task = asyncio.create_task(curated_runtime.network_get(network_client(cdp), '/api', None, None, None, None, frozenset()))
+    task = asyncio.create_task(
+        curated_runtime.network_get(
+            network_client(cdp), "/api", None, None, None, None, frozenset()
+        )
+    )
     await asyncio.sleep(0)
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
     assert not any(cdp._handlers.values())
-    assert 'Network.disable' not in cdp.calls
+    assert "Network.disable" not in cdp.calls
 
 
 @pytest.mark.asyncio
 async def test_wait_text_deadline_is_stderr_only_via_cli(monkeypatch, fake_handler, capsys):
-    fake_handler.native_responses['wait-text'] = make_error('wait-text timed out after 1 ms')
-    assert cli.main(['wait-text', 'never', '--timeout-ms', '1', '--endpoint', 'http://127.0.0.1:9222']) == 1
+    fake_handler.native_responses["wait-text"] = make_error("wait-text timed out after 1 ms")
+    assert (
+        cli.main(["wait-text", "never", "--timeout-ms", "1", "--endpoint", "http://127.0.0.1:9222"])
+        == 1
+    )
     captured = capsys.readouterr()
-    assert captured.out == '' and 'timed out' in captured.err
+    assert captured.out == "" and "timed out" in captured.err
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(('source', 'expected'), [
-    ('1+2', 3), ('({a: [1,2]})', {'a':[1,2]}),
-    ('const x=";"; const f=()=>({a:3}); [x, f().a]', [';',3]),
-    ('let x=1\nx+2 // last expression', 3),
-    ('const x=3; return x+1', 4), ('Promise.resolve(8)', 8),
-    ('"quote: \\\" and apostrophe: \'"', 'quote: " and apostrophe: \''),
-])
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        ("1+2", 3),
+        ("({a: [1,2]})", {"a": [1, 2]}),
+        ('const x=";"; const f=()=>({a:3}); [x, f().a]', [";", 3]),
+        ("let x=1\nx+2 // last expression", 3),
+        ("const x=3; return x+1", 4),
+        ("Promise.resolve(8)", 8),
+        ('"quote: \\" and apostrophe: \'"', "quote: \" and apostrophe: '"),
+    ],
+)
 async def test_eval_generated_javascript_in_v8(source, expected):
     """Execute the generated JS in Node's V8, independently of CDP doubles."""
     import shutil
@@ -1189,13 +1437,14 @@ async def test_eval_generated_javascript_in_v8(source, expected):
 
     from browser_tools import curated_runtime
 
-    node = shutil.which('node')
+    node = shutil.which("node")
     if node is None:
-        pytest.skip('Node is unavailable for the generated JavaScript check')
+        pytest.skip("Node is unavailable for the generated JavaScript check")
+
     async def send(method, params=None):
-        if method == 'Target.getTargetInfo':
-            return {'targetInfo':{'url':'https://fixture','targetId':'T1'}}
-        program = '''const vm = require('node:vm');
+        if method == "Target.getTargetInfo":
+            return {"targetInfo": {"url": "https://fixture", "targetId": "T1"}}
+        program = """const vm = require('node:vm');
           (async () => {
             try {
               const expression = JSON.parse(process.argv[1]);
@@ -1206,12 +1455,22 @@ async def test_eval_generated_javascript_in_v8(source, expected):
                 console.log(JSON.stringify({result:{value,type:typeof value}}));
               }
             } catch(e) { console.log(JSON.stringify({exceptionDetails:{text:String(e)}})); }
-          })();'''
-        completed = subprocess.run([node, '-e', program, json.dumps(params['expression']),
-            'compile' if method == 'Runtime.compileScript' else 'evaluate'],
-            capture_output=True, text=True, check=True)
+          })();"""
+        completed = subprocess.run(
+            [
+                node,
+                "-e",
+                program,
+                json.dumps(params["expression"]),
+                "compile" if method == "Runtime.compileScript" else "evaluate",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
         return json.loads(completed.stdout)
+
     cdp = AsyncMock()
     cdp.send.side_effect = send
     result = await curated_runtime.evaluate(cdp, source, True, None)
-    assert result['value'] == expected
+    assert result["value"] == expected

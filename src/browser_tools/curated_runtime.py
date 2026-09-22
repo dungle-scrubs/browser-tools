@@ -208,6 +208,52 @@ async def wait_text(
     return value
 
 
+#: What `type` does when nothing can receive the text. ``Input.insertText``
+#: inserts at the caret, so with no editable target it succeeds at the protocol
+#: level and inserts nothing. The verb would then print ``chars`` for an
+#: interaction that never happened, which is the failure
+#: ``_refuse_input_to_hidden_tab`` already refuses for a background tab.
+TYPE_NO_TARGET_MESSAGE = (
+    "nothing editable has focus ({holder} has it), so the text would be "
+    "dropped without an error. Focus the field first: `bt click --uid <uid>` "
+    "on it, or `bt fill --uid <uid> <text>` to set a value directly."
+)
+
+_ACTIVE_ELEMENT_KIND = """(() => {
+  const el = document.activeElement;
+  if (!el) return 'unknown';
+  if (el.isContentEditable) return 'editable';
+  if (document.designMode === 'on') return 'editable';
+  const tag = el.tagName;
+  if (tag === 'TEXTAREA' || tag === 'INPUT') return 'editable';
+  if (tag === 'IFRAME' || tag === 'FRAME') return 'unknown';
+  return tag;
+})()"""
+
+
+async def refuse_type_without_a_target(cdp: Any, context: int | None) -> None:
+    """Raise when the focused element positively cannot receive inserted text.
+
+    Mirrors ``_refuse_input_to_hidden_tab``: an unreadable state is "unknown",
+    not "refused". A page whose active element cannot be determined, and a
+    focused frame whose real target is inside it, both get their input. Only a
+    definite non-editable holder is refused, because only then is the drop
+    certain.
+    """
+    request: dict[str, Any] = {"expression": _ACTIVE_ELEMENT_KIND, "returnByValue": True}
+    if context is not None:
+        request["contextId"] = context
+    try:
+        kind = evaluated(await cdp.send("Runtime.evaluate", request)).get("value")
+    except Exception:
+        # Reading the state is part of reading the state: a probe that cannot
+        # answer leaves the holder unknown, and an unknown holder gets its input.
+        return
+    if not isinstance(kind, str) or kind in ("editable", "unknown"):
+        return
+    raise LifecycleError(TYPE_NO_TARGET_MESSAGE.format(holder=kind))
+
+
 async def focus_selected(cdp: Any, context: int | None) -> None:
     if context is None:
         return
@@ -306,17 +352,25 @@ class ResponseBuffer:
                 cdp.off(event, callback)
 
     async def match(
-        self, url: str | None, request_id: str | None, frame_id: str | None,
+        self,
+        url: str | None,
+        request_id: str | None,
+        frame_id: str | None,
         duration: float,
     ) -> tuple[dict[str, Any], int]:
         deadline = asyncio.get_running_loop().time() + duration
         while True:
             # No await between clearing, inspecting, and subscribing to changes.
             self.changed.clear()
-            matches = [event for event in self.responses
-                       if (frame_id is None or event.get("frameId") == frame_id)
-                       and ((url is not None and url in event["response"]["url"])
-                            or (request_id is not None and request_id == event["requestId"]))]
+            matches = [
+                event
+                for event in self.responses
+                if (frame_id is None or event.get("frameId") == frame_id)
+                and (
+                    (url is not None and url in event["response"]["url"])
+                    or (request_id is not None and request_id == event["requestId"])
+                )
+            ]
             if matches:
                 last = matches[-1]
                 identity = last["requestId"]
@@ -360,11 +414,24 @@ async def network_get(
                 if frame_id is None:
                     await cdp.send("Page.reload")
                 else:
-                    navigation = await cdp.send("Page.navigate", {"url": frame_url, "frameId": frame_id})
+                    navigation = await cdp.send(
+                        "Page.navigate", {"url": frame_url, "frameId": frame_id}
+                    )
                     if navigation.get("errorText"):
-                        raise LifecycleError(f"cannot reload selected frame: {navigation['errorText']}")
-            return await network_get(cdp, url, request_id, response_file, frame_id,
-                                     frame_url, keep, duration, buffer=captured)
+                        raise LifecycleError(
+                            f"cannot reload selected frame: {navigation['errorText']}"
+                        )
+            return await network_get(
+                cdp,
+                url,
+                request_id,
+                response_file,
+                frame_id,
+                frame_url,
+                keep,
+                duration,
+                buffer=captured,
+            )
     last, matched = await buffer.match(url, request_id, frame_id, duration)
     body = await cdp.send("Network.getResponseBody", {"requestId": last["requestId"]})
     return response_document(last, body, matched, response_file)
