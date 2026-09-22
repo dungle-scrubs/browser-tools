@@ -544,7 +544,9 @@ NEVER TAKE THE SCREEN
     what makes an agent reach for activateTarget.
 
   Input and screenshots reach the selected tab of a window even when the
-  window is behind other windows or on another workspace. To work in a second
+  window is behind other windows or on another workspace. Leave a launched
+  window where the window manager put it; do not move it to a fixed workspace
+  away from its related content. To work in a second
   page, open it in its own window and target it:
 
     bt Target.createTarget '{"url": "https://...", "newWindow": true}'

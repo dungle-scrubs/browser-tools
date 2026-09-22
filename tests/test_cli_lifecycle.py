@@ -272,6 +272,105 @@ class TestStatusStopCleanup:
         assert "site-01" in removed
         assert _read(registry_path) == {}
 
+    def test_concurrent_annotates_keep_both_updates(self, registry_path):
+        # Each writer bumps a counter on its own entry. Without the lock the
+        # slower save overwrites the faster one's increments; with it every
+        # increment from both writers lands.
+        import threading
+
+        _seed(
+            registry_path,
+            {
+                "a-01": _dead_entry(engine="chrome", profile=None),
+                "b-01": _dead_entry(engine="chrome", profile=None),
+            },
+        )
+        errors: list[BaseException] = []
+        rounds = 20
+
+        def _annotate(name: str):
+            try:
+                for _ in range(rounds):
+                    with lifecycle.registry_lock(registry_path):
+                        reg = core_registry._load_registry(registry_path)
+                        reg[name]["browser_version"] = str(
+                            int(reg[name]["browser_version"] or 0) + 1
+                            if str(reg[name]["browser_version"]).isdigit()
+                            else 1
+                        )
+                        core_registry._save_registry(reg, registry_path)
+            except BaseException as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=_annotate, args=(name,)) for name in ("a-01", "b-01")]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=30)
+        assert not [thread for thread in threads if thread.is_alive()]
+        assert not errors
+        final = _read(registry_path)
+        assert final["a-01"]["browser_version"] == str(rounds)
+        assert final["b-01"]["browser_version"] == str(rounds)
+
+    def test_registry_lock_times_out(self, registry_path, tmp_path):
+        import fcntl
+
+        lock_root = tmp_path / "locks"
+        lock_root.mkdir()
+        lock_file = lock_root / "registry.lock"
+        with open(lock_file, "a+") as holder:
+            fcntl.flock(holder.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            try:
+                with (
+                    pytest.raises(LifecycleError, match="locked by another process"),
+                    lifecycle.registry_lock(registry_path, lock_root=str(lock_root), timeout=0.2),
+                ):
+                    pass
+            finally:
+                fcntl.flock(holder.fileno(), fcntl.LOCK_UN)
+
+    def test_cleanup_keeps_entry_on_unattributable_listener(self, registry_path, monkeypatch):
+        # An entry whose port answers but which /proc attribution cannot tie
+        # to the recorded dir (macOS has no /proc) reads alive and must survive
+        # cleanup. Attribution is stubbed empty so the verdict rests on the
+        # listener alone, not on host layout.
+        monkeypatch.setattr(core_registry, "_cdp_port_claimants", lambda port: set())
+        import socket
+        import threading
+        import time
+
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        server.bind(("127.0.0.1", 0))
+        server.listen(1)
+        port = server.getsockname()[1]
+        stop = threading.Event()
+
+        def _serve():
+            while not stop.is_set():
+                try:
+                    server.settimeout(0.1)
+                    conn, _ = server.accept()
+                    time.sleep(0.5)
+                    conn.close()
+                except OSError:
+                    break
+
+        thread = threading.Thread(target=_serve, daemon=True)
+        thread.start()
+        try:
+            live = _dead_entry(port=port, pid=2_000_000_000)
+            live["user_data_dir"] = "/tmp/bt-test-live-profile"
+            _seed(registry_path, {"shop-01": live})
+            removed = lifecycle.cleanup(registry_path=registry_path)
+            assert "shop-01" not in removed
+            assert "shop-01" in _read(registry_path)
+        finally:
+            stop.set()
+            thread.join(timeout=2)
+            server.close()
+
 
 class TestGuide:
     def test_guide_mentions_verbs(self):
@@ -351,8 +450,15 @@ class TestCliFront:
         def fake_launch(**kwargs):
             captured.update(kwargs)
             return lifecycle.ExtendedInstance(
-                name="x-01", port=9222, pid=1, browser_version="", user_data_dir="",
-                launched=None, pid_start=None, engine="chrome", profile=None,
+                name="x-01",
+                port=9222,
+                pid=1,
+                browser_version="",
+                user_data_dir="",
+                launched=None,
+                pid_start=None,
+                engine="chrome",
+                profile=None,
             )
 
         monkeypatch.setattr(lifecycle, "launch", fake_launch)

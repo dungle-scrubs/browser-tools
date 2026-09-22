@@ -51,6 +51,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from dataclasses import dataclass
 from importlib import resources
@@ -266,13 +267,14 @@ def annotate_entry(
     Idempotent and a no-op if the entry is gone (raced with stop/cleanup).
     """
     path = core_registry._resolve_path(registry_path)  # pyright: ignore[reportPrivateUsage]
-    reg = core_registry._load_registry(path)  # pyright: ignore[reportPrivateUsage]
-    entry = reg.get(name)
-    if entry is None:
-        return
-    entry["engine"] = engine
-    entry["profile"] = profile
-    core_registry._save_registry(reg, path)  # pyright: ignore[reportPrivateUsage]
+    with registry_lock(registry_path):
+        reg = core_registry._load_registry(path)  # pyright: ignore[reportPrivateUsage]
+        entry = reg.get(name)
+        if entry is None:
+            return
+        entry["engine"] = engine
+        entry["profile"] = profile
+        core_registry._save_registry(reg, path)  # pyright: ignore[reportPrivateUsage]
 
 
 def record_supervisor(
@@ -295,13 +297,14 @@ def record_supervisor(
     Idempotent and a no-op if the entry is gone (raced with stop/cleanup).
     """
     path = core_registry._resolve_path(registry_path)  # pyright: ignore[reportPrivateUsage]
-    reg = core_registry._load_registry(path)  # pyright: ignore[reportPrivateUsage]
-    entry = reg.get(name)
-    if entry is None:
-        return
-    entry["supervisor_pid"] = pid
-    entry["supervisor_pid_start"] = pid_start
-    core_registry._save_registry(reg, path)  # pyright: ignore[reportPrivateUsage]
+    with registry_lock(registry_path):
+        reg = core_registry._load_registry(path)  # pyright: ignore[reportPrivateUsage]
+        entry = reg.get(name)
+        if entry is None:
+            return
+        entry["supervisor_pid"] = pid
+        entry["supervisor_pid_start"] = pid_start
+        core_registry._save_registry(reg, path)  # pyright: ignore[reportPrivateUsage]
 
 
 def supervisor_state(entry: dict[str, Any]) -> str | None:
@@ -321,6 +324,71 @@ def supervisor_state(entry: dict[str, Any]) -> str | None:
         return None
     ours = process_is_ours(pid=pid, expected_start=entry.get("supervisor_pid_start"))
     return "running" if ours else "missing"
+
+
+#: Thread-local depth for :func:`registry_lock`. `launch` holds the lock across
+#: the whole sequence including `annotate_entry`, and `stop`/`cleanup` nest the
+#: same way, so re-entry in one thread must pass through while a second thread
+#: or process still waits on the flock.
+_registry_lock_depth = threading.local()
+
+
+def _registry_lock_path(registry_path: str | None, lock_root: str | None) -> tuple[Path, Path]:
+    """Resolve the lock directory and lock file for one registry file."""
+    if lock_root is not None:
+        root = Path(lock_root)
+    else:
+        resolved = core_registry._resolve_path(registry_path)  # pyright: ignore[reportPrivateUsage]
+        root = Path(resolved).parent
+    root.mkdir(parents=True, exist_ok=True)
+    return root, root / "registry.lock"
+
+
+@contextlib.contextmanager
+def registry_lock(
+    registry_path: str | None = None,
+    *,
+    lock_root: str | None = None,
+    timeout: float = 30.0,
+) -> Generator[None]:
+    """Hold an exclusive lock over one registry file for a read-modify-write.
+
+    The lifecycle-owned mutations (`annotate_entry`, `record_supervisor`,
+    `_remove_entry`, `retire_instance`, `cleanup`) are load-edit-save
+    sequences with no locking, so two concurrent writers last-writer-win:
+    the slower save silently drops the faster one's entry. Hold this across
+    the whole sequence so a racing writer waits and then sees the winner's
+    entry rather than a file from before the winner saved.
+
+    One lock file covers the registry directory (`<parent>/registry.lock`).
+    Two registry files sharing a directory share the lock; that over-serialises
+    but never under-protects. Re-entrant in one thread: `launch` holds it
+    across `register` and `annotate_entry`, which take it again. Raises
+    ``LifecycleError`` when the lock is not acquired within ``timeout``.
+    """
+    root, lock_path = _registry_lock_path(registry_path, lock_root)
+    depth = getattr(_registry_lock_depth, "depth", 0)
+    if depth > 0:
+        yield
+        return
+    deadline = time.monotonic() + timeout
+    with open(lock_path, "a+") as handle:
+        while True:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    raise LifecycleError(
+                        f"Registry at {root} is locked by another process. Waited {timeout:g}s."
+                    ) from None
+                time.sleep(0.05)
+        _registry_lock_depth.depth = 1
+        try:
+            yield
+        finally:
+            _registry_lock_depth.depth = 0
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 def _entry_to_ext(name: str, entry: dict[str, Any]) -> ExtendedInstance:
@@ -490,9 +558,7 @@ def resolve_channel_binary(channel: str | None) -> str | None:
         if os.path.isfile(path) and os.access(path, os.X_OK):
             return path
     searched = "\n  ".join(candidates) if candidates else "(no known paths for this platform)"
-    raise LifecycleError(
-        f"Chrome '{channel}' channel not found. Searched:\n  {searched}"
-    )
+    raise LifecycleError(f"Chrome '{channel}' channel not found. Searched:\n  {searched}")
 
 
 # ---------------------------------------------------------------------------
@@ -596,8 +662,7 @@ def profile_delete(name: str, registry_path: str | None = None) -> dict[str, Any
     holder = find_profile_holder(name, registry_path=registry_path)
     if holder is not None:
         raise LifecycleError(
-            f"Profile '{name}' is held by live instance '{holder}'. Stop it "
-            f"first: bt stop {holder}"
+            f"Profile '{name}' is held by live instance '{holder}'. Stop it first: bt stop {holder}"
         )
 
     shutil.rmtree(target)
@@ -655,8 +720,7 @@ def _verify_transfer(source: Path, destination: Path) -> None:
     missing = sorted(set(before) - set(after))
     if missing:
         raise ProfileMigrationError(
-            f"transfer to {destination} is missing {len(missing)} file(s), "
-            f"first: {missing[0]}"
+            f"transfer to {destination} is missing {len(missing)} file(s), first: {missing[0]}"
         )
     differing = sorted(name for name, size in before.items() if after[name] != size)
     if differing:
@@ -677,9 +741,7 @@ def _migratable_profiles(root: Path) -> list[Path]:
     return sorted(
         child
         for child in root.iterdir()
-        if child.is_dir()
-        and not child.is_symlink()
-        and PROFILE_NAME_PATTERN.fullmatch(child.name)
+        if child.is_dir() and not child.is_symlink() and PROFILE_NAME_PATTERN.fullmatch(child.name)
     )
 
 
@@ -906,7 +968,9 @@ def launch(
     """
     engine = (engine or DEFAULT_ENGINE).lower()
     if engine not in VALID_ENGINES:
-        raise LifecycleError(f"Unknown engine '{engine}'. Choose one of: {', '.join(VALID_ENGINES)}")
+        raise LifecycleError(
+            f"Unknown engine '{engine}'. Choose one of: {', '.join(VALID_ENGINES)}"
+        )
 
     # The name becomes a path under the profile root, so it is checked here
     # rather than only in `profile delete` (#98). Without this a launch could
@@ -920,6 +984,7 @@ def launch(
     # two concurrent launches could both observe no holder and race into the
     # registry (#95). A caller that waits here sees the registered winner.
     with contextlib.ExitStack() as stack:
+        stack.enter_context(registry_lock(registry_path))
         if profile is not None:
             stack.enter_context(profile_launch_lock(profile))
         # Resolve the user-data-dir. Profile-bound instances get the persistent
@@ -1133,9 +1198,7 @@ def status(
     for ext in instances:
         alive = instance_is_live(ext)
         targets = (
-            core_status.query_targets(port=ext.port)
-            if alive and ext.engine == "chrome"
-            else []
+            core_status.query_targets(port=ext.port) if alive and ext.engine == "chrome" else []
         )
         out.append(
             {
@@ -1175,9 +1238,10 @@ def _remove_entry(
     unbound/ephemeral instances have it reaped.
     """
     path = core_registry._resolve_path(registry_path)  # pyright: ignore[reportPrivateUsage]
-    reg = core_registry._load_registry(path)  # pyright: ignore[reportPrivateUsage]
-    reg.pop(name, None)
-    core_registry._save_registry(reg, path)  # pyright: ignore[reportPrivateUsage]
+    with registry_lock(registry_path):
+        reg = core_registry._load_registry(path)  # pyright: ignore[reportPrivateUsage]
+        reg.pop(name, None)
+        core_registry._save_registry(reg, path)  # pyright: ignore[reportPrivateUsage]
     if reap_dir and user_data_dir and os.path.exists(user_data_dir):
         shutil.rmtree(user_data_dir, ignore_errors=True)
 
@@ -1261,6 +1325,21 @@ def profile_launch_lock(
         handle.close()
 
 
+def _retire_locked(*, instance_name: str, registry_path: str | None) -> bool:
+    path = core_registry._resolve_path(registry_path)  # pyright: ignore[reportPrivateUsage]
+    reg = core_registry._load_registry(path)  # pyright: ignore[reportPrivateUsage]
+    entry = reg.pop(instance_name, None)
+    if entry is None:
+        return False
+    core_registry._save_registry(reg, path)  # pyright: ignore[reportPrivateUsage]
+
+    _, profile = read_engine_profile(entry)
+    session_dir = entry.get("user_data_dir")
+    if profile is None and session_dir:
+        core_registry._remove_session_dir(session_dir)  # pyright: ignore[reportPrivateUsage]
+    return True
+
+
 def retire_instance(
     *,
     instance_name: str,
@@ -1286,18 +1365,8 @@ def retire_instance(
     Returns True when an entry was removed. Idempotent, so it stays safe to
     race with ``stop()`` and ``cleanup()``.
     """
-    path = core_registry._resolve_path(registry_path)  # pyright: ignore[reportPrivateUsage]
-    reg = core_registry._load_registry(path)  # pyright: ignore[reportPrivateUsage]
-    entry = reg.pop(instance_name, None)
-    if entry is None:
-        return False
-    core_registry._save_registry(reg, path)  # pyright: ignore[reportPrivateUsage]
-
-    _, profile = read_engine_profile(entry)
-    session_dir = entry.get("user_data_dir")
-    if profile is None and session_dir:
-        core_registry._remove_session_dir(session_dir)  # pyright: ignore[reportPrivateUsage]
-    return True
+    with registry_lock(registry_path):
+        return _retire_locked(instance_name=instance_name, registry_path=registry_path)
 
 
 def _terminate_verified(ext: ExtendedInstance) -> None:
@@ -1375,9 +1444,7 @@ def _close_tab(ext: ExtendedInstance, target_id: str) -> str:
 
         browser_ws = await get_ws_url_async(port=ext.port, target_type="browser")
         async with CDPClient(ws_url=browser_ws) as cdp:
-            result = await cdp.send(
-                method="Target.closeTarget", params={"targetId": target_id}
-            )
+            result = await cdp.send(method="Target.closeTarget", params={"targetId": target_id})
             return bool(result.get("success", False))
 
     if not asyncio.run(_close()):
@@ -1459,9 +1526,7 @@ def stop(
     # call site, by not routing tab closes through it.
     if target is not None:
         if ext.engine != "chrome":
-            raise LifecycleError(
-                "Closing a single tab is only supported for the chrome engine."
-            )
+            raise LifecycleError("Closing a single tab is only supported for the chrome engine.")
         if not instance_is_live(ext):
             raise LifecycleError(f"{ext.name} is not live; cannot close a tab.")
         return _close_tab(ext, _resolve_tab_target(ext, target))
@@ -1469,13 +1534,14 @@ def stop(
     if ext.engine == "camoufox" or ext.profile is not None:
         return _stop_managed(ext, registry_path)
 
-    try:
-        return core_registry.stop(
-            instance_name=instance,
-            registry_path=registry_path,
-        )
-    except InstanceNotFoundError as exc:
-        raise LifecycleError(instance_not_found_message(exc)) from exc
+    with registry_lock(registry_path):
+        try:
+            return core_registry.stop(
+                instance_name=instance,
+                registry_path=registry_path,
+            )
+        except InstanceNotFoundError as exc:
+            raise LifecycleError(instance_not_found_message(exc)) from exc
 
 
 def cleanup(registry_path: str | None = None) -> list[str]:
@@ -1499,18 +1565,20 @@ def cleanup(registry_path: str | None = None) -> list[str]:
     # the profile dir. Their dirs live outside the vendored session root, so the
     # orphan sweep never touches them either.
     path = core_registry._resolve_path(registry_path)  # pyright: ignore[reportPrivateUsage]
-    reg = core_registry._load_registry(path)  # pyright: ignore[reportPrivateUsage]
-    preserved_removed: list[str] = []
-    for name, entry in list(reg.items()):
-        ext = _entry_to_ext(name, entry)
-        bound = ext.profile is not None or _is_under_profiles_root(ext.user_data_dir)
-        if bound and not instance_is_live(ext):
-            del reg[name]
-            preserved_removed.append(name)
-    if preserved_removed:
-        core_registry._save_registry(reg, path)  # pyright: ignore[reportPrivateUsage]
+    with registry_lock(registry_path):
+        reg = core_registry._load_registry(path)  # pyright: ignore[reportPrivateUsage]
+        preserved_removed: list[str] = []
+        for name, entry in list(reg.items()):
+            ext = _entry_to_ext(name, entry)
+            bound = ext.profile is not None or _is_under_profiles_root(ext.user_data_dir)
+            if bound and not instance_is_live(ext):
+                del reg[name]
+                preserved_removed.append(name)
+        if preserved_removed:
+            core_registry._save_registry(reg, path)  # pyright: ignore[reportPrivateUsage]
 
-    removed = core_launcher.cleanup_sessions(registry_path=registry_path)
+    with registry_lock(registry_path):
+        removed = core_launcher.cleanup_sessions(registry_path=registry_path)
     return preserved_removed + removed
 
 
