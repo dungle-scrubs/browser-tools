@@ -5,7 +5,7 @@ type: feature
 status: Proposed
 author: "Kevin Frilot"
 date: 2026-09-22
-version: 2
+version: 3
 ---
 
 # RFC-05: Retire chrome-devtools-axi
@@ -137,9 +137,11 @@ real gap is that a caller cannot choose an instance name, and the derived name
 is recycled after a stop.
 
 Auto-connect to the user's own Chrome was believed to be reachable through
-`--endpoint`. It is not. Recent Chrome exposes an approval-based remote
-debugging service that the existing HTTP endpoint form cannot discover. That
-finding is provisional; see Design 6 for what is cited and what is not.
+`--endpoint`. It is not. Chrome 144 and later expose an approval-based remote
+debugging service that suppresses the HTTP discovery the existing flag depends
+on, and that asks the user to approve every single connection. The second half
+is the one that matters: it caps what this capability can ever be, and Design 6
+says so rather than designing around it.
 
 `type` was believed to be a short-string verb whose raw form is harmless. The
 245 sampled mentions are bulk prose typed into chat inputs, which inside JSON
@@ -678,21 +680,44 @@ the documentation either.
 
 #### Attaching to the user's own Chrome: a thin primitive, gated on verification
 
-**This subsection is provisional on citation.** The behaviour below was
-established by the research on ticket #149 by reading Chrome's own behaviour,
-and this document carries no upstream URL for the 404-by-design claim, the
-`/devtools/browser` path constraint, or the `DevToolsActivePort` format. The
-implementing ticket MUST cite Chrome or Chromium source or official
-documentation for all three before building, and MUST re-establish them against
-the Chrome actually installed, because the behaviour may be version-, channel-
-or flag-specific rather than by design. If it is not as described, the design
-below is wrong on arrival and the right answer is none of it.
+Chrome 144 and later expose an approval-based remote debugging service that is
+not a conventional HTTP CDP endpoint. Every claim below is cited to Chromium
+source or to Chrome's own documentation; the citations are in References.
 
-As established: recent Chrome exposes an approval-based remote debugging
-service that returns 404 for `/json/version` and admits only WebSocket paths
-under `/devtools/browser`. `bt --endpoint` speaks HTTP and discovers through
-`/json/version`, so it cannot reach it at all. The port and the path live in
-the profile's `DevToolsActivePort` file.
+- **It returns 404 for `/json`, including `/json/version`, by design.** The
+  check runs before every `/json` command, and it also 404s the discovery page
+  and the frontend resources. `bt --endpoint` speaks HTTP and discovers through
+  `/json/version`, so it cannot reach this service at all.
+- **It admits only WebSocket paths beginning `/devtools/browser`** and rejects
+  every other path.
+- **The port and the path live in the profile's `DevToolsActivePort` file**,
+  first line the listening port, second line the browser WebSocket path.
+- **The port is not reliably 9222.** Chrome reads the previous
+  `DevToolsActivePort` on startup and tries to reuse its first-line port; with
+  no valid file it starts at 9222 and falls back to any available port when
+  that one is taken. This is why discovery reads the file rather than assuming
+  a port, and why a 404-then-try-`/devtools/browser` fallback on a hand-passed
+  port is not a substitute for discovery.
+- **The enabling preference survives a normal restart**, because it is a
+  persisted Local State preference. An administrator policy can disable the
+  whole feature through `devtools.remote_debugging.allowed`, so a diagnostic
+  must distinguish "not enabled" from "not permitted".
+- **Approval is per connection, not per browser session.** Chrome asks the user
+  to allow every incoming connection and shows an automation banner while
+  connected.
+
+**What is still unverified is local, not upstream.** None of this has been
+exercised against the Chrome installed on the driving dev's machine: the
+preference has never been set there and no port file exists. The implementing
+ticket re-establishes the behaviour against that Chrome before building. If it
+differs, the design here is wrong on arrival and the right answer is none of it.
+
+**The per-connection approval is a design constraint, not a detail.** A fully
+unattended agent cannot use `--chrome-profile`, because nobody is there to
+click Allow, and this is the documented behaviour rather than a bug to work
+around. The capability is for an agent working alongside someone at the
+keyboard. That is what the bounded wait and its diagnostic are for, and it is
+why the verb is not promoted or aliased.
 
 What ships is deliberately thin, and it is gated, not ungated:
 
@@ -948,9 +973,11 @@ which leaves the retirement short of two capabilities and reopens decision 2.
    unset in Design 3.
 5. Whether a headed Lighthouse run can be made safe. There is no flag for a
    background tab.
-6. Whether Chrome's approval prompt must be answered once per browser session
-   or once per connection. It decides whether `--chrome-profile` is usable by
-   an unattended agent at all, and ticket #159's verification answers it.
+6. Whether Chrome's documented per-connection approval behaves as documented
+   on the driving dev's installed Chrome. The documentation is unambiguous and
+   is cited; what is open is only whether that Chrome matches it. It is the
+   first thing the attach verification checks, because a per-connection prompt
+   is what makes this unusable unattended.
 
 ## References
 
@@ -977,6 +1004,25 @@ which leaves the retirement short of two capabilities and reopens decision 2.
   committed with this RFC.
 - CDP `Tracing` domain, for `transferMode` and `dataLossOccurred`:
   https://chromedevtools.github.io/devtools-protocol/tot/Tracing/
+- Approval-mode 404 for `/json`, and the `/devtools/browser` path constraint:
+  Chromium `content/browser/devtools/devtools_http_handler.cc` at blob
+  `45ff52e`, lines 598-605, 774-805 and 827-867.
+  https://chromium.googlesource.com/chromium/src/+/45ff52e032500bea7703cd4f22723b519fa81fa2/content/browser/devtools/devtools_http_handler.cc#598
+- `DevToolsActivePort` format, port line then path line: the same file, lines
+  305-322.
+- Port reuse and fallback away from 9222: Chromium commit
+  `cec7af242a1ec8b33becd04582467cddb2902a26`, lines 33-40, 101-120 and 162-186.
+- The preference persists in Local State, and the
+  `devtools.remote_debugging.allowed` policy: Chromium commit
+  `27485803c25baad7e0aeb4c4368403d10003dc53`, lines 251-286.
+- Per-connection approval and the automation banner: Chrome documentation,
+  "Connect to an existing browser session".
+  https://developer.chrome.com/docs/devtools/agents/get-started/configuration#connect-to-an-existing-browser-session
+- Why normal CDP discovery does not apply here: CDP, "How do I access the
+  browser target?" https://chromedevtools.github.io/devtools-protocol/
+- Prior art for the same discovery, read as source: chrome-devtools-mcp
+  `src/browser.ts` at tag `chrome-devtools-mcp-v1.9.0`, lines 28-109, and
+  Puppeteer 25.11.0 `ConnectOptions.channel`.
 - `@paulirish/trace_engine`: https://www.npmjs.com/package/@paulirish/trace_engine
 - RFC-01, the merge that set the vendoring rules and removed the Node
   subprocess: `docs/rfc/01_merge-chrome-agent-core-into-browser-tools.rfc.md`
