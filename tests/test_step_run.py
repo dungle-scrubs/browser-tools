@@ -747,6 +747,23 @@ class TestNoStepOpensItsOwnSession:
             storage_action="get",
             key=None,
             removed_action=None,
+            # The six RFC-05 verbs, plus the operands every one of them reads.
+            # Without these the verb raises AttributeError before it reaches
+            # `curated`, `contextlib.suppress` swallows it, and this guard
+            # proves nothing about the verb it just parametrized over.
+            operands=[],
+            source=None,
+            await_promise=False,
+            modifiers=None,
+            file=None,
+            substring="x",
+            request_id=None,
+            response_file=None,
+            # wait-idle and wait-stable were blind here before RFC-05, for the
+            # same reason: the guard parametrizes over every step verb but the
+            # Namespace only carried some of their operands.
+            idle_ms=10,
+            stable_ms=10,
         )
         handler = FakeHandler()
         with contextlib.suppress(Exception):

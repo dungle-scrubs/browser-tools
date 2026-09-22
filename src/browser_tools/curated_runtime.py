@@ -49,7 +49,13 @@ MAX_INLINE_BODY_BYTES = 1024 * 1024
 
 def key_event(key: str, modifiers: str | None) -> tuple[dict[str, Any], list[str]]:
     """Validate names before connecting and return a complete keyDown payload."""
-    names = list(dict.fromkeys(modifiers.split(","))) if modifiers is not None else []
+    # Strip each name: a shell-quoted "Control, Shift" is one argument with a
+    # space in it, and splitting on the comma alone made the second name unknown.
+    names = (
+        [n for n in dict.fromkeys(part.strip() for part in modifiers.split(",")) if n]
+        if modifiers is not None
+        else []
+    )
     if any(name not in MODIFIERS for name in names):
         raise UsageError(f"unknown modifier; valid names: {', '.join(MODIFIERS)}")
     if key in KEYS:
