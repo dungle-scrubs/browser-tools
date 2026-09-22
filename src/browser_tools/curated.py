@@ -56,7 +56,9 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import json
 import math
+import sys
 import threading
 import time
 from pathlib import Path
@@ -169,6 +171,7 @@ def _handler_for(
     registry_path: str | None,
     endpoint: str | None,
     all_frames: bool = False,
+    url: str | None = None,
 ) -> Generator[CDPHandler]:
     """Yield the session this verb runs on, opening one only if it must.
 
@@ -178,12 +181,14 @@ def _handler_for(
     handler passed in is never closed here, including when the body raises,
     because the next step still needs it.
     """
+    spec, by = target_selector(target, url)
     if handler is not None:
         yield handler
         return
     port = _resolve_port(instance, registry_path, endpoint)
     with _cdp_handler_session(
-        port, target, external=endpoint is not None, all_frames=all_frames
+        port, spec, external=endpoint is not None, all_frames=all_frames,
+        **({"target_by": by} if url is not None else {}),
     ) as opened:
         yield opened
 
@@ -772,3 +777,104 @@ def screenshot(
     else:
         payload["data"] = f"data:image/png;base64,{data}"
     return payload
+
+
+def _action(
+    name: str, arguments: dict[str, Any], *, instance: str | None,
+    target: str | None, url: str | None, registry_path: str | None,
+    endpoint: str | None, handler: CDPHandler | None, all_frames: bool,
+) -> dict[str, Any]:
+    with _handler_for(handler, instance, target, registry_path, endpoint, all_frames, url) as opened:
+        if name in {"press", "hover", "type"}:
+            _refuse_input_to_hidden_tab(opened)
+        return json.loads(_native_or_raise(opened, name, arguments))
+
+
+def eval_js(
+    *, instance: str | None, source: str, await_promise: bool = False,
+    target: str | None = None, url: str | None = None,
+    registry_path: str | None = None, endpoint: str | None = None,
+    handler: CDPHandler | None = None, all_frames: bool = False,
+) -> dict[str, Any]:
+    """Evaluate an expression or statement body; a JS throw is exit 1."""
+    return _action("eval", {"source": source, "await_promise": await_promise},
+                   instance=instance, target=target, url=url, registry_path=registry_path,
+                   endpoint=endpoint, handler=handler, all_frames=all_frames)
+
+
+def press(
+    *, instance: str | None, key: str, modifiers: str | None = None,
+    target: str | None = None, url: str | None = None,
+    registry_path: str | None = None, endpoint: str | None = None,
+    handler: CDPHandler | None = None, all_frames: bool = False,
+) -> dict[str, Any]:
+    """Dispatch a keyDown/keyUp pair with the fields default actions need."""
+    from .curated_runtime import key_event
+
+    key_event(key, modifiers)
+    return _action("press", {"key": key, "modifiers": modifiers},
+                   instance=instance, target=target, url=url, registry_path=registry_path,
+                   endpoint=endpoint, handler=handler, all_frames=all_frames)
+
+
+def hover(
+    *, instance: str | None, uid: str,
+    target: str | None = None, url: str | None = None,
+    registry_path: str | None = None, endpoint: str | None = None,
+    handler: CDPHandler | None = None, all_frames: bool = False,
+) -> dict[str, Any]:
+    """Move the native pointer over the live UID's box, including CSS :hover."""
+    return _action("hover", {"uid": uid},
+                   instance=instance, target=target, url=url, registry_path=registry_path,
+                   endpoint=endpoint, handler=handler, all_frames=all_frames)
+
+
+def type_text(
+    *, instance: str | None, text: str | None = None, file: str | None = None,
+    target: str | None = None, url: str | None = None,
+    registry_path: str | None = None, endpoint: str | None = None,
+    handler: CDPHandler | None = None, all_frames: bool = False,
+) -> dict[str, Any]:
+    """Insert positional or UTF-8 file text at the caret with one insertText."""
+    if (text is None) == (file is None):
+        raise UsageError("type requires exactly one of text or --file FILE")
+    arguments: dict[str, Any] = {"source": "text"}
+    if file is not None:
+        try:
+            text = sys.stdin.read() if file == "-" else Path(file).read_bytes().decode("utf-8")
+        except (OSError, UnicodeError) as exc:
+            raise LifecycleError(f"cannot read type --file {file}: {exc}") from exc
+        arguments.update(source="file", path=file if file == "-" else str(Path(file).resolve()))
+    arguments["text"] = text
+    return _action("type", arguments,
+                   instance=instance, target=target, url=url, registry_path=registry_path,
+                   endpoint=endpoint, handler=handler, all_frames=all_frames)
+
+
+def wait_text(
+    *, instance: str | None, substring: str, timeout_ms: int = DEFAULT_WAIT_TIMEOUT_MS,
+    target: str | None = None, url: str | None = None,
+    registry_path: str | None = None, endpoint: str | None = None,
+    handler: CDPHandler | None = None, all_frames: bool = False,
+) -> dict[str, Any]:
+    """Wait for a substring in rendered text without a check/subscription gap."""
+    if timeout_ms < 0:
+        raise UsageError("wait-text --timeout-ms must be non-negative")
+    return _action("wait-text", {"substring": substring, "timeout_ms": timeout_ms},
+                   instance=instance, target=target, url=url, registry_path=registry_path,
+                   endpoint=endpoint, handler=handler, all_frames=all_frames)
+
+
+def network_get(
+    *, instance: str | None, url: str | None = None, request_id: str | None = None,
+    response_file: str | None = None, target: str | None = None,
+    registry_path: str | None = None, endpoint: str | None = None,
+    handler: CDPHandler | None = None, all_frames: bool = False,
+) -> dict[str, Any]:
+    """Reload and collect for five seconds, fetching the last matching response."""
+    if (url is None) == (request_id is None):
+        raise UsageError("network-get requires exactly one of --url SUB or --request-id ID")
+    return _action("network-get", {"url": url, "request_id": request_id,
+                                  "response_file": response_file},
+                   instance=instance, target=target, url=None, registry_path=registry_path,
+                   endpoint=endpoint, handler=handler, all_frames=all_frames)

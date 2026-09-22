@@ -176,3 +176,14 @@ class TestDaemonlessVerbs:
 
     def test_no_verb_is_usage(self):
         assert cli.main([]) == cli.EXIT_USAGE
+
+
+@pytest.mark.parametrize('verb', ['eval','press','hover','type','wait-text','network-get'])
+def test_six_curated_verbs_are_cli_and_step_verbs(verb):
+    from browser_tools.step_list import STEP_VERBS
+
+    assert verb in cli._KNOWN_VERBS
+    assert verb in cli._CURATED_COMMANDS
+    assert verb in STEP_VERBS
+    args = cli.build_parser().parse_args([verb])
+    assert args.command == verb

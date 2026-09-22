@@ -329,3 +329,51 @@ class TestInstanceIsRegistered:
     def test_an_unknown_name_is_not(self, registry):
         path = registry(**{"web-01": _entry()})
         assert not lifecycle.instance_is_registered("frames", registry_path=path)
+
+
+class TestSixVerbGrammar:
+    @pytest.mark.parametrize(('argv', 'function'), [
+        (['eval', '1+1'], 'eval_js'), (['press', 'Enter'], 'press'),
+        (['hover', '--uid', 'AB-1'], 'hover'), (['type', 'hello'], 'type_text'),
+        (['type', '--file', 'message.txt'], 'type_text'),
+        (['wait-text', 'ready'], 'wait_text'),
+        (['network-get', '--request-id', '1.2'], 'network_get'),
+    ])
+    @pytest.mark.parametrize('placement', ['leading', 'inline', 'omitted'])
+    def test_instance_forms(self, argv, function, placement, registry, monkeypatch):
+        registry(**{'only-01': _entry()})
+        seen = []
+        monkeypatch.setattr(curated, function, lambda **kwargs: seen.append(kwargs) or {})
+        if placement == 'leading':
+            argv = ['only-01', *argv]
+        elif placement == 'inline':
+            argv = [argv[0], 'only-01', *argv[1:]]
+        assert cli.main(argv) == 0
+        assert seen[0]['instance'] == (None if placement == 'omitted' else 'only-01')
+
+    @pytest.mark.parametrize('argv', [
+        ['eval'], ['press'], ['press','NotAKey'], ['press','Enter','--modifiers','Ctrl'],
+        ['type'], ['type','hello','--file','message.txt'], ['hover'], ['wait-text'],
+        ['wait-text','ready','--timeout-ms','-1'], ['network-get'],
+        ['network-get','--url','api','--request-id','1'],
+        ['eval','1','--url','page','--target','1'],
+    ])
+    def test_invalid_usage_sends_nothing(self, argv, registry, monkeypatch, capsys):
+        def forbidden(*args, **kwargs):
+            raise AssertionError('usage failure opened a browser')
+        monkeypatch.setattr(curated, '_resolve_port', forbidden)
+        assert cli.main(argv) == 2
+        assert capsys.readouterr().out == ''
+
+    @pytest.mark.parametrize(('argv','valid'), [
+        (['press','Unknown'], ['Enter','PageDown','F12']),
+        (['press','Enter','--modifiers','Bad'], ['Alt','Control','Meta','Shift']),
+    ])
+    def test_invalid_names_print_valid_names(self, argv, valid, registry, capsys):
+        assert cli.main(argv) == 2
+        err = capsys.readouterr().err
+        assert all(name in err for name in valid)
+
+    def test_duplicate_instance_refused(self, registry, monkeypatch):
+        registry(**{'only-01': _entry()})
+        assert cli.main(['only-01','eval','only-01','1']) == 2

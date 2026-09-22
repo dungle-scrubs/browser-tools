@@ -530,3 +530,20 @@ class TestTheStepSurfaceIsNotHandWritten:
 
         overlap = step_list.STEP_VERBS & set(step_list.EXCLUDED_VERBS)
         assert not overlap, f"{sorted(overlap)} is both a step and not a step"
+
+
+class TestSixVerbsManual:
+    @pytest.mark.parametrize('verb', ['eval','press','hover','type','wait-text','network-get'])
+    def test_every_new_verb_has_a_worked_example(self, manual, verb):
+        assert f'bt {verb} ' in manual
+
+    def test_key_recipe_uses_press(self, manual):
+        assert 'bt press Enter' in manual
+        assert 'bt Input.dispatchKeyEvent' not in manual
+        assert 'bt Runtime.evaluate' not in manual
+
+    def test_distinguishes_waits_and_network_windows(self, flat):
+        for text in ['has network activity stopped?', 'has the DOM stopped changing?',
+                     'is this text here?', 'not a buffer', 'no key events',
+                     'five seconds', 'bodyOmitted', '--response-file']:
+            assert text in flat

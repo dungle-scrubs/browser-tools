@@ -50,6 +50,12 @@ STEP_VERBS = frozenset(
         "snapshot",
         "click",
         "fill",
+        "eval",
+        "press",
+        "hover",
+        "type",
+        "wait-text",
+        "network-get",
         "wait-idle",
         "wait-stable",
         "wait",
@@ -370,9 +376,11 @@ def validate(
                     "the run resolves the instance once, before step 1",
                 )
             try:
-                check_preconditions(args)
+                check_preconditions(args, known_instances=known)
             except UsageError as exc:
                 raise _at(line, str(exc)) from exc
+            if getattr(args, "instance", None) is not None:
+                raise _at(line, "a step must not name an instance; the run resolves it once")
             steps.append(Step(number=number, line=line, text=step_text, argv=argv, args=args))
             continue
 

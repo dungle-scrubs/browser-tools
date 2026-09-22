@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import json
 import logging
 import threading
 import time
@@ -1133,7 +1134,10 @@ class CDPHandler:
             self._dispatch_native(name, arguments), self._loop
         )
         try:
-            return future.result(timeout=self._rt.bounded_timeout(REQUEST_TIMEOUT_SECONDS))
+            timeout = REQUEST_TIMEOUT_SECONDS
+            if name == "wait-text":
+                timeout = max(timeout, arguments.get("timeout_ms", 5000) / 1000 + 5)
+            return future.result(timeout=self._rt.bounded_timeout(timeout))
         except Exception as exc:
             logger.warning("call_native(%s) error: %s", name, exc)
             future.cancel()
@@ -1157,6 +1161,9 @@ class CDPHandler:
         if err is not None:
             return err
         send = cdp.send
+
+        if name in {"eval", "press", "hover", "type", "wait-text", "network-get"}:
+            return await self._dispatch_curated_action(cdp, name, arguments)
 
         if name == "take_snapshot":
             documents = self._cross_process_documents()
@@ -1186,6 +1193,66 @@ class CDPHandler:
                 return make_error(await self._uid_failure(uid, exc))
 
         return make_error(f"Unknown native tool: {name}")
+
+    async def _dispatch_curated_action(
+        self, cdp: Any, name: str, arguments: dict[str, Any]
+    ) -> dict[str, Any]:
+        from . import curated_runtime as actions
+
+        page_cdp = cdp
+        fm = self._frame_manager
+        selected = fm.get_selected_frame() if fm is not None else None
+        context_id: int | None = None
+        if fm is not None and fm.selection_pattern is not None:
+            context = fm.get_selected_context()
+            if selected is None or context is None:
+                return make_error("selected frame has no live execution context; select it again")
+            frame_session, context_id = context
+            cdp = self.client_for_session(frame_session)
+
+        if name == "hover":
+            uid = arguments["uid"]
+            if selected is not None:
+                from .native_snapshot import doc_token, parse_uid
+
+                token, _ = parse_uid(uid)
+                if token != doc_token(selected.frame_id, selected.loader_id):
+                    return make_error("hover UID does not belong to the selected frame")
+            send = self._send_for_uid(uid, cdp.send)
+            try:
+                point = await self._native_interactor.hover_async(send, uid)
+            except UidResolutionError as exc:
+                return make_error(await self._uid_failure(uid, exc))
+            return make_text(json.dumps({"uid": uid, "x": point[0], "y": point[1]}))
+        if name == "eval":
+            budget = self._rt.bounded_timeout(REQUEST_TIMEOUT_SECONDS)
+            timeout_ms = int((budget if budget is not None else REQUEST_TIMEOUT_SECONDS) * 1000)
+            result = await actions.evaluate(cdp, arguments["source"], arguments["await_promise"], context_id,
+                                            timeout_ms=timeout_ms, page_cdp=page_cdp)
+        elif name == "press":
+            await actions.focus_selected(cdp, context_id)
+            params, names = actions.key_event(arguments["key"], arguments.get("modifiers"))
+            await cdp.send("Input.dispatchKeyEvent", {"type": "keyDown", **params})
+            await cdp.send("Input.dispatchKeyEvent", {"type": "keyUp", **params, "text": ""})
+            result = {"key": arguments["key"], "modifiers": names, "dispatched": ["keyDown", "keyUp"]}
+        elif name == "type":
+            await actions.focus_selected(cdp, context_id)
+            await cdp.send("Input.insertText", {"text": arguments["text"]})
+            result = {"chars": len(arguments["text"]), "source": arguments["source"]}
+            if arguments.get("path") is not None:
+                result["path"] = arguments["path"]
+        elif name == "wait-text":
+            timeout_ms = arguments["timeout_ms"]
+            if self.deadline is not None:
+                timeout_ms = min(timeout_ms, max(0, int((self.deadline - time.monotonic()) * 1000)))
+            result = await actions.wait_text(cdp, arguments["substring"], timeout_ms, context_id)
+        else:
+            result = await actions.network_get(
+                cdp, arguments.get("url"), arguments.get("request_id"),
+                arguments.get("response_file"), selected.frame_id if selected else None,
+                selected.url if selected else None, self.caller_enabled,
+            )
+        return make_text(json.dumps(result))
 
     async def _uid_failure(self, uid: str, exc: UidResolutionError) -> str:
         """Why the UID did not resolve, saying which of the reasons it was.

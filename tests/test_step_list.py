@@ -118,6 +118,12 @@ class TestTheStepSurface:
             "storage": "storage get",
             "screencast": "screencast --dir /tmp/x",
             "wait": "wait --event Page.loadEventFired",
+            "eval": "eval '1+1'",
+            "press": "press Enter",
+            "hover": "hover --uid AB-1",
+            "type": "type hello",
+            "wait-text": "wait-text ready",
+            "network-get": "network-get --request-id 1.2",
         }.get(verb, verb)
         assert len(validate(argv + "\n")) == 1
 
@@ -218,6 +224,10 @@ class TestTheInvocationOwnsSomeFlags:
             ("screenshot --url example", "--url"),
             ("console-list --target 2", "--target"),
             ("Page.getFrameTree --target 1", "--target"),
+            *[(f"{verb} {flag} value", flag)
+              for verb in ("eval 1", "press Enter", "hover --uid AB-1", "type hello",
+                           "wait-text ready", "network-get --request-id 1.2")
+              for flag in ("--target", "--url", "--endpoint", "--targ", "--end")],
         ],
     )
     def test_a_step_may_not_carry_one(self, step, flag, no_instances):
@@ -289,10 +299,15 @@ class TestTheInvocationOwnsSomeFlags:
             validate("only-01 snapshot\n")
         assert "must not name an instance" in str(caught.value)
 
-    def test_the_instance_as_a_positional_is_caught(self, one_instance):
+    @pytest.mark.parametrize("phrase", [
+        "snapshot only-01", "eval only-01 1", "press only-01 Enter",
+        "hover only-01 --uid AB-1", "type only-01 hello", "type only-01 --file f",
+        "wait-text only-01 ready", "network-get only-01 --request-id 1.2",
+    ])
+    def test_the_instance_as_a_positional_is_caught(self, one_instance, phrase):
         """`snapshot only-01` parses: `instance` is a positional on every verb."""
         with pytest.raises(StepListError) as caught:
-            validate("snapshot only-01\n")
+            validate(phrase + "\n")
         assert "must not name an instance" in str(caught.value)
 
     def test_a_token_the_registry_does_not_know_is_not_an_instance(self, no_instances):
@@ -391,7 +406,7 @@ class TestValidationReachesTheCLIsOwnCode:
 
     def test_the_preconditions_are_cli_check_preconditions(self, monkeypatch, no_instances):
         seen = []
-        monkeypatch.setattr(cli, "check_preconditions", lambda args: seen.append(args.command))
+        monkeypatch.setattr(cli, "check_preconditions", lambda args, **_: seen.append(args.command))
         validate("snapshot\nclick\n")
         assert seen == ["snapshot", "click"], (
             "validation did not go through cli.check_preconditions; a step it "

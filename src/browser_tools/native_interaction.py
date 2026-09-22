@@ -382,6 +382,17 @@ class NativeInteractor:
         backend = await self.resolve_async(send, uid)
         return await drive_async(fill_steps(uid, backend, text), send)
 
+    async def hover_async(self, send: AsyncSend, uid: str) -> tuple[float, float]:
+        """Move the pointer to a live UID's content-box centre without clicking."""
+        backend = await self.resolve_async(send, uid)
+        described = await send(DOM_DESCRIBE_NODE, {"backendNodeId": backend})
+        if described.get("node", {}).get("nodeType") != ELEMENT_NODE_TYPE:
+            raise UidResolutionError(uid, "names a DOM node that is not an element")
+        await send(DOM_SCROLL_INTO_VIEW, {"backendNodeId": backend})
+        x, y = _box_centre(await send(DOM_GET_BOX_MODEL, {"backendNodeId": backend}))
+        await send(INPUT_DISPATCH_MOUSE, {"type": "mouseMoved", "x": x, "y": y, "buttons": 0})
+        return x, y
+
 
 __all__ = [
     "ELEMENT_NODE_TYPE",

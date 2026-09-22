@@ -39,3 +39,18 @@ def sample_mcp_response():
 def sample_error_response():
     """Sample MCP error response."""
     return {"error": {"code": -32600, "message": "Element not found"}}
+
+
+@pytest.fixture(scope="module")
+def curated_browser(tmp_path_factory):
+    """An isolated Chrome for the RFC-05 acceptance tests; never the user's tabs."""
+    root = tmp_path_factory.mktemp("curated-browser")
+    registry = str(root / "registry.json")
+    try:
+        instance = lifecycle.launch(headless=True, registry_path=registry)
+    except lifecycle.LifecycleError as exc:
+        pytest.skip(f"cannot launch isolated Chrome: {exc}")
+    try:
+        yield f"http://127.0.0.1:{instance.port}"
+    finally:
+        lifecycle.stop(instance=instance.name, registry_path=registry)

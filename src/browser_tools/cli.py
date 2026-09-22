@@ -60,6 +60,12 @@ _KNOWN_VERBS = {
     "snapshot",
     "click",
     "fill",
+    "eval",
+    "press",
+    "hover",
+    "type",
+    "wait-text",
+    "network-get",
     "wait-idle",
     "wait-stable",
     "detect",
@@ -355,6 +361,7 @@ def _add_curated_verbs(
     optional at the argparse layer and validated in ``_run`` so the parser still
     accepts the bare verb (the skill drift test parses ``VERB`` alone).
     """
+    _add_rfc05_verbs(sub)
     snapshot = sub.add_parser("snapshot", help="Native UID accessibility tree")
     snapshot.add_argument(
         "instance", nargs="?", metavar="INSTANCE", help="Instance (omit if only one)"
@@ -584,10 +591,75 @@ def _browser_args_from_remainder(remainder: list[str] | None) -> list[str]:
 
 
 #: Verbs whose ``--target`` and ``--url`` name the same thing two ways.
-_TARGET_OR_URL_VERBS = frozenset({"attach", "wait", "console-list", "network-list", "run"})
+_TARGET_OR_URL_VERBS = frozenset({"attach", "wait", "console-list", "network-list", "run",
+                                "eval", "press", "hover", "type", "wait-text"})
 
 
-def check_preconditions(args: argparse.Namespace) -> None:
+def _add_rfc05_verbs(
+    sub: argparse._SubParsersAction[argparse.ArgumentParser],  # pyright: ignore[reportPrivateUsage]
+) -> None:
+    for name, help_text in (
+        ("eval", "Evaluate JavaScript; throws fail with exit 1"),
+        ("press", "Press and release a key with native default actions"),
+        ("hover", "Move the native pointer over a snapshot UID"),
+        ("type", "Insert text at the caret without key events"),
+        ("wait-text", "Wait for a substring in rendered text"),
+        ("network-get", "Reload and fetch the last matching response in five seconds"),
+    ):
+        parser = sub.add_parser(name, help=help_text)
+        if name in {"eval", "press", "type", "wait-text"}:
+            parser.add_argument("operands", nargs="*", metavar="ARG")
+            parser.set_defaults(instance=None)
+        else:
+            parser.add_argument("instance", nargs="?", metavar="INSTANCE")
+        parser.add_argument("--target", metavar="SPEC")
+        parser.add_argument("--url", metavar="SUB", help=(
+            "Response URL substring" if name == "network-get" else "Page URL substring"
+        ))
+        _add_endpoint(parser)
+        _add_frames(parser)
+        if name == "eval":
+            parser.add_argument("--await", dest="await_promise", action="store_true")
+        elif name == "press":
+            parser.add_argument("--modifiers", metavar="NAME[,NAME...]")
+        elif name == "hover":
+            parser.add_argument("--uid", metavar="UID")
+        elif name == "type":
+            parser.add_argument("--file", metavar="FILE")
+        elif name == "wait-text":
+            parser.add_argument("--timeout-ms", type=int, default=curated.DEFAULT_WAIT_TIMEOUT_MS)
+        else:
+            parser.add_argument("--request-id", metavar="ID")
+            parser.add_argument("--response-file", metavar="PATH")
+
+
+def _rfc05_operands(args: argparse.Namespace, known_instances: set[str] | None) -> None:
+    if not hasattr(args, "operands"):
+        return
+    operands: list[str] = args.operands
+    if len(operands) > 2:
+        raise UsageError(f"{args.command} takes one operand and an optional instance")
+    inline = None
+    value = None
+    if len(operands) == 2:
+        inline, value = operands
+    elif operands:
+        value = operands[0]
+        if args.command == "type" and args.file is not None:
+            known = known_instances
+            if known is None:
+                known = {item.name for item in lifecycle.read_instances(
+                    registry_path=lifecycle.registry_path_from_env()
+                )}
+            if value in known:
+                inline, value = value, None
+    args.instance = _one_instance(args.instance, inline)
+    field = {"eval": "source", "press": "key", "type": "text", "wait-text": "substring"}[args.command]
+    setattr(args, field, value)
+    delattr(args, "operands")
+
+
+def check_preconditions(args: argparse.Namespace, *, known_instances: set[str] | None = None) -> None:
     """Every per-verb requirement ``argparse`` deliberately leaves optional.
 
     ``build_parser`` accepts a bare verb on purpose, so ``click`` with no
@@ -601,6 +673,24 @@ def check_preconditions(args: argparse.Namespace) -> None:
     carries everything it needs.
     """
     command = getattr(args, "command", None)
+    _rfc05_operands(args, known_instances)
+
+    if command in {"eval", "press", "wait-text"}:
+        field = {"eval": "source", "press": "key", "wait-text": "substring"}[command]
+        if getattr(args, field) is None:
+            raise UsageError(f"{command} requires {field}")
+    if command == "press":
+        from .curated_runtime import key_event
+
+        key_event(args.key, args.modifiers)
+    if command == "hover" and not args.uid:
+        raise UsageError("hover requires --uid UID from a prior snapshot")
+    if command == "type" and (args.text is None) == (args.file is None):
+        raise UsageError("type requires exactly one of text or --file FILE")
+    if command == "wait-text" and args.timeout_ms < 0:
+        raise UsageError("wait-text --timeout-ms must be non-negative")
+    if command == "network-get" and (args.url is None) == (args.request_id is None):
+        raise UsageError("network-get requires exactly one of --url SUB or --request-id ID")
 
     names_the_target_twice = (
         getattr(args, "target", None) is not None and getattr(args, "url", None) is not None
@@ -796,6 +886,12 @@ _CURATED_COMMANDS = frozenset(
         "snapshot",
         "click",
         "fill",
+        "eval",
+        "press",
+        "hover",
+        "type",
+        "wait-text",
+        "network-get",
         "wait-idle",
         "wait-stable",
         "detect",
@@ -872,6 +968,24 @@ def _curated_envelope(
     operational failures the ``curated`` functions raise are ``LifecycleError``
     (exit 1), handled by the caller.
     """
+    if args.command in {"eval", "press", "hover", "type", "wait-text", "network-get"}:
+        common: dict[str, Any] = {
+            "instance": args.instance, "target": args.target, "url": args.url,
+            "registry_path": registry_path, "endpoint": args.endpoint, "handler": handler,
+            "all_frames": getattr(args, "frames", "page") == "all",
+        }
+        if args.command == "eval":
+            return curated.eval_js(source=args.source, await_promise=args.await_promise, **common)
+        if args.command == "press":
+            return curated.press(key=args.key, modifiers=args.modifiers, **common)
+        if args.command == "hover":
+            return curated.hover(uid=args.uid, **common)
+        if args.command == "type":
+            return curated.type_text(text=args.text, file=args.file, **common)
+        if args.command == "wait-text":
+            return curated.wait_text(substring=args.substring, timeout_ms=args.timeout_ms, **common)
+        return curated.network_get(request_id=args.request_id, response_file=args.response_file, **common)
+
     if args.command == "snapshot":
         return curated.snapshot(
             instance=args.instance,

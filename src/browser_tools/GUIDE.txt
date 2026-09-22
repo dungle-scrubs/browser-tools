@@ -145,6 +145,77 @@ CURATED VERBS
       Wait for network idle (default 5000ms deadline, 500ms quiet window), or
       for the DOM to stop changing (5000ms, 300ms).
 
+  eval '<js>' [--await] [--target SPEC | --url SUB]
+      Evaluate JavaScript by value. Statement bodies run inside an IIFE and
+      return their last expression's value. --await waits for a Promise;
+      it also accepts a non-Promise. The result has value, type, url and
+      targetId. A JavaScript exception is exit 1, with its description on
+      stderr and nothing on stdout. Raw Runtime.evaluate does not enforce
+      that exception contract. Examples:
+        bt eval 'document.title'
+        bt eval 'const n = 20; n * 2'
+        bt eval 'Promise.resolve({ready: true})' --await
+
+  press <key> [--modifiers NAME[,NAME...]] [--target SPEC | --url SUB]
+      Dispatch keyDown then keyUp, including native default actions. <key>
+      is one printable character, Enter, Tab, Escape, Backspace, Delete,
+      ArrowLeft, ArrowRight, ArrowUp, ArrowDown, Home, End, PageUp, PageDown,
+      or F1 through F12. Modifiers are Alt, Control, Meta, Shift. Unknown
+      names are exit 2 with the valid list. Example: bt press Enter
+      Result: {"key":"Enter","modifiers":[],"dispatched":["keyDown","keyUp"]}
+
+  hover --uid UID [--target SPEC | --url SUB]
+      Move the native pointer to the UID's box centre, setting CSS :hover.
+      Synthetic mouseover from JavaScript does not set that CSS state.
+      Example: bt hover --uid 2F0B815AF686-32
+      Result: {"uid":"2F0B815AF686-32","x":412.5,"y":208.0}
+
+  type (<text> | --file FILE) [--target SPEC | --url SUB]
+      Insert text at the caret with one Input.insertText; keep existing text.
+      Exactly one source is required. --file reads UTF-8, and --file - reads
+      stdin. It fires beforeinput and input, but no key events. Use press
+      when a caller needs key events. Examples:
+        bt type 'hello'
+        bt type --file ./message.txt
+        cat ./message.txt | bt type --file -
+      Result: {"chars":123,"source":"file","path":"/absolute/message.txt"}
+      Positional text uses source "text" and has no path. Stdin's path is "-".
+
+  wait-text <substring> [--timeout-ms MS] [--target SPEC | --url SUB]
+      Wait for rendered body text to contain the substring. Default 5000ms.
+      Checks present text and installs a MutationObserver in one JS task,
+      so text inserted by script during setup is not lost. Timeout is exit
+      1 with stderr only. Example: bt wait-text 'Order placed' --timeout-ms 8000
+      Result: {"found":true,"substring":"Order placed","waitedMs":812}
+      Choose wait-idle for "has network activity stopped?", wait-stable for
+      "has the DOM stopped changing?", and wait-text for "is this text here?".
+
+  network-get (--url SUB | --request-id ID) [--response-file PATH] [--target SPEC]
+      Subscribe and enable Network, reload the selected page, collect for
+      five seconds, then fetch the last matching response on that same
+      session. A selected frame is navigated to its current URL instead.
+      The reload is intentional: callers need no separately timed trigger.
+      Requests started only by later interactions are outside this window.
+      --url selects a response URL, not the page. Exactly one selector is
+      required; matched reports the number of matching responses. An absent,
+      failed or incomplete response is exit 1. An expired request id reports
+      Chrome's CDP error. IDs from another invocation cannot retrieve bodies.
+      Example: bt network-get --url /api/orders --response-file ./orders.json
+      Result fields: requestId, url, status, mimeType, bytes, matched,
+      base64Encoded, and either body, responseFile or bodyOmitted.
+      --response-file writes decoded bytes and reports an absolute responseFile.
+      Without it, UTF-8 text of at most 1 MiB is inline as body. Larger or
+      base64-encoded bodies have bodyOmitted naming --response-file as the
+      remedy; the body is never truncated. network-list reports a window,
+      not a buffer, and collects metadata without reloading or fetching bodies.
+      Its request ids cannot be carried into a separate network-get invocation.
+
+      All six verbs are Step List steps and share the run's deadline and
+      frame selection. A step cannot name an instance, --endpoint, --target
+      or --url, including network-get's response selector. Its step form
+      therefore uses --request-id. This restriction comes from RFC-05's
+      amendment to RFC-03. Use standalone network-get for URL matching.
+
   detect [--wait SECONDS | --no-wait]
       Run interstitial detection against the current page. --wait bounds the
       retry for a self-clearing challenge; --no-wait reports the current state
@@ -272,6 +343,7 @@ RUNNING MANY STEPS IN ONE INVOCATION
       anything. Where you need a decision, read the output and run again.
 
       A STEP IS A VERB, NOT AN INVOCATION. Steps may be: snapshot, click, fill,
+      eval, press, hover, type, wait-text, network-get,
       wait-idle, wait-stable, wait, detect, console-list, network-list, frames,
       storage get, screenshot, screencast, and any raw Domain.method. A step may
       NOT name an instance, --endpoint, --target or --url: those belong to the
@@ -422,11 +494,11 @@ NO CURATED VERB? SEND THE PROTOCOL
   A DOM nodeId from DOM.querySelector will NOT work across invocations; see
   the next section. The backendNodeId inside a UID will.
 
-  TYPE KEYSTROKES. `fill --uid` is the normal path. Use these when the field
-  needs real key events, such as a key handler or a contenteditable:
+  TYPE KEYSTROKES. Use type for prose at the caret and press for native keys
+  and their default actions, such as submitting a form:
 
-    bt Input.insertText '{"text": "hello"}'
-    bt Input.dispatchKeyEvent '{"type": "keyDown", "key": "Enter"}'
+    bt type 'hello'
+    bt press Enter
 
   SET THE VIEWPORT, or emulate a phone:
 
