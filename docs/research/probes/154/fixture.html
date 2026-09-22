@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>trace fixture</title>
+<link rel="stylesheet" href="/slow.css">
+<style>
+  body { font: 16px system-ui; margin: 0; padding: 24px; }
+  #hero { width: 600px; height: 320px; background: #446; color: #fff;
+          display: flex; align-items: center; justify-content: center;
+          font-size: 40px; }
+  #shifter { height: 0; background: #fa0; transition: none; }
+</style>
+</head>
+<body>
+<div id="hero">LARGEST CONTENTFUL PAINT</div>
+<div id="shifter"></div>
+<p id="log">start</p>
+<script>
+// A long task, so the trace carries one.
+(function longTask() {
+  const end = performance.now() + 120;
+  let n = 0;
+  while (performance.now() < end) { n += Math.sqrt(n + 1); }
+  window.__longTaskResult = n;
+})();
+
+// A layout shift after paint, so CLSCulprits has something.
+setTimeout(() => {
+  document.getElementById('shifter').style.height = '180px';
+  document.getElementById('log').textContent = 'shifted';
+}, 400);
+
+// Some user timing marks.
+performance.mark('fixture-start');
+setTimeout(() => performance.mark('fixture-late'), 600);
+</script>
+</body>
+</html>

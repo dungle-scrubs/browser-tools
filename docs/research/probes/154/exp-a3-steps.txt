@@ -1,0 +1,6 @@
+Tracing.start '{"traceConfig": {"includedCategories": ["devtools.timeline", "blink.user_timing", "loading"], "recordMode": "recordUntilFull"}, "transferMode": "ReturnAsStream", "streamFormat": "json"}'
+Page.navigate '{"url": "http://127.0.0.1:17541/fixture.html"}'
+wait-idle
+Tracing.end '{}'
+wait --event Tracing.tracingComplete --timeout 15
+IO.read '{"handle": "1", "size": 1048576}'

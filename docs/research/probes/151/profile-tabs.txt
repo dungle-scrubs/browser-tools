@@ -1,0 +1,246 @@
+[
+  {
+    "name": "151-04",
+    "port": 9234,
+    "alive": true,
+    "engine": "chrome",
+    "profile": "lh-test",
+    "supervisor": null,
+    "targets": [
+      {
+        "id": "C8C2A4C3",
+        "full_id": "C8C2A4C3E258EFCCBBC840689DEF7CC5",
+        "index": 1,
+        "url": "https://httpbin.org/cookies",
+        "title": "httpbin.org/cookies"
+      }
+    ]
+  }
+]
+[
+  {
+    "name": "151-04",
+    "port": 9234,
+    "alive": true,
+    "engine": "chrome",
+    "profile": "lh-test",
+    "supervisor": null,
+    "targets": [
+      {
+        "id": "C8C2A4C3",
+        "full_id": "C8C2A4C3E258EFCCBBC840689DEF7CC5",
+        "index": 1,
+        "url": "https://httpbin.org/cookies",
+        "title": "httpbin.org/cookies"
+      }
+    ]
+  }
+]
+[
+  {
+    "name": "151-04",
+    "port": 9234,
+    "alive": true,
+    "engine": "chrome",
+    "profile": "lh-test",
+    "supervisor": null,
+    "targets": [
+      {
+        "id": "C8C2A4C3",
+        "full_id": "C8C2A4C3E258EFCCBBC840689DEF7CC5",
+        "index": 1,
+        "url": "https://httpbin.org/cookies",
+        "title": "httpbin.org/cookies"
+      },
+      {
+        "id": "D7552944",
+        "full_id": "D7552944027D1CFAAE8160C068412786",
+        "index": 2,
+        "url": "about:blank",
+        "title": "about:blank"
+      }
+    ]
+  }
+]
+[
+  {
+    "name": "151-04",
+    "port": 9234,
+    "alive": true,
+    "engine": "chrome",
+    "profile": "lh-test",
+    "supervisor": null,
+    "targets": [
+      {
+        "id": "C8C2A4C3",
+        "full_id": "C8C2A4C3E258EFCCBBC840689DEF7CC5",
+        "index": 1,
+        "url": "https://httpbin.org/cookies",
+        "title": "httpbin.org/cookies"
+      },
+      {
+        "id": "D7552944",
+        "full_id": "D7552944027D1CFAAE8160C068412786",
+        "index": 2,
+        "url": "https://httpbin.org/cookies",
+        "title": "about:blank"
+      }
+    ]
+  }
+]
+[
+  {
+    "name": "151-04",
+    "port": 9234,
+    "alive": true,
+    "engine": "chrome",
+    "profile": "lh-test",
+    "supervisor": null,
+    "targets": [
+      {
+        "id": "C8C2A4C3",
+        "full_id": "C8C2A4C3E258EFCCBBC840689DEF7CC5",
+        "index": 1,
+        "url": "https://httpbin.org/cookies",
+        "title": "httpbin.org/cookies"
+      },
+      {
+        "id": "D7552944",
+        "full_id": "D7552944027D1CFAAE8160C068412786",
+        "index": 2,
+        "url": "https://httpbin.org/cookies",
+        "title": "about:blank"
+      }
+    ]
+  }
+]
+[
+  {
+    "name": "151-04",
+    "port": 9234,
+    "alive": true,
+    "engine": "chrome",
+    "profile": "lh-test",
+    "supervisor": null,
+    "targets": [
+      {
+        "id": "C8C2A4C3",
+        "full_id": "C8C2A4C3E258EFCCBBC840689DEF7CC5",
+        "index": 1,
+        "url": "https://httpbin.org/cookies",
+        "title": "httpbin.org/cookies"
+      },
+      {
+        "id": "D7552944",
+        "full_id": "D7552944027D1CFAAE8160C068412786",
+        "index": 2,
+        "url": "https://httpbin.org/cookies",
+        "title": "about:blank"
+      }
+    ]
+  }
+]
+[
+  {
+    "name": "151-04",
+    "port": 9234,
+    "alive": true,
+    "engine": "chrome",
+    "profile": "lh-test",
+    "supervisor": null,
+    "targets": [
+      {
+        "id": "C8C2A4C3",
+        "full_id": "C8C2A4C3E258EFCCBBC840689DEF7CC5",
+        "index": 1,
+        "url": "https://httpbin.org/cookies",
+        "title": "httpbin.org/cookies"
+      },
+      {
+        "id": "D7552944",
+        "full_id": "D7552944027D1CFAAE8160C068412786",
+        "index": 2,
+        "url": "https://httpbin.org/cookies",
+        "title": "httpbin.org/cookies"
+      }
+    ]
+  }
+]
+[
+  {
+    "name": "151-04",
+    "port": 9234,
+    "alive": true,
+    "engine": "chrome",
+    "profile": "lh-test",
+    "supervisor": null,
+    "targets": [
+      {
+        "id": "C8C2A4C3",
+        "full_id": "C8C2A4C3E258EFCCBBC840689DEF7CC5",
+        "index": 1,
+        "url": "https://httpbin.org/cookies",
+        "title": "httpbin.org/cookies"
+      },
+      {
+        "id": "D7552944",
+        "full_id": "D7552944027D1CFAAE8160C068412786",
+        "index": 2,
+        "url": "https://httpbin.org/cookies",
+        "title": "httpbin.org/cookies"
+      }
+    ]
+  }
+]
+[
+  {
+    "name": "151-04",
+    "port": 9234,
+    "alive": true,
+    "engine": "chrome",
+    "profile": "lh-test",
+    "supervisor": null,
+    "targets": [
+      {
+        "id": "C8C2A4C3",
+        "full_id": "C8C2A4C3E258EFCCBBC840689DEF7CC5",
+        "index": 1,
+        "url": "https://httpbin.org/cookies",
+        "title": "httpbin.org/cookies"
+      },
+      {
+        "id": "D7552944",
+        "full_id": "D7552944027D1CFAAE8160C068412786",
+        "index": 2,
+        "url": "https://httpbin.org/cookies",
+        "title": "httpbin.org/cookies"
+      }
+    ]
+  }
+]
+[
+  {
+    "name": "151-04",
+    "port": 9234,
+    "alive": true,
+    "engine": "chrome",
+    "profile": "lh-test",
+    "supervisor": null,
+    "targets": [
+      {
+        "id": "C8C2A4C3",
+        "full_id": "C8C2A4C3E258EFCCBBC840689DEF7CC5",
+        "index": 1,
+        "url": "https://httpbin.org/cookies",
+        "title": "httpbin.org/cookies"
+      },
+      {
+        "id": "D7552944",
+        "full_id": "D7552944027D1CFAAE8160C068412786",
+        "index": 2,
+        "url": "https://httpbin.org/cookies",
+        "title": "httpbin.org/cookies"
+      }
+    ]
+  }
+]

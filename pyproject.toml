@@ -128,7 +128,10 @@ target-version = "py313"
 # rules"): only an import rewrite is permitted inside it, so it is excluded from
 # lint rather than reformatted to this project's rules. force-exclude keeps the
 # exclusion in effect even when the path is passed explicitly on the CLI.
-extend-exclude = ["src/browser_tools/core"]
+# docs/research/probes/ holds the scripts behind RFC-05's measurements, committed
+# as evidence exactly as they were run. Reformatting them would break that, so
+# they are excluded from lint rather than tidied.
+extend-exclude = ["src/browser_tools/core", "docs/research/probes"]
 force-exclude = true
 
 [tool.ruff.lint]
