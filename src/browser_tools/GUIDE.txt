@@ -145,6 +145,94 @@ CURATED VERBS
       Wait for network idle (default 5000ms deadline, 500ms quiet window), or
       for the DOM to stop changing (5000ms, 300ms).
 
+  eval '<js>' [--await] [--target SPEC | --url SUB]
+      Evaluate JavaScript by value. Statement bodies run inside an IIFE and
+      return their last expression's value. --await waits for a Promise;
+      it also accepts a non-Promise. The result has value, type, url and
+      targetId. A JavaScript exception is exit 1, with its description on
+      stderr and nothing on stdout. Raw Runtime.evaluate does not enforce
+      that exception contract.
+
+      --await awaits the value the expression returns. It does not make the
+      body an async function, so a top-level await is a SyntaxError even with
+      --await. Wrap it in an async arrow and await the call instead.
+      Examples:
+        bt eval 'document.title'
+        bt eval 'const n = 20; n * 2'
+        bt eval 'Promise.resolve({ready: true})' --await
+        bt eval '(async () => (await fetch("/api")).status)()' --await
+
+  press <key> [--modifiers NAME[,NAME...]] [--target SPEC | --url SUB]
+      Dispatch keyDown then keyUp, including native default actions. <key>
+      is one printable character, Enter, Tab, Escape, Backspace, Delete,
+      ArrowLeft, ArrowRight, ArrowUp, ArrowDown, Home, End, PageUp, PageDown,
+      or F1 through F12. Modifiers are Alt, Control, Meta, Shift. Unknown
+      names are exit 2 with the valid list. Example: bt press Enter
+      Result: {"key":"Enter","modifiers":[],"dispatched":["keyDown","keyUp"]}
+
+  hover --uid UID [--target SPEC | --url SUB]
+      Move the native pointer to the UID's box centre, setting CSS :hover.
+      Synthetic mouseover from JavaScript does not set that CSS state.
+      Example: bt hover --uid 2F0B815AF686-32
+      Result: {"uid":"2F0B815AF686-32","x":412.5,"y":208.0}
+
+  type (<text> | --file FILE) [--target SPEC | --url SUB]
+      Insert text at the caret with one Input.insertText; keep existing text.
+      Exactly one source is required. --file reads UTF-8, and --file - reads
+      stdin. It fires beforeinput and input, but no key events. Use press
+      when a caller needs key events. Examples:
+        bt type 'hello'
+        bt type --file ./message.txt
+        cat ./message.txt | bt type --file -
+      Result: {"chars":123,"source":"file","path":"/absolute/message.txt"}
+      Positional text uses source "text" and has no path. Stdin's path is "-".
+
+  wait-text <substring> [--timeout-ms MS] [--target SPEC | --url SUB]
+      Wait for rendered body text to contain the substring. Default 5000ms.
+      Checks present text and installs a MutationObserver in one JS task,
+      so text inserted by script during setup is not lost. Timeout is exit
+      1 with stderr only. Example: bt wait-text 'Order placed' --timeout-ms 8000
+      Result: {"found":true,"substring":"Order placed","waitedMs":812}
+      Choose wait-idle for "has network activity stopped?", wait-stable for
+      "has the DOM stopped changing?", and wait-text for "is this text here?".
+
+  network-get (--url SUB | --request-id ID) [--response-file PATH] [--target SPEC]
+              [--duration SECONDS] [--reload]
+      --url selects a response URL, not the page. Exactly one selector is
+      required. A run enables Network before step 1 and retains responses
+      until the run ends. Use network-get --url after the step that triggers
+      a request; it reads that traffic without reloading or losing page state.
+      A Step List cannot substitute an earlier result, so URL matching is the
+      usual step form. --request-id works only for an id in this session.
+
+      Standalone, there is no run history. Subscribe and wait for new traffic
+      for at most --duration seconds (default 2, matching network-list).
+      Use --reload to trigger page-load requests after subscribing. A selected
+      frame is navigated to its current URL instead. Reload is standalone-only.
+      Without --reload, the caller or page must trigger traffic during the window.
+      In a run, --duration bounds waiting for a missing or unfinished response;
+      the whole-run deadline can end that wait sooner. Zero checks only what
+      is already buffered. Duration must be finite and non-negative.
+
+      Return as soon as the last matching response observed so far has finished.
+      Do not wait out the window to gather more matches. matched counts the
+      matching responses seen at lookup, including earlier run traffic.
+      An absent, failed or incomplete response is exit 1. Chrome can evict a
+      body even while metadata remains; fetching it then reports the CDP error.
+      IDs from another invocation cannot retrieve bodies.
+      Example: bt network-get --url /api/orders --reload --response-file ./orders.json
+      Result fields: requestId, url, status, mimeType, bytes, matched,
+      base64Encoded, and either body, responseFile or bodyOmitted.
+      --response-file writes decoded bytes and reports an absolute responseFile.
+      Without it, UTF-8 text of at most 1 MiB is inline as body. Larger or
+      base64-encoded bodies have bodyOmitted naming --response-file as the
+      remedy; the body is never truncated. network-list still reports metadata
+      from its own window. In a run, that traffic also enters the run buffer.
+
+      All six verbs are Step List steps and share the run's deadline and
+      frame selection. A step cannot name an instance, --endpoint, --target
+      or a page-selecting --url. network-get's response-selecting --url is allowed.
+
   detect [--wait SECONDS | --no-wait]
       Run interstitial detection against the current page. --wait bounds the
       retry for a self-clearing challenge; --no-wait reports the current state
@@ -272,6 +360,7 @@ RUNNING MANY STEPS IN ONE INVOCATION
       anything. Where you need a decision, read the output and run again.
 
       A STEP IS A VERB, NOT AN INVOCATION. Steps may be: snapshot, click, fill,
+      eval, press, hover, type, wait-text, network-get,
       wait-idle, wait-stable, wait, detect, console-list, network-list, frames,
       storage get, screenshot, screencast, and any raw Domain.method. A step may
       NOT name an instance, --endpoint, --target or --url: those belong to the
@@ -306,31 +395,25 @@ RUNNING MANY STEPS IN ONE INVOCATION
       `load` - the new document has stopped fetching - which is the question
       this paragraph is about.
 
-      EVERYTHING ELSE BEHAVES AS IT WOULD ALONE, WITH ONE EXCEPTION. A step
-      inside a run does what the same command does on its own. Domains a step
-      turns on are turned off when that step ends, so a second `network-list`
-      in one run sees what the first one saw.
+      DOMAIN OWNERSHIP. Domains a step turns on are turned off when that
+      step ends, except Page, Runtime and Network. The run needs Page and
+      Runtime to track frames, and Network to retain responses across steps.
+      A step does not get a first enable on these domains.
+      `wait --event Runtime.executionContextCreated` after any step that
+      touched Runtime reports nothing, where the same command on its own
+      reports existing contexts; console-list has the same limitation.
+      Network does not replay prior responses. wait and network-list see only
+      events in their own windows; network-get also sees the run's buffer.
+      Every run pays for network events, retained metadata and Chrome's body
+      storage, even when no step asks for a response body. Chrome's retention
+      limits still apply; large traffic volumes can evict bodies.
 
-      The exception is the Page and Runtime domains. A run needs them on
-      throughout to track frames, so they are never turned off between steps.
-      A step that relies on being the first to turn one of them on does not
-      get that. `wait --event Runtime.executionContextCreated` after any step
-      that touched Runtime reports nothing, where the same command on its own
-      reports the contexts that already exist; `console-list` is in the same
-      position, because it turns Runtime on too. Run either one on its own.
-
-      A raw step you write yourself is yours to undo. `Network.enable {}`
-      stays on until a later step turns it off; the rule above covers only the
-      domains a verb turns on for you. It wins over that rule where the two
-      meet: a `network-list` step after a hand-written `Network.enable` leaves
-      the domain on, because turning it off would make your step a no-op. The
-      price is that the `network-list` is not the first enable, the same
-      position Page and Runtime are already in.
-
-      The two exceptions are the run's own: `Page.disable` and
-      `Runtime.disable` are usage errors as steps (exit 2), because turning
-      either off breaks every step after it without failing any of them. Run
-      either on its own, outside a run.
+      A raw enable you write yourself is yours to undo. `Log.enable {}` stays
+      on until a later step turns it off. A curated step leaves a domain you
+      enabled on, even when the normal cleanup rule would disable it.
+      The run-owned domains cannot be disabled by a step: Page.disable,
+      Runtime.disable and Network.disable are usage errors (exit 2).
+      Run those commands on their own, outside a run.
 
       UIDS ARE UNCHANGED. A UID is still valid until the page navigates, no
       longer and no shorter. One process does not extend it. Because no step can
@@ -422,11 +505,11 @@ NO CURATED VERB? SEND THE PROTOCOL
   A DOM nodeId from DOM.querySelector will NOT work across invocations; see
   the next section. The backendNodeId inside a UID will.
 
-  TYPE KEYSTROKES. `fill --uid` is the normal path. Use these when the field
-  needs real key events, such as a key handler or a contenteditable:
+  TYPE KEYSTROKES. Use type for prose at the caret and press for native keys
+  and their default actions, such as submitting a form:
 
-    bt Input.insertText '{"text": "hello"}'
-    bt Input.dispatchKeyEvent '{"type": "keyDown", "key": "Enter"}'
+    bt type 'hello'
+    bt press Enter
 
   SET THE VIEWPORT, or emulate a phone:
 

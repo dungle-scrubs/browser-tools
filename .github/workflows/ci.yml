@@ -3,8 +3,11 @@ name: CI
 on:
   push:
     branches: [main, master]
+  # Every pull request, not only those targeting a default branch. A stacked
+  # pull request whose base is another feature branch is still code that has to
+  # pass before anyone merges it, and with a branch filter here it silently got
+  # no lint and no tests at all.
   pull_request:
-    branches: [main, master]
 
 jobs:
   lint:

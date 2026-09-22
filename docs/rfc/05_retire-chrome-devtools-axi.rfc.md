@@ -208,11 +208,13 @@ Domain.method '{...json params...}'
 The six curated verbs from Design 1 are steps. Each drives the attached browser
 within its own step and returns a value, which is the property the list tests
 for, and every RFC-03 rule applies to them unchanged: a step MUST NOT name an
-instance, `--endpoint`, `--target` or `--url`, because the run resolves those
+instance, `--endpoint`, `--target` or a page-selecting `--url`, because the run resolves those
 once; frame selection set by an earlier step governs them; the whole-run
 deadline clamps each one's own wait. `network-get` as a step writes its body to
 `--response-file` or reports it inline under the same size rule as the standalone
-verb, since no later step can read its output.
+verb, since no later step can read its output. Its `--url` selects a response
+and is allowed in a step. `--reload` is standalone-only. Network joins Page
+and Runtime as a run-owned domain; a raw `Network.disable` step is refused.
 
 `heap` is a step. It completes inside its own step and returns a summary.
 
@@ -234,6 +236,7 @@ bt hover [INSTANCE] --uid UID [--target ...]
 bt type [INSTANCE] (<text> | --file FILE) [--target ...]
 bt wait-text [INSTANCE] <substring> [--timeout-ms MS] [--target ...]
 bt network-get [INSTANCE] (--url SUB | --request-id ID) [--response-file PATH]
+               [--duration SECONDS] [--reload] [--target SPEC] [--endpoint URL]
 ```
 
 Every one prints a single JSON object on stdout and exits 0 on success. The
@@ -321,10 +324,28 @@ reachability rather than ergonomics. A response body needs
 session, and inside a run no step can read the `network-list` step's output.
 Measured: a real requestId taken from one invocation returns
 `CDP error -32000: No resource with given identifier found` from the next. The
-verb enables, collects and fetches inside one invocation.
+run owns Network. Before step 1, it subscribes and enables Network, retaining
+response metadata and completion state on the handler's runtime until the run
+ends. A later `network-get --url` reads traffic caused by an earlier step,
+without reloading the page. Frame selection limits matching to that frame;
+attached Frame Sessions have their own response buffers.
+
+Standalone, `network-get` opens its own observation window. `--duration`
+defaults to 2 seconds, matching `network-list`, and must be finite and
+non-negative. `--reload` optionally triggers page-load traffic after subscribing;
+a selected frame is navigated to its current URL. Reload is never implicit
+and is refused in a Step List. In a run, duration bounds waiting for a missing
+or incomplete match, subject to the run deadline. Zero checks buffered state.
+
+Both forms return when a matching response finishes, without a fixed sleep.
+The last matching response observed so far wins; this does not promise to
+collect later matches for the full duration. Every run now pays for Network
+events and retained metadata even if it never calls `network-get`. Bodies stay
+in Chrome, whose retention limits and renderer lifetime still apply. A retained
+metadata entry does not guarantee that Chrome can still supply its body.
 
 Exactly one of `--url` and `--request-id` is required; neither or both is
-exit 2. `--url` matching more than one response takes the last and reports
+exit 2. `--url` matching more than one observed response takes the last and reports
 `matched` so the caller can see it was ambiguous.
 
 With `--response-file`, the body is written there and the document reports the
@@ -849,7 +870,11 @@ The `~/dev/firstmate` clone stays. Deleting it is out of scope.
 | `bt type` with neither `<text>` nor `--file`, or both | exit 2. |
 | `bt wait-text` and the deadline passes | diagnostic on stderr, exit 1, nothing on stdout, matching `wait`. |
 | `bt network-get` with neither selector, or both | exit 2. |
-| `bt network-get` and the response body is gone | exit 1 with the CDP error, since the body lives only as long as the session. |
+| `bt network-get` with negative or non-finite `--duration` | exit 2 before connecting or running step 1. |
+| `network-get --reload` in a Step List | exit 2 before step 1; reload is standalone-only. |
+| `bt network-get` with no match or an unfinished response at the deadline | exit 1 with a diagnostic; the run deadline may end the wait sooner. |
+| `bt network-get` with a failed matching request | exit 1 naming the loading error. |
+| `bt network-get` and the response body is gone | exit 1 with the CDP error. Bodies cannot cross invocations and Chrome may evict them within a run. |
 | `bt network-get` and the body is over 1 MiB or base64 | written to `--response-file` when given; otherwise omitted with `bodyOmitted` naming the remedy. Never truncated. |
 | `bt trace` with neither `--duration` nor `--steps` | exit 2. An unbounded trace is a hang. |
 | `bt trace --steps` and the step list fails validation | exit 2 before `Tracing.start`; no output file is created. |
@@ -954,6 +979,7 @@ machine-made decision names its undo path in its ticket.
 | 11 | Instance naming: documentation now, `--name` on a named trigger | #158 | machine-made, interim |
 | 12 | Attach: thin primitive, no `launch --auto-connect`, gated on verification | #159 | machine-made |
 | 13 | Amendments to RFC-03, scope and step surface | this RFC | machine-made |
+| 14 | Settle the network-get window question: the run owns Network and buffers responses before step 1; standalone observes for at most --duration (default 2 seconds), with reload opt-in only | this RFC | driving dev |
 
 Row 13 is new in version 2 and is the most consequential machine-made row: it
 changes an accepted document. Its undo is to withdraw `heap` and `insights`,

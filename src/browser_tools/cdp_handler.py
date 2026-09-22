@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import json
 import logging
 import threading
 import time
@@ -19,6 +20,8 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from collections.abc import Generator
+
+    from .curated_runtime import ResponseBuffer
 
 from .core.attach import AmbiguousTargetError, TargetNotFoundError
 from .lifecycle import LifecycleError
@@ -32,6 +35,7 @@ def _running_loop() -> asyncio.AbstractEventLoop | None:
         return asyncio.get_running_loop()
     except RuntimeError:
         return None
+
 
 #: Connection failures that are outcomes rather than defects: no browser on
 #: the port, and a target spec that names no page or more than one. They get a
@@ -340,6 +344,7 @@ class CDPRuntime:
     _caller_enabled: frozenset[str] = frozenset()
     _all_frames: bool = False
     _frame_sessions: Any = None
+    network_responses: dict[str, ResponseBuffer] | None = None
 
     def __init__(
         self,
@@ -736,6 +741,28 @@ class CDPRuntime:
             logger.exception("CDP session setup failed for %s", self._browser_url)
             self._cdp_client = None
 
+    async def start_run_network(self) -> None:
+        """Subscribe before step 1, retaining responses for this runtime only."""
+        self.network_responses = {}
+        await self.capture_network_session(self._cdp_client.session_id)
+        if self._frame_sessions is not None:
+            self._frame_sessions.on_session_ready = self.capture_network_session
+            for session in list(self._frame_sessions.sessions.values()):
+                if session.ready:
+                    await self.capture_network_session(session.session_id)
+
+    async def capture_network_session(self, session_id: str) -> None:
+        from .attached_session import AttachedSessionClient
+        from .curated_runtime import ResponseBuffer
+
+        assert self.network_responses is not None
+        if session_id in self.network_responses:
+            return
+        cdp = AttachedSessionClient(self._cdp_client.raw, session_id)
+        buffer = ResponseBuffer()
+        self.network_responses[session_id] = buffer
+        await self._sessions.enter_async_context(buffer.capture(cdp, self.caller_enabled))
+
     async def _start_frame_sessions(self, cdp: Any, session_id: str) -> None:
         """Turn auto-attach on, or carry on without it.
 
@@ -794,9 +821,7 @@ class CDPRuntime:
             self._await_paint_ready_async(timeout_ms), self._loop
         )
         try:
-            return future.result(
-                timeout=self.bounded_timeout((timeout_ms / 1000.0) + 2.0)
-            )
+            return future.result(timeout=self.bounded_timeout((timeout_ms / 1000.0) + 2.0))
         except Exception:
             logger.debug("await_paint_ready timed out or failed", exc_info=True)
             return False
@@ -883,9 +908,7 @@ class CDPRuntime:
 
         future = asyncio.run_coroutine_threadsafe(_run(), self._loop)
         try:
-            return future.result(
-                timeout=self.bounded_timeout(detect_total_timeout(max_retries))
-            )
+            return future.result(timeout=self.bounded_timeout(detect_total_timeout(max_retries)))
         except TimeoutError:
             # Not swallowed into None. None means "no session to detect on",
             # and reporting a run that ran out of time as a missing session
@@ -986,6 +1009,10 @@ class CDPHandler:
     def record_caller_enable(self, method: str) -> None:
         """See :meth:`CDPRuntime.record_caller_enable`."""
         self._rt.record_caller_enable(method)
+
+    def start_run_network(self) -> None:
+        """Enable and retain network responses before the first step runs."""
+        self.submit(self._rt.start_run_network())
 
     def require_session(self) -> tuple[Any, str]:
         """The runtime's ``(client, sessionId)``, or a refusal saying why not.
@@ -1133,7 +1160,12 @@ class CDPHandler:
             self._dispatch_native(name, arguments), self._loop
         )
         try:
-            return future.result(timeout=self._rt.bounded_timeout(REQUEST_TIMEOUT_SECONDS))
+            timeout = REQUEST_TIMEOUT_SECONDS
+            if name == "wait-text":
+                timeout = max(timeout, arguments.get("timeout_ms", 5000) / 1000 + 5)
+            elif name == "network-get":
+                timeout = max(timeout, arguments.get("duration", 2.0) + 5)
+            return future.result(timeout=self._rt.bounded_timeout(timeout))
         except Exception as exc:
             logger.warning("call_native(%s) error: %s", name, exc)
             future.cancel()
@@ -1157,6 +1189,9 @@ class CDPHandler:
         if err is not None:
             return err
         send = cdp.send
+
+        if name in {"eval", "press", "hover", "type", "wait-text", "network-get"}:
+            return await self._dispatch_curated_action(cdp, name, arguments)
 
         if name == "take_snapshot":
             documents = self._cross_process_documents()
@@ -1186,6 +1221,88 @@ class CDPHandler:
                 return make_error(await self._uid_failure(uid, exc))
 
         return make_error(f"Unknown native tool: {name}")
+
+    async def _dispatch_curated_action(
+        self, cdp: Any, name: str, arguments: dict[str, Any]
+    ) -> dict[str, Any]:
+        from . import curated_runtime as actions
+
+        page_cdp = cdp
+        fm = self._frame_manager
+        selected = fm.get_selected_frame() if fm is not None else None
+        context_id: int | None = None
+        if fm is not None and fm.selection_pattern is not None:
+            context = fm.get_selected_context()
+            if selected is None or context is None:
+                return make_error("selected frame has no live execution context; select it again")
+            frame_session, context_id = context
+            cdp = self.client_for_session(frame_session)
+
+        if name == "hover":
+            uid = arguments["uid"]
+            if selected is not None:
+                from .native_snapshot import doc_token, parse_uid
+
+                token, _ = parse_uid(uid)
+                if token != doc_token(selected.frame_id, selected.loader_id):
+                    return make_error("hover UID does not belong to the selected frame")
+            send = self._send_for_uid(uid, cdp.send)
+            try:
+                point = await self._native_interactor.hover_async(send, uid)
+            except UidResolutionError as exc:
+                return make_error(await self._uid_failure(uid, exc))
+            return make_text(json.dumps({"uid": uid, "x": point[0], "y": point[1]}))
+        if name == "eval":
+            budget = self._rt.bounded_timeout(REQUEST_TIMEOUT_SECONDS)
+            timeout_ms = int((budget if budget is not None else REQUEST_TIMEOUT_SECONDS) * 1000)
+            result = await actions.evaluate(
+                cdp,
+                arguments["source"],
+                arguments["await_promise"],
+                context_id,
+                timeout_ms=timeout_ms,
+                page_cdp=page_cdp,
+            )
+        elif name == "press":
+            await actions.focus_selected(cdp, context_id)
+            params, names = actions.key_event(arguments["key"], arguments.get("modifiers"))
+            await cdp.send("Input.dispatchKeyEvent", {"type": "keyDown", **params})
+            await cdp.send("Input.dispatchKeyEvent", {"type": "keyUp", **params, "text": ""})
+            result = {
+                "key": arguments["key"],
+                "modifiers": names,
+                "dispatched": ["keyDown", "keyUp"],
+            }
+        elif name == "type":
+            await actions.focus_selected(cdp, context_id)
+            await actions.refuse_type_without_a_target(cdp, context_id)
+            await cdp.send("Input.insertText", {"text": arguments["text"]})
+            result = {"chars": len(arguments["text"]), "source": arguments["source"]}
+            if arguments.get("path") is not None:
+                result["path"] = arguments["path"]
+        elif name == "wait-text":
+            timeout_ms = arguments["timeout_ms"]
+            if self.deadline is not None:
+                timeout_ms = min(timeout_ms, max(0, int((self.deadline - time.monotonic()) * 1000)))
+            result = await actions.wait_text(cdp, arguments["substring"], timeout_ms, context_id)
+        else:
+            result = await actions.network_get(
+                cdp,
+                arguments.get("url"),
+                arguments.get("request_id"),
+                arguments.get("response_file"),
+                selected.frame_id if selected else None,
+                selected.url if selected else None,
+                self.caller_enabled,
+                duration=arguments.get("duration", actions.DEFAULT_NETWORK_DURATION),
+                reload=arguments.get("reload", False),
+                buffer=(
+                    self._rt.network_responses[cdp.session_id]
+                    if self._rt.network_responses is not None
+                    else None
+                ),
+            )
+        return make_text(json.dumps(result))
 
     async def _uid_failure(self, uid: str, exc: UidResolutionError) -> str:
         """Why the UID did not resolve, saying which of the reasons it was.
@@ -1270,9 +1387,7 @@ class CDPHandler:
                 continue
             try:
                 owner_send = self.client_for_session(document.parent_session_id).send
-                owner = await owner_send(
-                    DOM_GET_FRAME_OWNER, {"frameId": document.frame_id}
-                )
+                owner = await owner_send(DOM_GET_FRAME_OWNER, {"frameId": document.frame_id})
                 backend = owner.get("backendNodeId")
                 if not isinstance(backend, int):
                     continue

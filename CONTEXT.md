@@ -51,6 +51,10 @@ glossary rather than left to name code that does not exist.
   attached session, many steps. It is the only place a browser-driving verb
   runs over a session it did not open. Nothing outlives the invocation, so it
   holds the same property Bounded Capture does and is not a session daemon.
+  Network is enabled before step one. The runtime holds a **Response Buffer**
+  per attached session: response metadata and completion state retained for
+  the run, so `network-get` can read traffic an earlier step caused. Bodies
+  remain in Chrome and are subject to its retention limits.
   The run resolves the instance, the endpoint and the page once, before step
   one; a step may name none of them. It stops at the first failing step and
   rolls nothing back, because a step that has run has already reached the
@@ -173,7 +177,7 @@ glossary rather than left to name code that does not exist.
   Step Run the seam is not entered per verb: the run attaches once and every
   step runs over `(client, sessionId)`, so the same verb body serves both
   shapes. `domains_enabled` lives here for that reason - a step gives back
-  every domain it turned on, except `Page` and `Runtime`, which belong to the
+  every domain it turned on, except `Page`, `Runtime` and `Network`, which belong to the
   run. The implementation module is `one_shot`.
 - **Lifecycle** - the layer that owns profiles, the profile root, engine
   routing, and the registry call sites the verbatim vendored modules cannot

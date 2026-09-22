@@ -745,8 +745,26 @@ class TestNoStepOpensItsOwnSession:
             no_wait=True,
             frames_action="list",
             storage_action="get",
-            key=None,
+            key="Enter",
             removed_action=None,
+            # The six RFC-05 verbs, plus the operands every one of them reads.
+            # Without these the verb raises AttributeError before it reaches
+            # `curated`, `contextlib.suppress` swallows it, and this guard
+            # proves nothing about the verb it just parametrized over.
+            operands=[],
+            source="1",
+            await_promise=False,
+            modifiers=None,
+            file=None,
+            substring="x",
+            request_id="1.2",
+            response_file=None,
+            reload=False,
+            # wait-idle and wait-stable were blind here before RFC-05, for the
+            # same reason: the guard parametrizes over every step verb but the
+            # Namespace only carried some of their operands.
+            idle_ms=10,
+            stable_ms=10,
         )
         handler = FakeHandler()
         with contextlib.suppress(Exception):
@@ -1276,3 +1294,9 @@ class TestTheDoublesMatchTheRealHandler:
             "Subclass `doubles.HandlerSurface` and override only what the "
             "suite reads."
         )
+
+
+def test_network_get_response_url_is_not_a_page_selector(monkeypatch):
+    monkeypatch.setattr("browser_tools.lifecycle.read_instances", lambda registry_path=None: [])
+    steps = step_list.validate('eval "fetch(\'data:text/plain,ok\')"\nnetwork-get --url data:text/plain,ok')
+    assert steps[1].as_verb().url == 'data:text/plain,ok'

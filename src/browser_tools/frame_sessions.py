@@ -47,6 +47,8 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
     from .core.cdp_client import CDPClient as CoreCDPClient
     from .frame_manager import FrameManager
 
@@ -126,6 +128,7 @@ class FrameSessions:
         self._unreachable: dict[str, str] = {}
         self._generation = 0
         self._started = False
+        self.on_session_ready: Callable[[str], Awaitable[None]] | None = None
 
     # ----------------------------------------------------------------- read
 
@@ -316,6 +319,8 @@ class FrameSessions:
         if self._is_stale(session, generation):
             return
         await self._set_auto_attach(session.session_id)
+        if self.on_session_ready is not None:
+            await self.on_session_ready(session.session_id)
         session.ready = True
 
     def _abandon(self, session: FrameSession, why: str) -> None:
