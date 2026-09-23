@@ -893,8 +893,8 @@ EXTERNAL BROWSERS
   browser. So bt asks each loopback family for /json/version, which carries
   no secret, and compares the webSocketDebuggerUrl in the reply against that
   line. Only a peer that already knows the GUID is the Chrome that wrote the
-  file, and only that one is dialled. One family, one WebSocket, one Allow
-  click. If neither family proves itself, bt refuses and says so: the port
+  file, and only that one is dialled. One family, one WebSocket. If neither
+  family proves itself, bt refuses and says so: the port
   file is stale, or another process took the port. A Chrome 144+ approval
   service answers 404 for every /json path by design and cannot be
   discovered; pass its address with --endpoint ws://HOST:PORT/devtools/...,
@@ -911,15 +911,17 @@ EXTERNAL BROWSERS
 
   EVERY WAIT HAS A BOUND. bt waits at most 30 seconds for the WebSocket
   handshake and the Browser.getVersion that verifies the peer, at most 30
-  seconds more to list targets and attach a page session, at most 120 seconds
-  for any single CDP command a verb sends, and at most 5 seconds for the
-  detach on the way out. A verb that waits on EVENTS -- wait, attach,
-  console-list --duration -- keeps its own deadline; these bound one command's
-  reply, not the verb. A peer that completes the handshake and then stops
-  answering ends the invocation with exit 1 and a diagnostic; it never hangs.
-  The bounds are tested with non-answering peers; on this machine's working
-  shape, measured, no Allow click ever intervenes, so a quiet peer there is
-  a busy or hung browser or a non-browser holding the port.
+  seconds for each of the two commands that follow -- listing targets, then
+  attaching a page session, so the pair can take up to about a minute --
+  at most 120 seconds for any single CDP command a verb sends, and at most
+  5 seconds for the detach on the way out. A verb that waits on EVENTS --
+  wait, attach, console-list --duration -- keeps its own deadline; these
+  bound one command's reply, not the verb. A peer that completes the
+  handshake and then stops answering ends the invocation with exit 1 and a
+  diagnostic; it never hangs. The bounds are tested with non-answering
+  peers. No Allow prompt appeared in the four connections measured on this
+  machine, but that is an observation, not a guarantee; a connection that
+  goes quiet keeps all three causes named below.
 
   WHAT A TIMEOUT PROVES, AND WHAT IT DOES NOT. A connection that is accepted
   and then goes quiet has at least three causes: Chrome waiting for Allow, a
