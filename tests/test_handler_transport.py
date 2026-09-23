@@ -25,6 +25,7 @@ import pytest
 
 from browser_tools.cdp_handler import CDPRuntime
 from browser_tools.core.attach import AmbiguousTargetError, TargetNotFoundError
+from browser_tools.core.errors import NoPageError
 
 
 class RecordingSeam:
@@ -130,8 +131,9 @@ class TestAnOrdinaryFailureReadsLikeOne:
             ConnectionError("Cannot reach browser on port 9222"),
             AmbiguousTargetError(targets=[{"targetId": "A" * 32, "url": "a", "title": "a"}]),
             TargetNotFoundError("Index 99 out of range (1-1)", targets=[]),
+            NoPageError(),
         ],
-        ids=["no browser", "ambiguous", "not found"],
+        ids=["no browser", "ambiguous", "not found", "no pages at all"],
     )
     async def test_no_traceback_is_logged(self, monkeypatch, caplog, failure):
         monkeypatch.setattr(
@@ -141,6 +143,30 @@ class TestAnOrdinaryFailureReadsLikeOne:
         with caplog.at_level(logging.ERROR):
             await _connect(runtime)
         assert not any(r.exc_info for r in caplog.records), "an outcome was logged as a defect"
+
+    @pytest.mark.asyncio
+    async def test_a_browser_with_no_tabs_is_the_ordinary_state_of_a_fresh_launch(
+        self, monkeypatch, caplog
+    ):
+        """The regression this test exists for.
+
+        A headless shell starts with no tab at all, so zero page targets is
+        what a freshly launched instance looks like, not a defect. The comment
+        above `_EXPECTED_CONNECT_FAILURES` already called a target spec naming
+        no page an ordinary outcome, but `NoPageError` was absent from the
+        tuple. Every verb against such an instance therefore printed a
+        twenty-line Python traceback and then the correct one-line diagnostic
+        underneath it, which reads as a crash.
+        """
+        monkeypatch.setattr(
+            "browser_tools.one_shot.one_shot_page_session", RecordingSeam(raises=NoPageError())
+        )
+        runtime = CDPRuntime("http://127.0.0.1:9222")
+        with caplog.at_level(logging.ERROR):
+            await _connect(runtime)
+        assert not any(r.exc_info for r in caplog.records), "a fresh launch logged as a defect"
+        assert runtime.available is False
+        assert "no open pages" in (runtime.connect_error or "")
 
     @pytest.mark.asyncio
     async def test_the_reason_is_recorded_for_the_caller(self, monkeypatch):
