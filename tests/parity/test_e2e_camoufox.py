@@ -1,10 +1,16 @@
-"""CamoufoxSession's tool surface, against a mocked browser.
+"""CamoufoxSession's tool surface, against a real browser.
 
-The name says e2e and this launches nothing. ``tests/parity/conftest.py``
-patches ``camoufox_session.Camoufox``, so every test here runs against a
-mock and the module completes in about a second. It was excluded from CI on
-the belief that it needed a real browser; it does not, and the exclusion is
-gone.
+This module does launch one. An earlier version of this docstring said it
+launched nothing because ``tests/parity/conftest.py`` patched
+``camoufox_session.Camoufox``; that patch lives in the
+``mock_camoufox_playwright`` fixture, which is not autouse, and the
+``e2e_session`` fixture below never requested it. So every run started a real
+Camoufox, and each one that aborted put a crash dialog on the developer's
+screen.
+
+The launch is now gated by ``BROWSER_TOOLS_LIVE_CAMOUFOX`` both here and at
+the autouse guard in ``tests/parity/conftest.py``, which is the gate that
+catches the next module to make the same mistake.
 
 What it does cover is ``CamoufoxSession``'s ``call_tool`` contract. That
 class is a test oracle for the ARIA parity baseline, not a product surface:
@@ -16,6 +22,7 @@ fetched.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -27,7 +34,16 @@ try:
 except ImportError:
     CAMOUFOX_AVAILABLE = False
 
-pytestmark = pytest.mark.skipif(not CAMOUFOX_AVAILABLE, reason="camoufox not installed")
+LIVE_CAMOUFOX_ENV_VAR = "BROWSER_TOOLS_LIVE_CAMOUFOX"
+
+pytestmark = pytest.mark.skipif(
+    not CAMOUFOX_AVAILABLE or not os.environ.get(LIVE_CAMOUFOX_ENV_VAR),
+    reason=(
+        "this module launches a real Camoufox; it is opt-in because the "
+        f"application bundle aborts under repeated launches. Set "
+        f"{LIVE_CAMOUFOX_ENV_VAR}=1 to run it."
+    ),
+)
 
 
 @pytest.fixture(scope="module")

@@ -20,6 +20,40 @@ if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
 
+LIVE_CAMOUFOX_ENV_VAR = "BROWSER_TOOLS_LIVE_CAMOUFOX"
+
+
+@pytest.fixture(autouse=True)
+def _camoufox_launch_is_opt_in():
+    """Refuse a real Camoufox launch unless the caller asked for one.
+
+    Launching the Camoufox application bundle aborts inside
+    ``_RegisterApplication`` under repeated launches, and macOS puts a crash
+    dialog on the developer's screen for every abort. A per-module guard was
+    tried and was not enough: ``test_e2e_camoufox.py`` asserted in its own
+    docstring that it ran against a mock while its ``e2e_session`` fixture
+    launched a real browser, and nothing checked that claim. So the gate sits
+    at the one place every launch passes through rather than on each module
+    that remembers to ask for it.
+
+    ``mock_camoufox_playwright`` patches the same name, and a test that
+    requests it patches over this one, so mocked tests are unaffected.
+    """
+    if os.environ.get(LIVE_CAMOUFOX_ENV_VAR):
+        yield
+        return
+
+    def _refuse(*_args, **_kwargs):
+        pytest.skip(
+            "a real Camoufox launch is opt-in because the application bundle "
+            f"aborts under repeated launches; set {LIVE_CAMOUFOX_ENV_VAR}=1 "
+            "to allow it"
+        )
+
+    with patch("camoufox_session.Camoufox", side_effect=_refuse):
+        yield
+
+
 @pytest.fixture
 def mock_camoufox_playwright():
     """Mock the camoufox sync API to avoid needing the real binary."""
