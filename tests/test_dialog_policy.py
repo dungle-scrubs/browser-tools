@@ -282,3 +282,25 @@ async def test_answers_more_dialogs_while_draining_in_arrival_order():
     assert all(r["answer"] == "accept" and r["result"] is True for r in result["dialogs"])
     assert len(cdp.calls) == 25
     await policy.close()
+
+
+def test_fill_answers_a_dialog_its_own_input_handler_raises(curated_browser: str) -> None:
+    """``fill`` carries the policy because setting a value fires ``input``.
+
+    RFC-05 section 4 listed eight carriers and left ``fill`` out, while stating
+    the rule as every verb that drives the page. Measured against a real
+    browser before ``fill`` carried the policy: this call never returned, and
+    the six-second bound in :func:`invoke` expired.
+    """
+    html = '<input oninput="alert(\'from-fill\');document.title=\'fired\'">'
+    invoke(curated_browser, "Page.navigate", json.dumps({"url": "data:text/html," + quote(html)}))
+    tree = invoke(curated_browser, "snapshot")["snapshot"]
+    uid = re.search(r"\[uid=([^\s\]]+)\] textbox", tree)
+    assert uid, tree
+
+    result = invoke(curated_browser, "fill", "--uid", uid[1], "--text", "hello")
+
+    assert result["dialogs"] == [
+        {"type": "alert", "message": "from-fill", "answer": "dismiss", "result": None}
+    ]
+    assert invoke(curated_browser, "eval", "document.title")["value"] == "fired"

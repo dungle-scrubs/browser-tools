@@ -599,9 +599,17 @@ instance had to be stopped and relaunched. Probe:
 **Which verbs carry it.** Any verb that can run page JavaScript can raise a
 dialog, which is more than `click`. `eval` calling `alert()` raises one as
 directly as a click handler does, and `press` and `type` reach handlers that
-dialog. The flag therefore carries on `click`, `eval`, `press`, `type`,
-`hover`, `wait-text` and `run`, which is every verb that drives the page.
-`navigate` carries it too, for a `beforeunload` prompt.
+dialog. The flag therefore carries on `click`, `fill`, `eval`, `press`,
+`type`, `hover`, `wait-text` and `run`, which is every verb that drives the
+page. `navigate` carries it too, for a `beforeunload` prompt.
+
+`fill` was left off this list when the section was written, and the omission
+was documented in the guide as deliberate, with the advice to use `fill`
+inside a `run` instead. That advice did not help, because a standalone `fill`
+still hung. Measured against a real browser: `fill` on an
+`<input oninput="alert(...)">` never returned. Setting a value fires the
+field's own `input` handler, so `fill` drives the page exactly as the rule
+here says, and the list was wrong rather than the rule.
 
 **The subscription is unconditional.** `bt` subscribes to
 `Page.javascriptDialogOpening` for the whole invocation on every one of those

@@ -154,12 +154,14 @@ CURATED VERBS
       to click or fill.
 
   click --uid UID [--target SPEC] [--dialog dismiss|accept[:TEXT]]
-  fill --uid UID --text T [--target SPEC]
+  fill --uid UID --text T [--target SPEC] [--dialog dismiss|accept[:TEXT]]
       Act on the node a snapshot named. Missing --uid or --text is a usage
       error (exit 2). A UID that names a node with no DOM node behind it, or
       a node that is not an element, is exit 1.
-      click actively dismisses dialogs by default, even without --dialog.
-      fill does not carry a dialog policy; use it inside run when needed.
+      Both actively dismiss dialogs by default, even without --dialog. fill
+      carries the policy because setting a value fires the field's own input
+      handler, and that handler can raise a dialog as directly as a click
+      handler does.
 
   wait-idle [--timeout-ms MS] [--idle-ms MS]
   wait-stable [--timeout-ms MS] [--stable-ms MS]

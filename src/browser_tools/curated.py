@@ -400,15 +400,23 @@ def fill(
     endpoint: str | None = None,
     handler: CDPHandler | None = None,
     all_frames: bool = False,
+    dialog: str = "dismiss",
 ) -> dict[str, Any]:
     """Native UID fill (frozen ``fill``), over the #40 interaction path.
 
     Takes no snapshot, for the reason :func:`click` gives.
+
+    Carries the dialog policy because setting a value fires the field's own
+    ``input`` handler, and that handler can raise a dialog as directly as a
+    click handler does. Measured before this carried it: ``fill`` against an
+    ``<input oninput="alert(...)">`` never returned.
     """
-    with _handler_for(handler, instance, target, registry_path, endpoint, all_frames) as handler:
+    standalone = handler is None
+    with _handler_for(handler, instance, target, registry_path, endpoint, all_frames, dialog=dialog) as handler:
         _refuse_input_to_hidden_tab(handler)
         result = _native_or_raise(handler, "fill", {"uid": uid, "value": text})
-    return {"uid": uid, "text": text, "result": result}
+        records = handler.dialog_document() if standalone else {}
+    return {"uid": uid, "text": text, "result": result, **records}
 
 
 # ---------------------------------------------------------------------------

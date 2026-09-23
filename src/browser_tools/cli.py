@@ -393,6 +393,7 @@ def _add_curated_verbs(
     fill.add_argument(
         "--target", metavar="SPEC", help="Select the page target (1-based index or id)"
     )
+    _add_dialog(fill)
     _add_endpoint(fill)
     _add_frames(fill)
 
@@ -1052,6 +1053,7 @@ def _curated_envelope(
             instance=args.instance,
             uid=args.uid,
             text=args.text,
+            dialog=args.dialog,
             target=args.target,
             registry_path=registry_path,
             endpoint=args.endpoint,
