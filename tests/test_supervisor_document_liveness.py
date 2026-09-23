@@ -139,6 +139,19 @@ def supervised_browser(tmp_path_factory: pytest.TempPathFactory) -> Any:
             "--no-first-run",
             "--no-default-browser-check",
             "--password-store=basic",
+            # These cases are about out-of-process iframes, and an OOPIF only
+            # exists as its own target when the site is isolated. The headless
+            # shell does not isolate these by default, so without this the
+            # cross-origin child stays in-process and the wait fails with
+            # "no such target" rather than exercising the supervisor at all.
+            "--site-per-process",
+            # A headless shell starts with no tab at all, where the full
+            # browser opens one. Without this the launch succeeds, CDP comes
+            # up, and the supervisor then has nothing to mark, so setup fails
+            # with "the supervisor never marked a tab". tests/conftest.py's
+            # curated_browser fixture passes the same argument for the same
+            # reason.
+            "about:blank",
         ],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
