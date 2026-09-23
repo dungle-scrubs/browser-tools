@@ -145,28 +145,54 @@ CURATED VERBS
   which refuses an omitted selector when several pages exist and lists them.
   Standalone screenshot and the event/list verbs also use the strict selector.
 
+  DIALOG POLICY
+      click, fill, eval, press, type, hover, wait-text, navigate, network-get
+      and run answer every JavaScript dialog while they run. network-get only
+      drives the page with --reload, and carries the policy for that.
+      --dialog defaults to dismiss even when omitted: the default actively
+      declines dialogs. --dialog accept confirms them; --dialog accept:TEXT
+      also supplies prompt text. Bare accept keeps a prompt's default text;
+      accept: supplies an empty string.
+      Each answered dialog appears in the invocation's document under dialogs,
+      in order, with type, message, answer (accept or dismiss), and result.
+      result is a boolean for confirm/beforeunload, text or null for prompt,
+      and null for alert. There is no count limit or escalation. If no dialog
+      fires, the dialogs key is absent. Other standalone verbs do not subscribe.
+
+  navigate <URL> [--target SPEC | --url SUB] [--dialog dismiss|accept[:TEXT]]
+      Navigate the selected page with Page.navigate. The active default dismiss
+      declines beforeunload prompts; --dialog accept permits leaving the page.
+      Returns the Page.navigate result, plus dialogs when any were answered.
+      A browser navigation error is exit 1. This command does not wait for load.
+      Inside a Step List use Page.navigate; the run supplies its dialog policy.
+
   snapshot [--target SPEC]
       The accessibility tree, one UID per node. This is how you find something
       to click or fill.
 
-  click --uid UID [--target SPEC]
-  fill --uid UID --text T [--target SPEC]
+  click --uid UID [--target SPEC] [--dialog dismiss|accept[:TEXT]]
+  fill --uid UID --text T [--target SPEC] [--dialog dismiss|accept[:TEXT]]
       Act on the node a snapshot named. Missing --uid or --text is a usage
       error (exit 2). A UID that names a node with no DOM node behind it, or
       a node that is not an element, is exit 1.
+      Both actively dismiss dialogs by default, even without --dialog. fill
+      carries the policy because setting a value fires the field's own input
+      handler, and that handler can raise a dialog as directly as a click
+      handler does.
 
   wait-idle [--timeout-ms MS] [--idle-ms MS]
   wait-stable [--timeout-ms MS] [--stable-ms MS]
       Wait for network idle (default 5000ms deadline, 500ms quiet window), or
       for the DOM to stop changing (5000ms, 300ms).
 
-  eval '<js>' [--await] [--target SPEC | --url SUB]
+  eval '<js>' [--await] [--target SPEC | --url SUB] [--dialog dismiss|accept[:TEXT]]
       Evaluate JavaScript by value. Statement bodies run inside an IIFE and
       return their last expression's value. --await waits for a Promise;
       it also accepts a non-Promise. The result has value, type, url and
       targetId. A JavaScript exception is exit 1, with its description on
       stderr and nothing on stdout. Raw Runtime.evaluate instead exits 0 and
       returns Chrome's exceptionDetails; it is not equivalent to eval.
+      --dialog defaults to dismiss and actively answers dialogs during eval.
 
       --await awaits the value the expression returns. It does not make the
       body an async function, so a top-level await is a SyntaxError even with
@@ -177,21 +203,23 @@ CURATED VERBS
         bt eval 'Promise.resolve({ready: true})' --await
         bt eval '(async () => (await fetch("/api")).status)()' --await
 
-  press <key> [--modifiers NAME[,NAME...]] [--target SPEC | --url SUB]
+  press <key> [--modifiers NAME[,NAME...]] [--target SPEC | --url SUB] [--dialog dismiss|accept[:TEXT]]
       Dispatch keyDown then keyUp, including native default actions. <key>
       is one printable character, Enter, Tab, Escape, Backspace, Delete,
       ArrowLeft, ArrowRight, ArrowUp, ArrowDown, Home, End, PageUp, PageDown,
       or F1 through F12. Modifiers are Alt, Control, Meta, Shift. Unknown
       names are exit 2 with the valid list. Example: bt press Enter
+      --dialog defaults to dismiss and actively answers dialogs from key handlers.
       Result: {"key":"Enter","modifiers":[],"dispatched":["keyDown","keyUp"]}
 
-  hover --uid UID [--target SPEC | --url SUB]
+  hover --uid UID [--target SPEC | --url SUB] [--dialog dismiss|accept[:TEXT]]
       Move the native pointer to the UID's box centre, setting CSS :hover.
       Synthetic mouseover from JavaScript does not set that CSS state.
+      --dialog defaults to dismiss and actively answers dialogs from hover handlers.
       Example: bt hover --uid 2F0B815AF686-32
       Result: {"uid":"2F0B815AF686-32","x":412.5,"y":208.0}
 
-  type (<text> | --file FILE) [--target SPEC | --url SUB]
+  type (<text> | --file FILE) [--target SPEC | --url SUB] [--dialog dismiss|accept[:TEXT]]
       Insert text at the caret with one Input.insertText; keep existing text.
       Exactly one source is required. --file reads UTF-8, and --file - reads
       stdin. It fires beforeinput and input, but no key events. Use press
@@ -201,8 +229,9 @@ CURATED VERBS
         cat ./message.txt | bt type --file -
       Result: {"chars":123,"source":"file","path":"/absolute/message.txt"}
       Positional text uses source "text" and has no path. Stdin's path is "-".
+      --dialog defaults to dismiss and actively answers dialogs from input handlers.
 
-  wait-text <substring> [--timeout-ms MS] [--target SPEC | --url SUB]
+  wait-text <substring> [--timeout-ms MS] [--target SPEC | --url SUB] [--dialog dismiss|accept[:TEXT]]
       Wait for rendered body text to contain the substring. Default 5000ms.
       Checks present text and installs a MutationObserver in one JS task,
       so text inserted by script during setup is not lost. Timeout is exit
@@ -210,6 +239,7 @@ CURATED VERBS
       Result: {"found":true,"substring":"Order placed","waitedMs":812}
       Choose wait-idle for "has network activity stopped?", wait-stable for
       "has the DOM stopped changing?", and wait-text for "is this text here?".
+      --dialog defaults to dismiss and actively answers dialogs while waiting.
 
   network-get (--url SUB | --request-id ID) [--response-file PATH] [--target SPEC]
               [--duration SECONDS] [--reload]
@@ -354,12 +384,15 @@ CURATED VERBS
 
 RUNNING MANY STEPS IN ONE INVOCATION
 
-  run FILE [--timeout SECONDS]
-  run -    [--timeout SECONDS]
+  run FILE [--timeout SECONDS] [--dialog dismiss|accept[:TEXT]]
+  run -    [--timeout SECONDS] [--dialog dismiss|accept[:TEXT]]
       Run an ordered list of steps against one browser, in one invocation, over
       one CDP connection. FILE is the list; `-` reads it from stdin. Takes
       [INSTANCE] and --endpoint URL as above, and --target SPEC or --url
       SUBSTRING to pick the page the whole run drives.
+      --dialog defaults to dismiss and actively answers dialogs in every step,
+      including raw CDP steps. The run owns the policy; a step cannot override
+      it. Answered dialogs are recorded once, at the top of the Run Document.
 
       One step per line, each line a verb phrase exactly as you would type it
       after the instance name. Blank lines and lines starting with # are
@@ -383,10 +416,11 @@ RUNNING MANY STEPS IN ONE INVOCATION
       eval, press, hover, type, wait-text, network-get,
       wait-idle, wait-stable, wait, detect, console-list, network-list, frames,
       storage get, screenshot, screencast, and any raw Domain.method. A step may
-      NOT name an instance, --endpoint, --target or --url: those belong to the
-      run, which resolves them once. attach is not a step (it runs until stdin
-      ends, so nothing could follow it), and neither are launch, status, stop,
-      cleanup, profile, window-border, guide, help or run itself. Any of these
+      NOT name an instance, --endpoint, --target, --dialog or a page-selecting
+      --url: those belong to the run, which resolves them once.
+      attach is not a step (it runs until stdin ends, so nothing could follow
+      it), and neither are launch, status, stop,
+      cleanup, profile, window-border, guide, help, navigate or run itself. Any of these
       in a step list is a usage error (exit 2).
 
       FRAME SELECTION LASTS. `frames select` in one step governs the steps after
@@ -630,13 +664,15 @@ WHAT DOES NOT CARRY BETWEEN INVOCATIONS
   fails with "No dialog is showing" (exit 1), even while the command that
   opened it is still running. The unhandled dialog then blocks the page and
   later commands against it hang. Navigating away can clear it; when that
-  hangs too, `stop` the instance and `launch` again.
+  hangs too, `stop` the instance and `launch` again. The driving verbs avoid
+  reaching that state by answering dialogs inside the invocation with their
+  active --dialog policy (default dismiss).
 
   Page.addScriptToEvaluateOnNewDocument does not rescue this. Registering
   window.alert=()=>{} works when the same invocation also navigates, and
   does nothing when a later invocation navigates, because the registration
-  belongs to the session that made it. Measured both ways. So a page that
-  raises dialogs cannot be driven through them one command at a time.
+  belongs to the session that made it. Measured both ways. Use a carrying verb
+  or run so its dialog policy can answer within the same invocation.
 
   A selected frame. `frames select` binds to the process that ran it, so a
   later `storage get` does not see it. That is what `storage get --key` is

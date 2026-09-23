@@ -46,6 +46,12 @@ class HandlerSurface:
     def run(self) -> None:
         """The runtime's own loop. A double is already `available`."""
 
+    def configure_dialog_policy(self, value: str) -> None:
+        pass
+
+    def dialog_document(self) -> dict[str, Any]:
+        return {}
+
     def start_run_network(self) -> None:
         """Begin the run-owned response capture."""
 
