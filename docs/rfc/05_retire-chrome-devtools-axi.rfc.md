@@ -41,8 +41,8 @@ events, and no step reads another step's output. Tracing, heap snapshots and
 response bodies all fall under it. Each is a curated verb or it does not
 exist; there is no recipe option and no third choice.
 
-The cost is a second runtime. `bt insights` needs Node, behind an extra that
-the base install does not pull. RFC-01 deleted a Node subprocess and the
+The cost is a second runtime. `bt insights` needs Node, installed explicitly through
+`bt insights --setup`; the base install does not pull it. RFC-01 deleted a Node subprocess and the
 README advertises its absence. This RFC reopens that door deliberately, for
 one optional capability, and says why.
 
@@ -184,7 +184,7 @@ stands unchanged.
 
 The packaging discipline itself is preserved, not waived. `pip install
 browser-tools` still depends on `websockets` alone. Node enters only through
-the `insights` extra, which the base install does not pull.
+explicit `bt insights --setup`, never the base install.
 
 ### Amendment 2: the step surface gains `heap`, and the six curated verbs
 
@@ -506,12 +506,13 @@ node and edge counts.
 ### 3. Insights
 
 ```
+bt insights --setup
 bt insights --trace FILE [--insight NAME] [--format json|text]
             [--ignore-engine-mismatch]
 ```
 
-Behind a new `insights` optional extra. This is the one part of this RFC that
-adds a runtime.
+Analysis is an explicit opt-in through `bt insights --setup`. This is the
+one part of this RFC that adds a runtime.
 
 The engine is the DevTools Frontend trace model. `chrome-devtools-mcp` pins it
 as a Git submodule and bundles it, so it is not an ordinary dependency. The
@@ -526,14 +527,19 @@ fail` against a deliberately render-blocking stylesheet. Probe:
 `docs/research/probes/154/enginetest/insights.mjs`, which is runnable against
 any trace file.
 
-**Acceptance rests on one trace from one Chrome against one engine revision.**
-That is enough to prove the integration works and not enough to predict drift.
-Open Question 4 names the fixture matrix that would settle it. The decision to
-build insights is the driving dev's under ADR 0001 and is not provisional. What
-is provisional is the pinned engine revision and the validated Chrome range:
-those two values are left unset in this document and are set by the ticket that
-builds the extra, after the matrix exists or with an explicit note that it does
-not.
+**Validation is provisional.** Ticket 09 pins `@paulirish/trace_engine` to
+`0.0.65` and accepts only producer builds `151.0.7922.34` and `153.0.0.0`.
+This is a discrete range, not every version between them. The Open Question 4
+fixture matrix does not exist. Chrome 151 has navigation and interaction
+captures over file URLs; Chrome 153 has an HTTP load trace from the original
+capture probe. This does not establish cross-version or cross-platform
+compatibility. The decision to build insights remains under ADR 0001.
+
+The original probe inspected errors within `set.model`, but this engine stores
+errors separately in `set.modelErrors`. Ticket 09 checks both. The HTTP probe
+returns all 19 models without errors. The file navigation fixtures return 18
+models plus `DocumentLatency: missing document request timing`; that is an
+analysis failure with partial results, not complete success.
 
 **Cost is measured.** 120 to 130 ms of wall clock per invocation including Node
 process start, for a 4041-event trace: import 26 to 48 ms, read 3 to 4 ms,
@@ -546,27 +552,35 @@ behaviour. `@paulirish/trace_engine` declares both of its dependencies as
 insight, shipped a release eight days before this RFC. Two machines installing
 a month apart can get different verdicts from the same pinned engine.
 
-**How the extra installs.** The adapter is a small Node package vendored in
-this repository at `src/browser_tools/_insights/`, carrying its own
-`package.json` and a committed `package-lock.json`. The Python extra
-`browser-tools[insights]` declares no Python dependency; what it installs is a
-marker plus the adapter sources. `npm ci --omit=dev` runs once, at the
-adapter's directory, driven by `bt insights --setup` or by the first
-invocation, and it is the only network access in the feature. `node_modules`
-lands beside the adapter inside the installed package directory, never in the
-user's working directory. A bare `npm install` is never run, because it would
-resolve the two `latest` dependencies afresh.
+**How analysis installs.** The adapter ships as package data at
+`src/browser_tools/_insights/`, with `package.json` and a committed
+`package-lock.json`. There is no Python `insights` extra. An empty extra
+selects no dependencies and installs exactly the same wheel files as a base
+install; two clean pip installs verified that it cannot supply a marker.
+`bt insights --setup` is the explicit opt-in. It requires Node.js 22+ and npm
+on PATH, and runs `npm ci --omit=dev` in the installed adapter directory.
+`node_modules` lands beside the adapter, never in the user's working directory.
+Setup records the lockfile digest only after a successful install and checks
+installed dependency versions. Later setup calls reuse that complete install;
+a changed lockfile requires setup again. A bare `npm install` is never run.
+Concurrent setup and analysis are serialized with a package-local file lock.
 
-**Network access.** The install step reaches the npm registry. Every later
-invocation reads a local trace file and writes JSON, and the adapter is
-invoked with an explicit path argument rather than a shell string. Offline
-after install is fully supported; offline before it fails with the `npm ci`
-command to run when network returns.
+**Network access.** Only explicit setup reaches the npm registry. Analysis
+before setup exits 2 with `bt insights --setup`; it never installs implicitly.
+Setup failures name the network and write-access requirements and the
+`npm ci --omit=dev` command to run when available. Every later invocation reads
+a local trace file and writes JSON (or text when selected), with an explicit
+path argument rather than a shell string. Offline after setup is supported.
 
 Output is JSON by default, because every other `bt` verb returns JSON. `bt`
 owns only the stable outer fields per insight and carries the engine's own
-formatter rendering as a `detail` string, so the volatile part of the model
-stays upstream's to maintain.
+formatter rendering as a `detail` string. The standalone engine package does
+not include that formatter. The adapter therefore vendors DevTools Frontend's
+formatter at `011ec3baaaaefa54eba1b41be00caf48ad3e8b51`, plus its required
+network-rendering methods and unit formatters. The generation script records
+the extraction; a small compatibility layer resolves English i18n tokens,
+font URL names and the engine's renamed network-initiator lookup. Formatter
+updates are versioned with the engine; they are not a second runtime install.
 
 ```json
 {"engineRevision": "0.0.65", "browserVersion": "HeadlessChrome/...",
@@ -577,19 +591,34 @@ stays upstream's to maintain.
                  "detail": "..."}]}]}
 ```
 
-`savings` is `null` when the engine reports none. `--insight NAME` returns the
+`savings` is the largest positive time saving as `{metric, ms}`, or `null`
+when none exists. CLS savings are unitless and excluded from this time field;
+the formatter retains other savings in `detail`. `--insight NAME` returns the
 same document carrying one insight; an unknown name is exit 2 with the valid
 names listed. `--format text` prints the formatter output alone, unwrapped.
 
-At run time the verb reads `Browser.getVersion`, stamps every result with the
-engine revision and the browser version, and on a mismatch against the
-validated range refuses with exit 1 naming the remedy, with
-`--ignore-engine-mismatch` as an expert escape hatch. The stamp is present on
-both paths.
+At run time the verb reads the producing browser version from the trace's
+own metadata (`product-version`, `user-agent`, or the corresponding browser
+metadata event), never `Browser.getVersion`. A live browser could describe a
+different producer and would contradict offline analysis. Missing version
+metadata is stamped as `null` and treated as unsupported. Both unknown and
+out-of-range versions refuse with exit 1, a stamped JSON document and a remedy.
+`--ignore-engine-mismatch` accepts unvalidated results and keeps the stamp.
+Text success prints only the formatter output; failures remain stamped JSON.
+
+Zero Insight Sets is exit 1 with a diagnostic naming the missing supported
+navigation and the remedy: capture `Page.navigate` inside `bt trace --steps`,
+then wait for load and drive the interaction. A duration trace on an already
+loaded page, and even a click-only trace there, both produced zero sets.
+Navigation without an interaction reports `INPBreakdown: pass`; navigation
+plus a real click blocking for 280ms reports `fail` and its timing breakdown.
+Insight model errors are exit 1 with available results retained. A named
+selection reports errors for that model only. Engine stderr alone is not
+failure: the engine can log a recoverable Lantern error while parsing.
 
 The base install is unchanged: `pip install browser-tools` stays
-`websockets`-only, with no Node. Capture is pure Python over CDP and ships in
-the base. Only analysis needs the extra.
+`websockets`-only, with no Node or engine. Capture is pure Python over CDP and
+ships in the base. Only analysis needs explicit setup.
 
 ### 4. The dialog policy
 
@@ -904,7 +933,6 @@ The `~/dev/firstmate` clone stays. Deleting it is out of scope.
 | `bt trace --steps` and the step list fails validation | exit 2 before `Tracing.start`; no output file is created. |
 | `bt trace --steps` and a step fails at run time | the run stops at that step, the trace is still written and reported, and the verb exits 1. The run's status wins. |
 | `bt trace` and `dataLossOccurred` is true | reported in the trace document, never swallowed. |
-| `bt insights` and the extra is absent | exit 2 naming the exact install line, matching the existing rule for a command whose extra is missing. |
 | `bt insights` and `npm ci` has not run | exit 2 naming the setup command, and naming the network requirement when offline. |
 | `bt insights --insight` with an unknown name | exit 2 with the valid names listed. |
 | `bt insights` and the engine revision does not match the browser | exit 1 naming the remedy, unless `--ignore-engine-mismatch`. The stamp is present either way. |
@@ -920,7 +948,7 @@ JSON. The trace is a local file the caller named, and the adapter is invoked
 with an explicit path argument rather than a shell string. The install step
 reaches the npm registry; no later invocation touches the network.
 
-The `insights` extra pulls a package whose upstream disclaims stability, along
+The explicit insights setup pulls a package whose upstream disclaims stability, along
 with two transitive dependencies that upstream declares as `latest`. The
 lockfile requirement above is a supply-chain control as much as a
 reproducibility one: without it, an install resolves whatever those two

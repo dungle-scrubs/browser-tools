@@ -420,7 +420,7 @@ RUNNING MANY STEPS IN ONE INVOCATION
       page-selecting --url: those belong to the run, which resolves them once.
       attach is not a step (it runs until stdin ends, so nothing could follow
       it), and neither are launch, status, stop, cleanup, profile,
-      window-border, guide, help, navigate, trace or run itself. Any of these
+      window-border, guide, help, navigate, trace, insights or run itself. Any of these
       in a step list is a usage error (exit 2).
 
       FRAME SELECTION LASTS. `frames select` in one step governs the steps after
@@ -859,6 +859,55 @@ PERFORMANCE CAPTURES AND CPU PROFILING
       but exits 1. Validation failure exits 2 and starts no capture.
       Use --steps to drive the interaction: a plain load window cannot reveal
       a slow click that never happened. trace itself cannot be a Step List step.
+
+  insights --setup
+      Explicitly install the optional analysis runtime. Requires Node.js 22+
+      and npm on PATH, network access to the npm registry, and write access to
+      the installed package. Runs only npm ci --omit=dev against the committed
+      lockfile inside browser_tools/_insights; node_modules stays there.
+      The base Python install still pulls only websockets, no Node or engine.
+      There is no insights Python extra: an empty extra cannot install a marker.
+      Before setup, analysis exits 2 and prints: bt insights --setup
+      A failed setup prints the npm ci command to retry when network returns.
+      Re-run setup after an upgrade changes the lockfile. No auto-install.
+
+  insights --trace FILE [--insight NAME] [--format json|text]
+      [--ignore-engine-mismatch]
+      Analyze a local trace offline, without a browser or an instance argument.
+      JSON has engineRevision, browserVersion and navigations. Each navigation
+      has a url and insights; each insight has key, state, title, savings and
+      detail. detail is the pinned upstream DevTools formatter's English text.
+      savings is the largest positive time saving as {metric, ms}, or null;
+      CLS is unitless and is not mislabelled as milliseconds. Other savings
+      remain in detail. Text format prints only detail, with no JSON wrapper.
+      --insight selects that model per navigation. Unknown names exit 2 and
+      list the valid names. Model errors exit 1 and retain available results;
+      selecting one insight only fails for errors in the selected model.
+
+      Engine pin: @paulirish/trace_engine 0.0.65. Provisional validated versions:
+      Chrome 151.0.7922.34 and 153.0.0.0 only, not intervening builds. The Open
+      Question 4 fixture matrix does not exist. The first version has file
+      navigation/interaction evidence; 153.0.0.0 has HTTP load evidence only.
+      File URLs can lack DocumentLatency timing; use HTTP for complete results.
+      browserVersion comes from trace metadata (product-version or user-agent),
+      never from a browser running now. Missing metadata is null. Missing or
+      unvalidated versions exit 1 with a stamped JSON diagnostic and the remedy.
+      --ignore-engine-mismatch accepts that risk and preserves the stamp.
+      JSON failures remain JSON even with --format text so the stamp survives.
+
+      Zero Insight Sets is exit 1, with the capture remedy. A trace on an
+      already loaded page can have zero sets even when it contains a click.
+      Start the navigation inside the trace; then drive the interaction.
+      For example, save this Step List as load.steps:
+          Page.navigate '{"url":"http://127.0.0.1:8000/"}'
+          wait-stable
+      Capture and analyze it:
+          bt trace --steps load.steps --out load.json
+          bt insights --trace load.json --insight INPBreakdown
+      Add the real interaction after navigation to measure its breakdown.
+      A load with no interaction reports INPBreakdown pass; a captured 280ms
+      click handler reports fail with input, processing and presentation times.
+      insights cannot itself be a Step List step.
 
   heap [INSTANCE] --out FILE [--target SPEC] [--endpoint URL]
       Write a .heapsnapshot for the DevTools Memory panel. stdout reports path,

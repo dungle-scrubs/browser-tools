@@ -1,0 +1,9 @@
+{
+  "name": "@dungle-scrubs/browser-tools-insights",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@paulirish/trace_engine": "0.0.65"
+  }
+}

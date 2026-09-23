@@ -33,3 +33,8 @@ Thumbs.db
 
 # Task scratch: ledgers, briefs, delegation reports, repro scripts.
 .scratch/
+
+# Optional trace analysis runtime, installed by bt insights --setup.
+node_modules/
+src/browser_tools/_insights/.installed*
+src/browser_tools/_insights/.setup.lock

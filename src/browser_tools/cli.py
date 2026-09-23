@@ -28,7 +28,17 @@ import json
 import sys
 from typing import Any
 
-from . import captures, curated, events, lifecycle, list_verbs, passthrough, step_run, user_settings
+from . import (
+    captures,
+    curated,
+    events,
+    insights,
+    lifecycle,
+    list_verbs,
+    passthrough,
+    step_run,
+    user_settings,
+)
 from .lifecycle import LifecycleError
 from .passthrough import UsageError as PassthroughUsageError
 from .usage import UsageError
@@ -51,6 +61,7 @@ _KNOWN_VERBS = {
     "cleanup",
     "profile",
     "guide",
+    "insights",
     "window-border",
     "help",
     "attach",
@@ -216,6 +227,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Report what would move, and move nothing",
     )
     sub.add_parser("guide", help="Print the bundled agent manual")
+    analysis = sub.add_parser("insights", help="Explain a local trace without a browser")
+    mode = analysis.add_mutually_exclusive_group()
+    mode.add_argument("--setup", action="store_true", help="Install the locked Node engine")
+    mode.add_argument("--trace", metavar="FILE")
+    analysis.add_argument("--insight", metavar="NAME")
+    analysis.add_argument("--format", choices=("json", "text"), default="json")
+    analysis.add_argument("--ignore-engine-mismatch", action="store_true")
 
     border = sub.add_parser(
         "window-border",
@@ -874,6 +892,26 @@ def _run(args: argparse.Namespace) -> int:
         removed = lifecycle.cleanup(registry_path=registry_path)
         _print_json({"removed": removed})
         return EXIT_OK
+
+    if args.command == "insights":
+        if getattr(args, "instance", None) is not None:
+            raise UsageError("insights reads a local trace and takes no instance")
+        if not args.setup and args.trace is None:
+            raise UsageError("Run bt insights --setup, then bt insights --trace FILE")
+        if args.setup:
+            if args.insight or args.format != "json" or args.ignore_engine_mismatch:
+                raise UsageError("--setup cannot be combined with analysis options")
+            _print_json(insights.setup())
+            return EXIT_OK
+        document, code = insights.analyze(args.trace, args.insight, args.ignore_engine_mismatch)
+        if args.format == "text" and code == EXIT_OK:
+            print("\n\n".join(item["detail"] for navigation in document["navigations"]
+                              for item in navigation["insights"]))
+        else:
+            _print_json(document)
+        if code:
+            print(f"error: {document.get('error', 'trace analysis failed')}", file=sys.stderr)
+        return code
 
     if args.command == "guide":
         print(lifecycle.guide_text())

@@ -1,0 +1,5 @@
+Page.navigate '{"url":"file:///Users/kevin/dev/browser-tools/.scratch/retire-axi/work/09-insights/fixture.html"}'
+wait-idle
+Input.dispatchMouseEvent '{"type":"mousePressed","x":145,"y":114,"button":"left","clickCount":1}'
+Input.dispatchMouseEvent '{"type":"mouseReleased","x":145,"y":114,"button":"left","clickCount":1}'
+wait-idle

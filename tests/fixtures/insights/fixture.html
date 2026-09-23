@@ -1,0 +1,16 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>insight fixture</title>
+<style>body{font:16px system-ui;margin:2rem}button{font-size:1.2rem;padding:.6rem 1.2rem}</style>
+<h1>insight fixture</h1>
+<button id="slow">block the main thread</button>
+<p id="out">idle</p>
+<script>
+  // A click handler that blocks long enough to be an unmistakable
+  // interaction in the trace. A load-only capture can never contain this.
+  document.getElementById('slow').addEventListener('click', () => {
+    const end = performance.now() + 280;
+    while (performance.now() < end) { /* spin */ }
+    document.getElementById('out').textContent = 'blocked 280ms';
+  });
+</script>
