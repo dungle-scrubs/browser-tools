@@ -23,6 +23,11 @@ def invoke(endpoint, capsys, *args):
         [],
         ["--duration", "0"],
         ["--duration", "nan"],
+        ["--duration", "inf"],
+        ["--duration", "-1"],
+        ["--duration", "1", "--timeout", "nan"],
+        ["--duration", "1", "--timeout", "-1"],
+        ["--duration", "1", "--categories", "v8,"],
         ["--duration", "1", "--categories", "v8", "--categories", "loading"],
     ],
 )
@@ -309,3 +314,79 @@ async def test_heap_collects_synchronous_chunks_and_restores_domain(tmp_path, ke
     assert path.read_text() == payload
     assert cdp.callback is None
     assert ("HeapProfiler.disable" in calls) is (not keep)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["start", "read", "write"])
+async def test_trace_releases_subscription_and_stream_on_failure(tmp_path, failure):
+    from browser_tools.core.errors import CDPError
+
+    calls = []
+
+    class CDP:
+        callback = None
+
+        def on(self, event, callback, session):
+            self.callback = callback
+
+        def off(self, event, callback):
+            assert callback is self.callback
+            self.callback = None
+
+        async def send(self, method, params=None, **kwargs):
+            calls.append(method)
+            if method == "Tracing.start":
+                config = params["traceConfig"]
+                assert config["excludedCategories"] == ["*"]
+                assert config["includedCategories"] == list(captures.DEFAULT_CATEGORIES[1:])
+                if failure == "start":
+                    raise CDPError(-32000, "already tracing")
+            if method == "Tracing.end":
+                self.callback({"stream": "7", "dataLossOccurred": False})
+            if method == "IO.read":
+                raise CDPError(-32000, "stream read failed")
+            return {}
+
+    cdp = CDP()
+    capture = captures.TraceCapture(cdp, "session")
+    if failure == "start":
+        with pytest.raises(CDPError, match="already tracing"):
+            await capture.start(list(captures.DEFAULT_CATEGORIES))
+        assert calls == ["Tracing.start"]
+    else:
+        await capture.start(list(captures.DEFAULT_CATEGORIES))
+        path = tmp_path if failure == "write" else tmp_path / "trace.json"
+        with pytest.raises((OSError, CDPError)):
+            await capture.finish(path)
+        assert calls[-1] == "IO.close"
+    assert cdp.callback is None
+
+
+@pytest.mark.asyncio
+async def test_heap_failure_releases_subscription_and_domain(tmp_path):
+    from browser_tools.core.errors import CDPError
+
+    calls = []
+
+    class CDP:
+        callback = None
+
+        def on(self, event, callback, session):
+            self.callback = callback
+
+        def off(self, event, callback):
+            assert callback is self.callback
+            self.callback = None
+
+        async def send(self, method, params=None, **kwargs):
+            calls.append(method)
+            if method == "HeapProfiler.takeHeapSnapshot":
+                self.callback({"chunk": "partial"})
+                raise CDPError(-32000, "snapshot failed")
+            return {}
+
+    cdp = CDP()
+    with pytest.raises(CDPError, match="snapshot failed"):
+        await captures._heap(cdp, "session", tmp_path / "heap", frozenset())
+    assert cdp.callback is None
+    assert calls[-1] == "HeapProfiler.disable"

@@ -44,13 +44,13 @@ from typing import Any
 import pytest
 
 from browser_tools.core.cdp_client import CDPClient, get_ws_url
-from browser_tools.core.launcher import find_chrome_binary
 from browser_tools.core.supervisor import spawn_supervisor
+from browser_tools.lifecycle import CHROME_BINARY_ENV_VAR
 
-_CHROME = find_chrome_binary()
+_CHROME = os.environ.get(CHROME_BINARY_ENV_VAR)
 
 pytestmark = [
-    pytest.mark.skipif(_CHROME is None, reason="no Chrome/Chromium binary on this machine"),
+    pytest.mark.skipif(_CHROME is None, reason="no configured test Chrome binary"),
     pytest.mark.skipif(os.environ.get("CI") == "true", reason="launches a real browser"),
     pytest.mark.skipif(
         not hasattr(signal, "SIGSTOP"), reason="the stall case needs SIGSTOP (POSIX)"
