@@ -838,8 +838,7 @@ EXTERNAL BROWSERS
   and let bt read the number, as below.
 
   Raw WebSocket attachment, and discovery from a debugging profile
-  (Chrome's per-connection Allow click is unverified end to end, pending
-  ticket 12 with the driving dev at the keyboard):
+  (verified end to end on this machine; see APPROVAL below):
 
     bt snapshot --endpoint ws://127.0.0.1:PORT/devtools/browser/ID
     bt snapshot --chrome-profile DIR
@@ -901,9 +900,14 @@ EXTERNAL BROWSERS
   discovered; pass its address with --endpoint ws://HOST:PORT/devtools/...,
   which names the family explicitly.
 
-  Approval is per connection, not per browser session. Chrome asks the person
-  to click Allow and shows an automation banner. This is for an agent beside
-  a person at the keyboard. An unattended agent cannot supply approval.
+  NO APPROVAL CLICK ON THE WORKING SHAPE. Measured on Chrome 153 with the
+  person at the keyboard: four connections against a Chrome started as
+  above, zero permission prompts and no automation banner. The
+  per-connection Allow flow belongs to the chrome://inspect
+  remote-debugging toggle, and Chrome 153 refuses that service on the
+  default data directory, so the everyday browser cannot be attached to at
+  all. If a Chrome elsewhere does ask, the 30-second handshake bound below
+  applies and an unattended agent cannot supply the click.
 
   EVERY WAIT HAS A BOUND. bt waits at most 30 seconds for the WebSocket
   handshake and the Browser.getVersion that verifies the peer, at most 30
@@ -913,8 +917,9 @@ EXTERNAL BROWSERS
   console-list --duration -- keeps its own deadline; these bound one command's
   reply, not the verb. A peer that completes the handshake and then stops
   answering ends the invocation with exit 1 and a diagnostic; it never hangs.
-  The bounds are tested with non-answering peers; Chrome's real Allow click,
-  refusal, and banner remain unverified for ticket 12.
+  The bounds are tested with non-answering peers; on this machine's working
+  shape, measured, no Allow click ever intervenes, so a quiet peer there is
+  a busy or hung browser or a non-browser holding the port.
 
   WHAT A TIMEOUT PROVES, AND WHAT IT DOES NOT. A connection that is accepted
   and then goes quiet has at least three causes: Chrome waiting for Allow, a
