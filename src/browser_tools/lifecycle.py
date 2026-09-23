@@ -1054,9 +1054,17 @@ def launch(
                 registry_path=registry_path,
             )
 
-        # An explicit --channel is the caller saying which Chrome they mean, so
-        # it wins. The environment variable replaces auto-detection, not intent.
-        binary = resolve_channel_binary(channel) or chrome_binary_from_env()
+        # The environment variable wins, including over an explicit --channel.
+        # It was written as a fallback, on the reasoning that --channel is the
+        # caller naming the Chrome they mean. That reasoning cost a developer
+        # four rounds of crash dialogs: every launch naming a channel resolved
+        # to /Applications/Google Chrome.app and never consulted the variable,
+        # so the test suite's headless-shell override did nothing and the
+        # application bundle aborted in _RegisterApplication under repeated
+        # launches. An override that any caller can defeat is not an override,
+        # and this one exists to stop a browser launching, which is a safety
+        # property rather than a preference.
+        binary = chrome_binary_from_env() or resolve_channel_binary(channel)
 
         try:
             info = asyncio.run(

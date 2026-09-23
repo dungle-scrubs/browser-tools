@@ -205,6 +205,11 @@ class TestLaunch:
             return core_registry.lookup("my-site-01", registry_path=kwargs["registry_path"])
 
         monkeypatch.setattr(lifecycle.core_launcher, "launch_browser", fake_launch_browser)
+        # This case is about --channel choosing the binary, so the override has
+        # to be out of the way: it now wins over a named channel, and the test
+        # suite sets it for every test so no test can launch an application
+        # bundle. tests/test_chrome_binary_override.py owns that precedence.
+        monkeypatch.delenv(lifecycle.CHROME_BINARY_ENV_VAR, raising=False)
         monkeypatch.setattr(lifecycle, "resolve_channel_binary", lambda channel: "/bin/chrome-beta")
 
         inst = lifecycle.launch(
