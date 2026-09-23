@@ -238,7 +238,7 @@ async def _attach_external(
     EOF, on SIGTERM or SIGINT, or when the browser drops the connection.
     """
     async with one_shot_page_session(
-        port, target_spec, target_by, external=True
+        port, target_spec, target_by
     ) as (cdp, session_id):
         enabled_domains: set[str] = set()
         handlers: dict[str, Any] = {}
@@ -422,7 +422,7 @@ def wait(
 
     async def _wait() -> dict[str, Any]:
         async with one_shot_page_session(
-            port, spec, target_by, external=endpoint is not None
+            port, spec, target_by
         ) as (cdp, session_id):
             return await wait_on_session(cdp, session_id, event, match, timeout)
 

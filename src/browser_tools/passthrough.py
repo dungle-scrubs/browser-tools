@@ -151,36 +151,57 @@ def strip_endpoint_flag(argv: list[str]) -> tuple[list[str], str | None]:
     return remaining, endpoint
 
 
+def _is_profile_value(token: str, verbs: set[str] | frozenset[str]) -> bool:
+    """Whether the token after a bare ``--chrome-profile`` is its value.
+
+    The flag's value is optional, so the token after it belongs to the flag
+    only when it cannot belong to the invocation. Four things it is never:
+    another flag, a verb, a ``Domain.method``, and a JSON operand. The operand
+    test is the one the first version lacked, and
+    ``bt Runtime.evaluate --chrome-profile '{"expression":"1"}'`` therefore
+    reported the params as a bad channel name instead of running.
+    """
+    return not (
+        token.startswith("-")
+        or token.startswith("{")
+        or token in verbs
+        or lifecycle.looks_like_domain_method(token)
+    )
+
+
 def strip_chrome_profile_flag(
     argv: list[str], *, verbs: set[str] | frozenset[str] = frozenset()
 ) -> tuple[list[str], str | None]:
-    """Extract the optional channel without consuming a following verb."""
-    from .chrome_discovery import CHANNELS
+    """Extract the optional profile value without consuming what follows it.
 
+    The value is a user data directory path, or a channel name. It is not
+    validated here: a path this layer cannot check is a path
+    ``chrome_discovery`` reports on with the directory in hand, and refusing a
+    value here means refusing it before the invocation's own refusals have
+    been reached. ``bt profile --chrome-profile list`` reported an unknown
+    channel for that reason, when what is wrong with it is that ``profile``
+    does not take the flag at all.
+    """
     remaining: list[str] = []
-    channel: str | None = None
+    profile: str | None = None
     i = 0
     while i < len(argv):
         token = argv[i]
         if token == "--chrome-profile" or token.startswith("--chrome-profile="):
-            if channel is not None:
+            if profile is not None:
                 raise UsageError("--chrome-profile may be given only once")
-            channel = token.split("=", 1)[1] if "=" in token else "stable"
+            profile = token.split("=", 1)[1] if "=" in token else "stable"
             if (
                 token == "--chrome-profile"
                 and i + 1 < len(argv)
-                and not argv[i + 1].startswith("-")
-                and argv[i + 1] not in verbs
-                and not lifecycle.looks_like_domain_method(argv[i + 1])
+                and _is_profile_value(argv[i + 1], verbs)
             ):
                 i += 1
-                channel = argv[i]
-            if channel not in CHANNELS:
-                raise UsageError(f"unknown Chrome channel {channel!r}")
+                profile = argv[i]
         else:
             remaining.append(token)
         i += 1
-    return remaining, channel
+    return remaining, profile
 
 
 async def send_on_session(
@@ -211,14 +232,24 @@ def extract_target_flags(
     ``--target`` and ``--url`` are given -- they select the same slot and
     cannot both be honored.
     """
-    argv, channel = strip_chrome_profile_flag(argv)
+    from .cli import KNOWN_VERBS
+
+    argv, profile = strip_chrome_profile_flag(argv, verbs=KNOWN_VERBS)
     argv, endpoint = strip_endpoint_flag(argv)
-    if channel is not None:
+    if profile is not None:
         if endpoint is not None:
             raise UsageError("--endpoint and --chrome-profile cannot be combined")
+        # The refusal comes before discovery reaches out, not after. Discovery
+        # now reads /json/version from the browser, and an invocation that can
+        # never run should not touch it at all -- nor should it answer a
+        # refused method with a discovery failure. The method has not been
+        # resolved yet at this point, so the two refused names are looked for
+        # where they can only be the method.
+        for token in argv:
+            browser_endpoint.refuse_browser_lifetime_method(token)
         from .chrome_discovery import discover_chrome
 
-        endpoint = discover_chrome(channel)
+        endpoint = discover_chrome(profile)
     remaining: list[str] = []
     target: str | None = None
     url: str | None = None
@@ -378,7 +409,7 @@ def send(
 
     async def _send() -> dict[str, Any]:
         async with one_shot_page_session(
-            port, spec, target_by, external=endpoint is not None
+            port, spec, target_by
         ) as (cdp, session_id):
             return await send_on_session(cdp, session_id, method, params)
 
@@ -414,9 +445,22 @@ static usage rather than the live protocol schema read from a browser.
       Target.createTarget always opens in the background. To work in a second
       page, open it with '{"url": "...", "newWindow": true}' and pass its
       targetId as --target. Run `bt guide` for details.
-
-Launch a browser first: bt launch
 """
+
+#: Added to the static help when no browser was named at all. It is left off
+#: for an external endpoint: `bt launch` starts a browser bt owns, which is not
+#: the browser the person is attaching to, and following it would open a second
+#: one instead of answering the question.
+LAUNCH_TRAILER = "\nLaunch a browser first: bt launch\n"
+
+#: Added instead when an endpoint was named and could not serve the schema.
+#: `/json/protocol` is an HTTP path, and a Chrome 144+ approval service answers
+#: 404 for every `/json` path by design.
+ENDPOINT_TRAILER = (
+    "\nThe browser at {host}:{port} did not serve /json/protocol, so this is static\n"
+    "usage. A Chrome that only exposes the approval-based debugging service answers\n"
+    "404 for every /json path, including this one.\n"
+)
 
 
 def _resolve_help_port(
@@ -443,6 +487,40 @@ def _resolve_help_port(
     return None
 
 
+def _print_external_protocol(endpoint: ResolvedEndpoint, query: str | None) -> bool:
+    """Print the live schema an external endpoint serves; say whether it did.
+
+    An endpoint reached over a browser WebSocket still has an HTTP side at the
+    same address: discovery just read ``/json/version`` there, and Chrome
+    serves ``/json/protocol`` beside it. The first version refused live help
+    for every external endpoint, so a person attaching got static text that
+    ended by telling them to launch a browser.
+
+    The schema is fetched here rather than through the vendored
+    ``core.protocol.discover_protocol``, which requests ``localhost`` and would
+    reach the wrong loopback family; the vendored formatting is reused as it
+    stands.
+    """
+    from .devtools_http import SCHEMA_TIMEOUT, fetch_devtools_json
+
+    try:
+        schema = fetch_devtools_json(
+            endpoint.host, endpoint.port, "/json/protocol", timeout=SCHEMA_TIMEOUT
+        )
+        domains = schema["domains"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+    # Past this point a schema is in hand, so an unresolvable query is the
+    # caller's usage error and must not be read as an unreachable endpoint.
+    if query is None:
+        core_protocol._print_all_domains(domains=domains)  # pyright: ignore[reportPrivateUsage]
+    elif "." not in query:
+        core_protocol._print_domain_detail(domains=domains, domain_name=query)  # pyright: ignore[reportPrivateUsage]
+    else:
+        core_protocol._print_method_detail(domains=domains, query=query)  # pyright: ignore[reportPrivateUsage]
+    return True
+
+
 def run_help(
     instance: str | None,
     query: str | None,
@@ -457,16 +535,21 @@ def run_help(
     port = _resolve_help_port(instance, registry_path, endpoint)
     if port is None:
         print(STATIC_HELP, end="")
+        print(LAUNCH_TRAILER, end="")
         return
     if isinstance(port, ResolvedEndpoint):
-        if port.websocket_urls:
-            print(STATIC_HELP, end="")
-            print("Live protocol help is unavailable over a browser WebSocket; /json/protocol requires HTTP.")
-            return
-        port = port.port
+        try:
+            if _print_external_protocol(port, query):
+                return
+        except ValueError as exc:
+            raise UsageError(str(exc)) from exc
+        print(STATIC_HELP, end="")
+        print(ENDPOINT_TRAILER.format(host=port.host, port=port.port), end="")
+        return
     try:
         core_protocol.discover_protocol(port=port, query=query)
     except ConnectionError:
         print(STATIC_HELP, end="")
+        print(LAUNCH_TRAILER, end="")
     except ValueError as exc:
         raise UsageError(str(exc)) from exc

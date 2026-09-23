@@ -127,12 +127,12 @@ class TestAVerbRunsOnASessionItWasGiven:
             lambda instance, registry_path, endpoint: resolved.append(
                 (instance, registry_path, endpoint)
             )
-            or 9222,
+            or 9333,
         )
 
         @contextlib.contextmanager
-        def fake_session(port, target=None, *, external=False, all_frames=False):
-            opened.append((port, target, external))
+        def fake_session(port, target=None, *, all_frames=False):
+            opened.append((port, target))
             yield FakeHandler()
 
         monkeypatch.setattr(curated, "_cdp_handler_session", fake_session)
@@ -140,23 +140,32 @@ class TestAVerbRunsOnASessionItWasGiven:
             pass
 
         assert resolved == [("inst-01", "/reg.json", "http://x:9333")]
-        assert opened == [(9222, "3", True)], "target or external did not reach the opener"
+        assert opened == [(9333, "3")], "the resolved address did not reach the opener"
 
     def test_an_endpointless_call_is_not_external(self, monkeypatch):
+        """External is not a flag passed down; it is the type of the address.
+
+        A registry instance resolves to an int and an external address to a
+        ResolvedEndpoint, and the session seam reads that. A separate boolean
+        could disagree with the address it travelled with.
+        """
         import contextlib
 
+        from browser_tools.endpoint import ResolvedEndpoint
+
         opened = []
-        monkeypatch.setattr(curated, "_resolve_port", lambda *a, **k: 9222)
+        monkeypatch.setattr(curated, "_resolve_port", lambda *a, **k: 9333)
 
         @contextlib.contextmanager
-        def fake_session(port, target=None, *, external=False, all_frames=False):
-            opened.append(external)
+        def fake_session(port, target=None, *, all_frames=False):
+            opened.append(port)
             yield FakeHandler()
 
         monkeypatch.setattr(curated, "_cdp_handler_session", fake_session)
         with curated._handler_for(None, "inst-01", None, None, None):
             pass
-        assert opened == [False]
+        assert opened == [9333]
+        assert not isinstance(opened[0], ResolvedEndpoint)
 
     def test_a_curated_verb_takes_the_handler_through(self):
         handler = FakeHandler()

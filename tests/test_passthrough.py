@@ -75,7 +75,7 @@ def make_fake_cdp_client_cls(responder=None, targets=None):
         async def __aexit__(self, *exc):
             return False
 
-        async def send(self, method, params=None, session_id=None):
+        async def send(self, method, params=None, session_id=None, timeout=None):
             calls.append((method, params, session_id))
             if method == "Target.getTargets":
                 return {"targetInfos": targets}
@@ -516,7 +516,7 @@ class TestHelp:
     def test_no_instances_prints_static_usage(self, registry_path, capsys):
         _seed(registry_path, {})
         passthrough.run_help(None, None, registry_path=registry_path)
-        assert capsys.readouterr().out == passthrough.STATIC_HELP
+        assert capsys.readouterr().out == passthrough.STATIC_HELP + passthrough.LAUNCH_TRAILER
 
     def test_multiple_live_instances_and_no_explicit_instance_prints_static_usage(
         self, registry_path, capsys, monkeypatch
@@ -527,7 +527,7 @@ class TestHelp:
         )
         monkeypatch.setattr(lifecycle, "instance_is_live", lambda inst: True)
         passthrough.run_help(None, None, registry_path=registry_path)
-        assert capsys.readouterr().out == passthrough.STATIC_HELP
+        assert capsys.readouterr().out == passthrough.STATIC_HELP + passthrough.LAUNCH_TRAILER
 
     def test_explicit_running_instance_prints_live_schema(
         self, registry_path, capsys, monkeypatch
@@ -562,7 +562,7 @@ class TestHelp:
 
         monkeypatch.setattr(core_protocol, "fetch_protocol_schema", boom)
         passthrough.run_help("site-01", None, registry_path=registry_path)
-        assert capsys.readouterr().out == passthrough.STATIC_HELP
+        assert capsys.readouterr().out == passthrough.STATIC_HELP + passthrough.LAUNCH_TRAILER
 
     def test_unknown_instance_is_lifecycle_error(self, registry_path):
         _seed(registry_path, {})
@@ -640,7 +640,7 @@ class TestCliFront:
         _seed(self._registry_path, {})
         rc = cli.main(["help"])
         assert rc == cli.EXIT_OK
-        assert capsys.readouterr().out == passthrough.STATIC_HELP
+        assert capsys.readouterr().out == passthrough.STATIC_HELP + passthrough.LAUNCH_TRAILER
 
     def test_help_with_instance_prints_live_schema(self, capsys, monkeypatch):
         _seed(self._registry_path, {"site-01": _entry(port=9222)})

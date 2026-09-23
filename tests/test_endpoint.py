@@ -276,7 +276,7 @@ class TestTheBrowserEnderRefusalIsOnlyForEndpoints:
         monkeypatch.setattr(lifecycle, "resolve_cdp_port", _fake_resolve)
 
         class _Cdp:
-            async def send(self, *, method, params=None, session_id=None):
+            async def send(self, *, method, params=None, session_id=None, timeout=None):
                 sent.append(method)
                 return {}
 
@@ -441,14 +441,32 @@ class TestConnectionDiagnosis:
         monkeypatch.setattr(
             "browser_tools.process_utils.find_listeners_on_port", lambda port: []
         )
-        message = one_shot.connection_failure_message(port=9222, cause=None, external=True)
-        assert "--remote-debugging-port=9222" in message
+        message = one_shot.connection_failure_message(
+            endpoint.resolve_endpoint_port("http://127.0.0.1:9222"), OSError("refused")
+        )
+        assert "--endpoint found no DevTools HTTP endpoint at 127.0.0.1:9222" in message
         assert "nothing is listening on port 9222" in message
+
+    def test_the_diagnosis_names_the_flag_that_was_typed(self, monkeypatch):
+        """A --chrome-profile failure must not tell the reader to check --endpoint."""
+        from browser_tools import one_shot
+        from browser_tools.endpoint import ResolvedEndpoint
+
+        monkeypatch.setattr(
+            "browser_tools.process_utils.find_listeners_on_port", lambda port: []
+        )
+        discovered = ResolvedEndpoint(
+            50900, "ws://[::1]:50900/devtools/browser/x", "ws://[::1]:50900/devtools/browser/x",
+            "[::1]", "--chrome-profile",
+        )
+        message = one_shot.connection_failure_message(discovered, OSError("refused"))
+        assert message.startswith("--chrome-profile found no DevTools HTTP endpoint at [::1]:50900")
+        assert "--endpoint" not in message
 
     def test_the_registry_path_message_is_unchanged(self):
         from browser_tools import one_shot
 
-        message = one_shot.connection_failure_message(port=9222, cause=None)
+        message = one_shot.registry_connection_failure_message(port=9222, cause=None)
         assert message == "No browser listening on port 9222. Start one with: bt launch"
 
 

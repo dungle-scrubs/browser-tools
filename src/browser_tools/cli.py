@@ -44,7 +44,7 @@ EXIT_USAGE = 2
 #: resolves as an instance name if the registry knows it, else as a
 #: Domain.method); a token that fits neither shape falls through to argparse,
 #: which rejects it as an unknown verb, unchanged from before this ticket.
-_KNOWN_VERBS = {
+KNOWN_VERBS = {
     "launch",
     "status",
     "stop",
@@ -92,14 +92,21 @@ ENDPOINT_HELP = (
 )
 
 
+CHROME_PROFILE_HELP = (
+    "Drive a Chrome started for debugging on the user data directory DIR, by reading "
+    "its DevToolsActivePort file. DIR is the directory passed to Chrome's "
+    "--user-data-dir. Chrome refuses remote debugging on a channel's default data "
+    "directory, so the everyday browser cannot be reached this way"
+)
+
+
 def _add_endpoint(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     """Give one browser-driving verb the ``--endpoint URL`` flag."""
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--endpoint", metavar="URL", help=ENDPOINT_HELP)
     group.add_argument(
-        "--chrome-profile", nargs="?", const="stable",
-        choices=("stable", "beta", "dev", "canary"),
-        help="Discover a Chrome debugging port file (pending ticket 12 verification)",
+        "--chrome-profile", nargs="?", const="stable", metavar="DIR",
+        help=CHROME_PROFILE_HELP,
     )
     return parser
 
@@ -1325,7 +1332,7 @@ def _split_leading_instance(
     """
     if (
         len(argv) >= 2
-        and argv[1] in _KNOWN_VERBS
+        and argv[1] in KNOWN_VERBS
         and lifecycle.instance_is_registered(argv[0], registry_path=registry_path)
     ):
         return argv[1:], argv[0]
@@ -1337,15 +1344,12 @@ def main(argv: list[str] | None = None) -> int:
     raw_argv = sys.argv[1:] if argv is None else argv
 
     try:
-        profile_probe, channel = passthrough.strip_chrome_profile_flag(raw_argv, verbs=_KNOWN_VERBS)
+        profile_probe, profile = passthrough.strip_chrome_profile_flag(raw_argv, verbs=KNOWN_VERBS)
     except UsageError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_USAGE
-    if channel is not None:
-        if any(t == "--endpoint" or t.startswith("--endpoint=") for t in profile_probe):
-            print("error: --endpoint and --chrome-profile cannot be combined", file=sys.stderr)
-            return EXIT_USAGE
-        verb = next((t for t in profile_probe if t in _KNOWN_VERBS), None)
+    if profile is not None:
+        verb = next((t for t in profile_probe if t in KNOWN_VERBS), None)
         if verb in REGISTRY_VERBS:
             print(f"error: {verb} does not take --chrome-profile", file=sys.stderr)
             return EXIT_USAGE
@@ -1362,7 +1366,7 @@ def main(argv: list[str] | None = None) -> int:
     # itself, because the raw-protocol line never reaches argparse.
     probe, endpoint = passthrough.strip_endpoint_flag(raw_argv)
     leading_instance: str | None = None
-    if probe and probe[0] not in _KNOWN_VERBS and probe[0] not in ("-h", "--help"):
+    if probe and probe[0] not in KNOWN_VERBS and probe[0] not in ("-h", "--help"):
         registry_path = lifecycle.registry_path_from_env()
         probe, leading_instance = _split_leading_instance(probe, registry_path)
         if leading_instance is None and passthrough.is_passthrough_head(
@@ -1370,7 +1374,7 @@ def main(argv: list[str] | None = None) -> int:
         ):
             try:
                 return _run_passthrough(
-                    raw_argv + (["--chrome-profile", channel] if channel is not None else []),
+                    raw_argv + (["--chrome-profile", profile] if profile is not None else []),
                     registry_path=registry_path,
                 )
             except LifecycleError as exc:
@@ -1405,13 +1409,22 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_USAGE
 
     try:
-        selected_channel = channel or getattr(args, "chrome_profile", None)
-        if selected_channel is not None:
+        selected_profile = profile or getattr(args, "chrome_profile", None)
+        if selected_profile is not None:
             if not hasattr(args, "endpoint"):
                 raise UsageError(f"{args.command} does not take --chrome-profile")
+            # Read the parsed namespace, not the spelling. argparse accepts any
+            # unambiguous prefix of a long option, so `--endp URL` sets
+            # `endpoint` while a scan for the exact token sees nothing; and the
+            # flag was already stripped from argv, so argparse's own mutually
+            # exclusive group never saw the pair. The endpoint the person typed
+            # was then overwritten and the invocation succeeded against a
+            # different browser. `step_list` has guarded this the same way.
+            if args.endpoint is not None:
+                raise UsageError("--endpoint and --chrome-profile cannot be combined")
             from .chrome_discovery import discover_chrome
 
-            args.endpoint = discover_chrome(selected_channel)
+            args.endpoint = discover_chrome(selected_profile)
         return _run(args)
     except curated.DialogCancelledError as exc:
         # The records explain the failure, so they go to stdout even though the

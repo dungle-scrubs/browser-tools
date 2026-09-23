@@ -147,7 +147,7 @@ def _run_collection(
 
     async def _collect() -> list[dict[str, Any]]:
         async with one_shot_page_session(
-            port, spec, target_by, external=endpoint is not None
+            port, spec, target_by
         ) as (cdp, session_id):
             return await collect_on_session(cdp, session_id, events, duration)
 

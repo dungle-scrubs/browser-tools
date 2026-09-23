@@ -32,6 +32,14 @@ a remote endpoint as loopback locally, so the safe pattern is the only pattern.
 The retired attach handler carried a ``BROWSER_TOOLS_ALLOW_REMOTE_ENDPOINT``
 escape hatch; it does not come back.
 
+The rule runs twice, because the HTTP form asks the peer for an address. A
+listener on ``127.0.0.1`` that answers ``/json/version`` with
+``{"webSocketDebuggerUrl": "ws://192.0.2.1:41234/devtools/browser/x"}`` was
+enough to make ``bt`` dial off-box, which made "loopback only" false on the
+form the guide presents first. :func:`validate_peer_websocket_url` re-runs
+:func:`resolve_endpoint_port` on whatever the peer answered, so the peer picks
+nothing about where ``bt`` connects.
+
 ``Browser.close`` and ``Browser.crash`` are refused
 ---------------------------------------------------
 Everything else passes, including navigation, input, cookies, and
@@ -70,11 +78,69 @@ class EndpointUsageError(UsageError):
 
 @dataclass(frozen=True)
 class ResolvedEndpoint:
-    """An external address, never an Instance or a registry record."""
+    """An external address, never an Instance or a registry record.
+
+    ``websocket_url`` is the one browser WebSocket this endpoint dials, or
+    ``None`` when the address is the HTTP form and the URL is still to be read
+    from ``/json/version``. It is one URL and not a list: a second connection
+    is a second unauthenticated CDP session and, on a Chrome that asks for
+    approval, a second Allow prompt for one invocation.
+
+    ``host`` is the validated loopback host, kept in the bracketed form a URL
+    uses (``127.0.0.1`` or ``[::1]``), so every later request dials the address
+    that was checked instead of re-deriving one.
+
+    ``flag`` is the flag the person typed. Diagnostics name it, because
+    ``--endpoint`` and ``--chrome-profile`` reach the same code and a message
+    naming the wrong one sends the reader to the wrong remedy.
+    """
 
     port: int
     url: str
-    websocket_urls: tuple[str, ...] = ()
+    websocket_url: str | None = None
+    host: str = "127.0.0.1"
+    flag: str = "--endpoint"
+
+
+def for_url(host: str) -> str:
+    """Bracket an IPv6 literal so it can sit in a URL authority."""
+    return f"[{host}]" if ":" in host else host
+
+
+def validate_peer_websocket_url(url: object, *, source: str) -> str:
+    """Re-check a WebSocket URL a peer chose, with the flag's own validator.
+
+    ``/json/version`` is answered by whatever holds the port, and its
+    ``webSocketDebuggerUrl`` names a host. Handing that host to the WebSocket
+    client lets the peer pick the address ``bt`` dials, which is the loopback
+    rule undone by the thing the rule exists to contain. The same validator the
+    flag runs therefore runs again here, on the answer.
+
+    Raises:
+        ConnectionError: The peer answered with something that is not a
+            loopback browser WebSocket URL. This is the peer's failure, not the
+            caller's typing, so it is exit 1 with a diagnostic rather than a
+            usage error.
+    """
+    if not isinstance(url, str) or not url:
+        raise ConnectionError(
+            f"{source} answered /json/version without a webSocketDebuggerUrl, "
+            "so it is not a DevTools HTTP endpoint."
+        )
+    try:
+        resolved = resolve_endpoint_port(url)
+    except EndpointUsageError as exc:
+        raise ConnectionError(
+            f"{source} answered /json/version with webSocketDebuggerUrl {url!r}, and "
+            f"bt will not dial it. The peer on the port does not get to choose the "
+            f"address bt connects to. {exc}"
+        ) from exc
+    if resolved.websocket_url is None:
+        raise ConnectionError(
+            f"{source} answered /json/version with webSocketDebuggerUrl {url!r}, "
+            "which is not a ws:// browser WebSocket URL."
+        )
+    return resolved.websocket_url
 
 
 def resolve_endpoint_port(endpoint: str) -> ResolvedEndpoint:
@@ -111,8 +177,8 @@ def resolve_endpoint_port(endpoint: str) -> ResolvedEndpoint:
             c.isspace() for c in text
         ):
             raise EndpointUsageError("--endpoint ws URL requires /devtools/browser/ID; HTTP discovery uses http://HOST:PORT")
-        return ResolvedEndpoint(port, text, (text,))
-    return ResolvedEndpoint(port, text)
+        return ResolvedEndpoint(port, text, text, for_url(host))
+    return ResolvedEndpoint(port, text, None, for_url(host))
 
 
 def refuse_browser_lifetime_method(method: str) -> None:

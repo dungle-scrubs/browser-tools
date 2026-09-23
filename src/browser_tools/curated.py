@@ -65,7 +65,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from .endpoint import ResolvedEndpoint
-from .external_connection import APPROVAL_TIMEOUT
+from .external_connection import APPROVAL_TIMEOUT, SESSION_TIMEOUT
 
 if TYPE_CHECKING:
     from collections.abc import Generator
@@ -182,7 +182,7 @@ def run_session(
     spec, by = target_selector(target, url)
     port = _resolve_port(instance, registry_path, endpoint)
     with _cdp_handler_session(
-        port, spec, by, external=endpoint is not None, all_frames=all_frames, dialog=dialog
+        port, spec, by, all_frames=all_frames, dialog=dialog
     ) as handler:
         handler.start_run_network()
         yield handler
@@ -214,7 +214,7 @@ def _handler_for(
         return
     port = _resolve_port(instance, registry_path, endpoint)
     with _cdp_handler_session(
-        port, spec, external=endpoint is not None, all_frames=all_frames,
+        port, spec, all_frames=all_frames,
         **({"target_by": by} if url is not None else {}),
         **({"dialog": dialog} if dialog is not None else {}),
     ) as opened:
@@ -227,7 +227,6 @@ def _cdp_handler_session(
     target_spec: str | None = None,
     target_by: str | None = None,
     *,
-    external: bool = False,
     all_frames: bool = False,
     dialog: str | None = None,
 ) -> Generator[CDPHandler]:
@@ -243,10 +242,10 @@ def _cdp_handler_session(
     reads ``--target``: a 1-based index into the page targets sorted by target
     ID, or a target ID prefix. None takes the first page in that order.
 
-    ``external`` says the port came from ``--endpoint``. A failed connection
-    then also reports who holds the port and what profile directory they hold:
-    there is no registry entry to compare against and no ``bt status`` row to
-    look the browser up in (#97).
+    A ``ResolvedEndpoint`` says the address came from ``--endpoint`` or
+    ``--chrome-profile``. A failed connection then also reports who holds the
+    port and what user data directory they hold: there is no registry entry to
+    compare against and no ``bt status`` row to look the browser up in (#97).
     """
     handler = CDPHandler(
         port if isinstance(port, ResolvedEndpoint) else f"http://127.0.0.1:{port}",
@@ -259,9 +258,14 @@ def _cdp_handler_session(
         handler.configure_dialog_policy(dialog)
     thread = threading.Thread(target=handler.run, name="curated-cdp", daemon=True)
     thread.start()
+    # An external address gets the runtime's own bounds plus slack, so the
+    # runtime reports why it failed instead of this poll giving up first and
+    # reporting that it gave up. The reviewed build polled a shorter deadline
+    # than the connection it was waiting on, so a wedged peer produced a
+    # generic message while the real diagnosis was still coming.
     timeout = (
-        APPROVAL_TIMEOUT + 2.0
-        if isinstance(port, ResolvedEndpoint) and port.websocket_urls
+        APPROVAL_TIMEOUT + SESSION_TIMEOUT + 2.0
+        if isinstance(port, ResolvedEndpoint)
         else HANDLER_CONNECT_TIMEOUT_SECONDS
     )
     deadline = time.monotonic() + timeout
@@ -282,16 +286,21 @@ def _cdp_handler_session(
         handler.stop()
         thread.join(timeout=2.0)
         number = port.port if isinstance(port, ResolvedEndpoint) else port
-        message = f"could not open a CDP session on the instance at port {number}"
         if reason:
-            message = f"{message}: {reason}"
-        if external and not reason:
-            message = (
-                f"--endpoint on port {number} did not answer. "
-                f"Start the browser with --remote-debugging-port={number}.\n"
+            # The runtime reached the failure first, and its message already
+            # names the flag, the address and who holds the port.
+            raise LifecycleError(reason)
+        if isinstance(port, ResolvedEndpoint):
+            # The runtime never reported at all. Nothing is known beyond the
+            # address and the wait, so the message says only that, plus who
+            # holds the port -- there is no registry row to look this browser
+            # up in and no `bt launch` that would bring it back.
+            raise LifecycleError(
+                f"{port.flag} on port {number} did not open a CDP session in "
+                f"{timeout:.0f}s, and reported no reason.\n"
                 f"{browser_endpoint.describe_endpoint(number)}"
             )
-        raise LifecycleError(message)
+        raise LifecycleError(f"could not open a CDP session on the instance at port {number}")
     try:
         yield handler
     finally:
@@ -738,7 +747,7 @@ def _capture_for(handler: CDPHandler, duration: float, max_frames: int) -> int:
 
 
 async def _capture_screenshot(
-    port: int | ResolvedEndpoint, target_spec: str | None, target_by: str | None, *, external: bool = False
+    port: int | ResolvedEndpoint, target_spec: str | None, target_by: str | None
 ) -> str:
     """Capture a full-page PNG over a one-shot session, guarding blank frames.
 
@@ -748,7 +757,7 @@ async def _capture_screenshot(
     shared retry budget): a near-uniform capture is retried after a short
     delay, matching the daemon's ``take_screenshot`` post-capture check.
     """
-    async with one_shot_page_session(port, target_spec, target_by, external=external) as (
+    async with one_shot_page_session(port, target_spec, target_by) as (
         cdp,
         session_id,
     ):
@@ -810,7 +819,7 @@ def screenshot(
         port = _resolve_port(instance, registry_path, endpoint)
         spec, target_by = target_selector(target, url)
         data = asyncio.run(
-            _capture_screenshot(port, spec, target_by, external=endpoint is not None)
+            _capture_screenshot(port, spec, target_by)
         )
 
     if not data:
