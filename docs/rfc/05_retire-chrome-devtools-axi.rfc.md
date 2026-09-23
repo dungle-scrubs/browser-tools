@@ -558,17 +558,29 @@ a month apart can get different verdicts from the same pinned engine.
 selects no dependencies and installs exactly the same wheel files as a base
 install; two clean pip installs verified that it cannot supply a marker.
 `bt insights --setup` is the explicit opt-in. It requires Node.js 22+ and npm
-on PATH, and runs `npm ci --omit=dev` in the installed adapter directory.
-`node_modules` lands beside the adapter, never in the user's working directory.
-Setup records the lockfile digest only after a successful install and checks
-installed dependency versions. Later setup calls reuse that complete install;
-a changed lockfile requires setup again. A bare `npm install` is never run.
-Concurrent setup and analysis are serialized with a package-local file lock.
+on PATH, and runs `npm ci --omit=dev --ignore-scripts` in the installed
+adapter directory. `node_modules` lands beside the adapter, never in the user's
+working directory. `--ignore-scripts` closes the install-time script channel;
+none of the three packages declares a lifecycle script, and the install is
+byte-identical with the flag. Setup records the lockfile digest only after a
+successful install and checks installed dependency versions; the check skips
+`dev` and absent `optional` lockfile entries, which `--omit=dev` correctly does
+not install. Later setup calls reuse that complete install. A complete tree
+whose marker is missing is re-stamped, not reinstalled, so setup stays offline.
+A changed lockfile over an existing marker requires the install again. A bare
+`npm install` is never run. Concurrent setup and analysis are serialized with a
+package-local file lock, and a wait behind a held lock says so on stderr.
+
+The adapter's own files ship in the wheel, so `npm` cannot restore one. A
+missing adapter file is exit 1 naming the file and the package reinstall, not
+`bt insights --setup`, which cannot repair it.
 
 **Network access.** Only explicit setup reaches the npm registry. Analysis
 before setup exits 2 with `bt insights --setup`; it never installs implicitly.
 Setup failures name the network and write-access requirements and the
-`npm ci --omit=dev` command to run when available. Every later invocation reads
+`npm ci --omit=dev --ignore-scripts` command to run when available. That
+command is printed as valid shell, because a person reading it is offline or
+broken and has nothing else. Every later invocation reads
 a local trace file and writes JSON (or text when selected), with an explicit
 path argument rather than a shell string. Offline after setup is supported.
 
@@ -594,8 +606,10 @@ updates are versioned with the engine; they are not a second runtime install.
 `savings` is the largest positive time saving as `{metric, ms}`, or `null`
 when none exists. CLS savings are unitless and excluded from this time field;
 the formatter retains other savings in `detail`. `--insight NAME` returns the
-same document carrying one insight; an unknown name is exit 2 with the valid
-names listed. `--format text` prints the formatter output alone, unwrapped.
+same document carrying one insight per navigation; an unknown name is exit 2
+with the valid names listed. `--format text` prints the formatter output alone,
+unwrapped. A trace with more than one navigation gets a `# Navigation N of M:
+URL` line before each block, because concatenated details name no page.
 
 At run time the verb reads the producing browser version from the trace's
 own metadata (`product-version`, `user-agent`, or the corresponding browser
@@ -606,15 +620,28 @@ out-of-range versions refuse with exit 1, a stamped JSON document and a remedy.
 `--ignore-engine-mismatch` accepts unvalidated results and keeps the stamp.
 Text success prints only the formatter output; failures remain stamped JSON.
 
-Zero Insight Sets is exit 1 with a diagnostic naming the missing supported
-navigation and the remedy: capture `Page.navigate` inside `bt trace --steps`,
-then wait for load and drive the interaction. A duration trace on an already
-loaded page, and even a click-only trace there, both produced zero sets.
+Zero Insight Sets is exit 1 with a diagnostic naming the cause the trace's
+own events establish, and the remedy that matches it. The engine builds one set
+per outermost main-frame navigation that commits a document, so the adapter
+separates: no `navigationStart` and no document request, which is the capture
+with no navigation; `navigationStart` present with an empty `documentLoaderURL`,
+which is a navigation that committed nothing inside the trace window; a
+document request with no `navigationStart`, which is a `--categories` list that
+dropped `blink.user_timing`; a committed subframe navigation only; and a
+committed main-frame navigation the engine still built no set from. Only the
+first prints "capture `Page.navigate` inside `bt trace --steps`, then wait for
+load and drive the interaction". A remedy must never reproduce the failure: a
+narrowed-category capture already had the navigate step. A duration trace on an
+already loaded page, and even a click-only trace there, both produced zero sets.
 Navigation without an interaction reports `INPBreakdown: pass`; navigation
 plus a real click blocking for 280ms reports `fail` and its timing breakdown.
 Insight model errors are exit 1 with available results retained. A named
-selection reports errors for that model only. Engine stderr alone is not
-failure: the engine can log a recoverable Lantern error while parsing.
+selection reports errors for that model only. A navigation that committed
+Chrome's own `chrome-error://` document is exit 1 the same way: the requested
+page never loaded, so the insights describe the error page and exit 0 would
+read as a clean report. Engine stderr alone is not failure: the engine can log
+a recoverable Lantern error while parsing. A run that did fail carries that
+stderr into the diagnostic, because it is the only account of why.
 
 The base install is unchanged: `pip install browser-tools` stays
 `websockets`-only, with no Node or engine. Capture is pure Python over CDP and
@@ -933,7 +960,10 @@ The `~/dev/firstmate` clone stays. Deleting it is out of scope.
 | `bt trace --steps` and the step list fails validation | exit 2 before `Tracing.start`; no output file is created. |
 | `bt trace --steps` and a step fails at run time | the run stops at that step, the trace is still written and reported, and the verb exits 1. The run's status wins. |
 | `bt trace` and `dataLossOccurred` is true | reported in the trace document, never swallowed. |
-| `bt insights` and `npm ci` has not run | exit 2 naming the setup command, and naming the network requirement when offline. |
+| `bt insights` and `npm ci` has not run | exit 2 naming the setup command and the npm registry the setup needs. |
+| `bt insights` and an adapter file shipped in the wheel is missing | exit 1 naming the file and the package reinstall. `npm` cannot restore package data. |
+| `bt insights --trace` and the path is empty, a directory, a FIFO or any other non-regular file | exit 2 before Node starts. Analysis reads the file to the end, so it would never finish. |
+| `bt insights` and a navigation committed `chrome-error://` | exit 1 naming the error document, with the analysis retained. |
 | `bt insights --insight` with an unknown name | exit 2 with the valid names listed. |
 | `bt insights` and the engine revision does not match the browser | exit 1 naming the remedy, unless `--ignore-engine-mismatch`. The stamp is present either way. |
 | `--endpoint ws://` and the host is not loopback | exit 2, the existing non-loopback refusal with the tunnel remedy. |

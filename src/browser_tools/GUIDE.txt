@@ -863,13 +863,20 @@ PERFORMANCE CAPTURES AND CPU PROFILING
   insights --setup
       Explicitly install the optional analysis runtime. Requires Node.js 22+
       and npm on PATH, network access to the npm registry, and write access to
-      the installed package. Runs only npm ci --omit=dev against the committed
-      lockfile inside browser_tools/_insights; node_modules stays there.
+      the installed package. Runs only npm ci --omit=dev --ignore-scripts
+      against the committed lockfile inside browser_tools/_insights;
+      node_modules stays there. --ignore-scripts closes the install-time
+      script channel; the install is byte-identical with it.
       The base Python install still pulls only websockets, no Node or engine.
       There is no insights Python extra: an empty extra cannot install a marker.
-      Before setup, analysis exits 2 and prints: bt insights --setup
-      A failed setup prints the npm ci command to retry when network returns.
+      Before setup, analysis exits 2, naming this command and the npm registry.
+      A failed setup prints the npm ci command to retry when network returns,
+      as valid shell you can paste.
       Re-run setup after an upgrade changes the lockfile. No auto-install.
+      A complete node_modules whose .installed marker is gone is re-stamped
+      without reaching the registry, so offline after setup keeps working.
+      An adapter file that ships in the wheel cannot be restored by npm: a
+      missing one exits 1 and names the package reinstall instead.
 
   insights --trace FILE [--insight NAME] [--format json|text]
       [--ignore-engine-mismatch]
@@ -883,6 +890,11 @@ PERFORMANCE CAPTURES AND CPU PROFILING
       --insight selects that model per navigation. Unknown names exit 2 and
       list the valid names. Model errors exit 1 and retain available results;
       selecting one insight only fails for errors in the selected model.
+      Text format names each navigation when a trace has more than one.
+      --trace must name a regular file. An empty path, a directory or a FIFO
+      exits 2 before Node starts: analysis reads the file to the end.
+      A navigation that committed Chrome's chrome-error:// document exits 1.
+      The requested page never loaded, so the insights describe the error page.
 
       Engine pin: @paulirish/trace_engine 0.0.65. Provisional validated versions:
       Chrome 151.0.7922.34 and 153.0.0.0 only, not intervening builds. The Open
@@ -895,9 +907,18 @@ PERFORMANCE CAPTURES AND CPU PROFILING
       --ignore-engine-mismatch accepts that risk and preserves the stamp.
       JSON failures remain JSON even with --format text so the stamp survives.
 
-      Zero Insight Sets is exit 1, with the capture remedy. A trace on an
-      already loaded page can have zero sets even when it contains a click.
-      Start the navigation inside the trace; then drive the interaction.
+      Zero Insight Sets is exit 1. The diagnostic names the cause the trace's
+      own events show, and gives the remedy that matches that cause:
+        No navigationStart and no document request: no navigation was
+        captured. A trace on an already loaded page can have zero sets even
+        when it contains a click. Start the navigation inside the trace;
+        then drive the interaction.
+        navigationStart with an empty documentLoaderURL: the navigation
+        committed no document inside the trace window. Read the navigate
+        step's own result, and end on wait-text or wait-stable, not --duration.
+        A document request and no navigationStart: --categories dropped
+        blink.user_timing, which carries navigationStart. Re-capture with the
+        default categories, or keep blink.user_timing in the list you pass.
       For example, save this Step List as load.steps:
           Page.navigate '{"url":"http://127.0.0.1:8000/"}'
           wait-stable

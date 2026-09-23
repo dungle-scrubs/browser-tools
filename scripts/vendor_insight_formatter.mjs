@@ -23,7 +23,11 @@ let insight = read('PerformanceInsightFormatter')
 write('PerformanceInsightFormatter', insight);
 write('UnitFormatters', read('UnitFormatters'));
 const network = read('NetworkRequestFormatter');
+// BSD-3-Clause clause 1: a source redistribution retains the copyright notice.
+// The extracted slices start below it, so it is carried over explicitly.
+const notice = text => between(text, '// Copyright', 'import ');
 write('NetworkRequestFormatter',
+  notice(network) +
   between(network, 'const MAX_HEADERS_SIZE', 'export class NetworkRequestFormatter') +
   'export class NetworkRequestFormatter {\n' +
   between(network, '  static allowHeader', '  static async formatBody') + '}\n' +

@@ -627,6 +627,22 @@ def _print_json(payload: object) -> None:
     print(json.dumps(payload, indent=2))
 
 
+def _insights_text(document: dict[str, Any]) -> str:
+    """Render the upstream formatter text, naming each navigation when there is more than one.
+
+    A single-navigation trace prints the formatter output alone, which is what
+    the RFC specifies. Several navigations concatenated with no boundary read
+    as one run-on document in which nothing says which page a block describes.
+    """
+    navigations = document["navigations"]
+    blocks: list[str] = []
+    for index, navigation in enumerate(navigations, start=1):
+        if len(navigations) > 1:
+            blocks.append(f"# Navigation {index} of {len(navigations)}: {navigation['url']}")
+        blocks.extend(item["detail"] for item in navigation["insights"])
+    return "\n\n".join(blocks)
+
+
 def _browser_args_from_remainder(remainder: list[str] | None) -> list[str]:
     """Return the verbatim BROWSER_ARGS that follow ``--``, or reject the remainder.
 
@@ -905,8 +921,7 @@ def _run(args: argparse.Namespace) -> int:
             return EXIT_OK
         document, code = insights.analyze(args.trace, args.insight, args.ignore_engine_mismatch)
         if args.format == "text" and code == EXIT_OK:
-            print("\n\n".join(item["detail"] for navigation in document["navigations"]
-                              for item in navigation["insights"]))
+            print(_insights_text(document))
         else:
             _print_json(document)
         if code:

@@ -20,6 +20,24 @@ These are unmodified synthetic captures, not hand-authored trace events.
   including RenderBlocking fail. It is prototype evidence, not a new capture
   from the merged trace verb.
 
+The four zero-set and failure fixtures were captured on 2026-09-23 the same
+way, over a loopback HTTP server, producer `HeadlessChrome/151.0.7922.34`.
+Each one names a different cause, and each was a case the single fixed
+zero-Insight-Set diagnostic described wrongly:
+
+- `narrow-categories.json`: the `nav-click` step list captured with
+  `--categories=devtools.timeline,v8.execute`. The navigation is in the trace
+  as a Document request, but `navigationStart` is in `blink.user_timing`,
+  which that category list drops.
+- `uncommitted-navigation.json`: `Page.navigate` to a 404 URL with
+  `--duration 3`. One `navigationStart`, `documentLoaderURL` empty: no
+  document committed inside the trace window.
+- `error-page.json`: `Page.navigate` to `http://127.0.0.1:1/never.html`, which
+  fails with `net::ERR_UNSAFE_PORT`, then `wait-stable`. Chrome commits
+  `chrome-error://chromewebdata/` and the engine analyses that error page.
+- `two-navigations.json`: `Page.navigate` to two pages in one step list, each
+  followed by `wait-text` and `wait-stable`. Two Insight Sets, 19 models each.
+
 `tests/test_insights_live.py` repeats navigation-only and navigation-plus-click
 captures using the merged `bt trace` over a loopback HTTP server. Run after
 `bt insights --setup`, with `BT_INSIGHTS_LIVE=1`. When selected, it fails if
