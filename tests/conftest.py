@@ -81,6 +81,37 @@ def isolated_profile_roots(tmp_path_factory, monkeypatch):
 #: the whole protection, and a double is not a boundary.
 FORBIDDEN_PORT = 9222
 
+#: The suite's own launches must not land on ``FORBIDDEN_PORT``.
+#:
+#: ``core.registry.allocate_port`` probes upward from ``BASE_PORT``, which is
+#: 9222, so the first browser the suite launches takes 9222 whenever nothing
+#: else holds it. The guard below then refuses the fixture's own endpoint and
+#: 25 tests fail. That is exactly what happened: while a developer's instance
+#: held 9222 the suite silently got 9223 and up, and the day that instance went
+#: away the suite started failing on a tree that had not changed.
+#:
+#: Moving the base up is the whole fix. It keeps ``allocate_port``'s probing
+#: and its collision handling, costs the suite nothing, and leaves 9222
+#: meaning one thing only: a browser this suite did not launch.
+TEST_BASE_PORT = 9422
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _suite_ports_start_above_the_default_port():
+    """Move the suite's port allocation off ``FORBIDDEN_PORT`` for the session."""
+    from browser_tools.core import registry
+
+    original_base = registry.BASE_PORT
+    original_max = registry.MAX_PORT
+    registry.BASE_PORT = TEST_BASE_PORT
+    registry.MAX_PORT = TEST_BASE_PORT + 100
+    try:
+        yield
+    finally:
+        registry.BASE_PORT = original_base
+        registry.MAX_PORT = original_max
+
+
 
 @pytest.fixture(autouse=True)
 def no_test_talks_devtools_on_the_default_port(monkeypatch):
