@@ -45,12 +45,21 @@ def registry_path(tmp_path):
 
 @pytest.fixture
 def upstream_defaults(monkeypatch):
-    """Restore the vendored module to its upstream 9222 defaults.
+    """Restore the vendored module to its upstream 9222 defaults, hermetically.
 
     Production runs with these values; only the call-site wrapper lifts them.
+    The listener probe is stubbed out as well, so these tests never open a
+    socket: with the wrapper regressed, the real allocator would probe the
+    allocation base upward, and a bare TCP connect to 9222 on a developer
+    machine reaches whatever holds it - their own Chrome. The stub keeps the
+    assertion (the returned port) while removing the contact (review finding
+    on PR #173). A stubbed-listener allocation still returns the base port
+    for an empty registry, so a regressed wrapper returns 9222 and fails the
+    test exactly as before.
     """
     monkeypatch.setattr(core_registry, "BASE_PORT", UPSTREAM_BASE_PORT)
     monkeypatch.setattr(core_registry, "MAX_PORT", UPSTREAM_BASE_PORT + 100)
+    monkeypatch.setattr(core_registry, "_port_is_listening", lambda port: False)
 
 
 class TestChromeLaunch:
