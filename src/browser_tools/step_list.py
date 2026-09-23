@@ -74,6 +74,7 @@ STEP_VERBS = frozenset(
 
 #: Verbs that exist but cannot be a step, each with the reason a caller needs.
 EXCLUDED_VERBS: dict[str, str] = {
+    "insights": "it analyzes a local trace, not the attached browser",
     "navigate": "use a raw Page.navigate step; the run owns its dialog policy",
     "trace": "a trace owns a Step Run; nesting it inside a run is not supported",
     "attach": (

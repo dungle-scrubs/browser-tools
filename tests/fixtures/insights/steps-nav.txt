@@ -1,0 +1,2 @@
+Page.navigate '{"url":"file:///Users/kevin/dev/browser-tools/.scratch/retire-axi/work/09-insights/fixture.html"}'
+wait-idle

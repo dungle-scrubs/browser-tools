@@ -145,6 +145,14 @@ glossary rather than left to name code that does not exist.
   script with no manual entry fails the build too. The manual covers the CPU
   Profiler in its own section for that reason.
 
+- **Insight Set** - the trace engine's group of performance insight models for
+  one navigation and its time bounds, URL and frame. The engine may also group
+  meaningful work before a navigation under its `NO_NAVIGATION` key. An Insight
+  Set carries successful models separately from `modelErrors`. It is not a
+  synonym for a whole trace or an interaction. The measured duration and
+  click-only captures on an already loaded page produce zero sets; include a
+  navigation in `trace --steps` when capturing for `insights`.
+
 ## Module names (architecture)
 
 - **CDPRuntime** - the deep half of the CDP layer: owns the background

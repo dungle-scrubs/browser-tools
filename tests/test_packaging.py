@@ -169,10 +169,13 @@ class TestPhase5Packaging:
         the only documentation an agent reads.
         """
         artifacts = _metadata()["tool"]["hatch"]["build"]["targets"]["wheel"]["artifacts"]
-        assert artifacts == [
-            "src/browser_tools/*.js",
-            "src/browser_tools/GUIDE.txt",
-        ], "detect_interstitial.js and GUIDE.txt ship; *.mjs and *.sh do not"
+        assert "src/browser_tools/*.js" in artifacts
+        assert "src/browser_tools/GUIDE.txt" in artifacts
+        assert "src/browser_tools/*.mjs" not in artifacts
+        assert "src/browser_tools/*.sh" not in artifacts
+        # RFC-05 adds only the offline adapter, not the retired Node session.
+        assert "src/browser_tools/_insights/*.mjs" in artifacts
+        assert "!/src/browser_tools/_insights/node_modules/**" in artifacts
 
     def test_all_three_entry_points_survive(self) -> None:
         assert _metadata()["project"]["scripts"] == {

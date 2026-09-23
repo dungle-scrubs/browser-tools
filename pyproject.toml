@@ -77,15 +77,30 @@ browser-tools-profiler = "browser_tools.profiler:main"
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[tool.hatch.build]
+exclude = [
+    "src/browser_tools/_insights/node_modules",
+    "src/browser_tools/_insights/.installed*",
+    "src/browser_tools/_insights/.setup.lock",
+]
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/browser_tools"]
 artifacts = [
     "src/browser_tools/*.js",
     "src/browser_tools/GUIDE.txt",
+    "src/browser_tools/_insights/*.mjs",
+    "src/browser_tools/_insights/*.js",
+    "src/browser_tools/_insights/*.json",
+    "src/browser_tools/_insights/vendor/*.js",
+    "src/browser_tools/_insights/vendor/LICENSE",
+    "!/src/browser_tools/_insights/node_modules/**",
+    "!/src/browser_tools/_insights/.installed*",
+    "!/src/browser_tools/_insights/.setup.lock",
 ]
 
 [tool.hatch.build.targets.sdist]
-include = [
+only-include = [
     "src/browser_tools",
     "tests",
     "README.md",
