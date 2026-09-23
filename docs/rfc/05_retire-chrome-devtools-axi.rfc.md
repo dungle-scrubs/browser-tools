@@ -972,10 +972,26 @@ Machine-level, outside this repository, ordered after the verbs ship.
 | `~/dev/skills/browser-tools` | Update to the new surface; it is the source of the deployed skill. |
 | npm global | `npm uninstall -g chrome-devtools-axi`. |
 
-**Two capabilities are given up on purpose** and must be named in the removal
-record: Lighthouse's audit list, which the recipe does not reproduce because
-the audits are that tool's own scoring, and anything ticket #159's verification
-turns up.
+**What is given up must be named in the removal record**, and this paragraph
+was wrong about it until ticket 13 measured the recipe.
+
+The audit list is **not** given up. The recipe runs Lighthouse itself, so it
+reports the full audit list and the category scores: measured at 161 audits
+and five categories on Lighthouse 13.5.0, exit 0, by
+`docs/research/probes/151/recipe-as-shipped.sh`. The audits are Lighthouse's
+own scoring and the recipe reaches them by running Lighthouse, not by
+reproducing them.
+
+The gap runs the other way. `trace` and `insights` produce no audit list and
+no category scores, because that scoring is Lighthouse's. And the recipe
+reports nothing about an interaction: it audits one navigation and drives no
+input, so `inp-breakdown-insight` comes back `notApplicable` on every run.
+That is what `trace --steps` is for, with the navigation in the same step
+list, since a trace holding the click alone yields no Insight Sets at all.
+
+So the removal record names one capability given up, not two: anything ticket
+#159's verification turns up. Camoufox has no debugging port and cannot be
+audited at all.
 
 firstmate is uninstalled alongside, because it reinstalls axi from its
 bootstrap. Its measured footprint: `~/.local/bin/treehouse` and its
