@@ -66,12 +66,14 @@ STEP_VERBS = frozenset(
         "storage",
         "screenshot",
         "screencast",
+        "heap",
     }
 )
 
 #: Verbs that exist but cannot be a step, each with the reason a caller needs.
 EXCLUDED_VERBS: dict[str, str] = {
     "navigate": "use a raw Page.navigate step; the run owns its dialog policy",
+    "trace": "a trace owns a Step Run; nesting it inside a run is not supported",
     "attach": (
         "it streams until stdin reaches EOF, so it has no bounded end and could "
         "never hand control to the next step"

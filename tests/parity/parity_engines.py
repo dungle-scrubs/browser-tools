@@ -24,12 +24,14 @@ node the same way.
 
 from __future__ import annotations
 
+import os
 import re
 from typing import Any, Protocol, runtime_checkable
 
 from parity_comparison import PageCapture, SnapshotNode
 from parity_corpus import CORPUS, CorpusPage
 
+from browser_tools.lifecycle import CHROME_BINARY_ENV_VAR
 from browser_tools.native_interaction import (
     DOM_RESOLVE_NODE,
     RUNTIME_CALL_FUNCTION_ON,
@@ -473,9 +475,8 @@ class NodeMcpSession:
     _INIT_TIMEOUT = 120.0
     _CALL_TIMEOUT = 60.0
 
-    def __init__(self, *, headless: bool = True, channel: str = "stable") -> None:
+    def __init__(self, *, headless: bool = True) -> None:
         self._headless = headless
-        self._channel = channel
         self._broker: Any = None
         self._page_scoped: frozenset[str] = frozenset()
         self._page_id: int | None = None
@@ -483,7 +484,10 @@ class NodeMcpSession:
     def __enter__(self) -> NodeMcpSession:
         from node_broker import McpBroker
 
-        cmd = ["npx", "-y", "chrome-devtools-mcp@latest", "--isolated", "--channel", self._channel]
+        binary = os.environ.get(CHROME_BINARY_ENV_VAR)
+        if not binary:
+            raise RuntimeError(f"set {CHROME_BINARY_ENV_VAR} to a test browser binary")
+        cmd = ["npx", "-y", "chrome-devtools-mcp@latest", "--isolated", "--executablePath", binary]
         if self._headless:
             cmd.append("--headless")
         self._broker = McpBroker(cmd)

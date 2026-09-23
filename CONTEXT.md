@@ -42,11 +42,12 @@ glossary rather than left to name code that does not exist.
 - **Interstitial** - an anti-bot challenge page (Cloudflare, DataDome,
   Akamai, PerimeterX, Imperva, AWS WAF). Detected by multi-signal
   heuristics after navigation; some types auto-retry.
-- **Bounded Capture** - the whole of `screencast`: one invocation starts the
-  capture, buffers frames, writes them to `--dir`, and exits. It ends at the
-  `--duration` or the `--max-frames` cap, whichever comes first. The frame
-  buffer is process-local, so nothing outlives the invocation and no verb pair
-  can span two processes.
+- **Bounded Capture** - the family of `screencast`, `trace` and `heap`:
+  one invocation starts, drives or waits, collects, writes and exits. Nothing
+  outlives it. Screencast ends at its duration or frame cap; trace ends at its
+  duration or Step Run bound; heap completes when its snapshot arrives.
+  A trace wraps the existing Step Run and cannot itself be a step. A heap
+  snapshot completes within its own step.
 - **Step Run** - the whole of `run`: one invocation, one CDP connection, one
   attached session, many steps. It is the only place a browser-driving verb
   runs over a session it did not open. Nothing outlives the invocation, so it
