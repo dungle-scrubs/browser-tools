@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from .curated_runtime import ResponseBuffer
 
 from .core.attach import AmbiguousTargetError, TargetNotFoundError
+from .core.errors import NoPageError
 from .dialog_policy import DialogPolicy
 from .endpoint import ResolvedEndpoint
 from .lifecycle import LifecycleError
@@ -42,9 +43,16 @@ def _running_loop() -> asyncio.AbstractEventLoop | None:
 #: Connection failures that are outcomes rather than defects: no browser on
 #: the port, and a target spec that names no page or more than one. They get a
 #: one-line message; everything else keeps its traceback.
+#:
+#: ``NoPageError`` belongs here and was missing. A headless shell starts with
+#: no tab at all, so a browser with zero page targets is the ordinary state of
+#: a freshly launched instance, not a defect. Leaving it out meant every verb
+#: against such an instance printed a twenty-line Python traceback and then
+#: the correct one-line diagnostic underneath it, which reads as a crash.
 _EXPECTED_CONNECT_FAILURES = (
     ConnectionError,
     AmbiguousTargetError,
+    NoPageError,
     TargetNotFoundError,
 )
 
