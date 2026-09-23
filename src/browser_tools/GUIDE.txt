@@ -659,14 +659,14 @@ WHAT DOES NOT CARRY BETWEEN INVOCATIONS
   and a stop, and why CPU profiling is its own command rather than a verb
   here. See CPU PROFILING at the end.
 
-  A JavaScript dialog does not survive between invocations. A dialog opened
+  A JavaScript dialog, and there is no way around this one. A dialog opened
   by one invocation is invisible to the next: Page.handleJavaScriptDialog
   fails with "No dialog is showing" (exit 1), even while the command that
   opened it is still running. The unhandled dialog then blocks the page and
-  later commands against it hang. Measured: navigating away may itself hang,
-  so stopping and relaunching the instance is sometimes the only exit. The
-  driving verbs avoid this by answering dialogs within the invocation using
-  their active --dialog policy (default dismiss).
+  later commands against it hang. Navigating away can clear it; when that
+  hangs too, `stop` the instance and `launch` again. The driving verbs avoid
+  reaching that state by answering dialogs inside the invocation with their
+  active --dialog policy (default dismiss).
 
   Page.addScriptToEvaluateOnNewDocument does not rescue this. Registering
   window.alert=()=>{} works when the same invocation also navigates, and
