@@ -11,10 +11,17 @@ Browser automation, debugging, and anti-detect browsing CLI. Provides:
   browser, with protocol help read live from it
 - **Snapshot-based page automation** - Accessibility-tree snapshots and UID
   interaction (`snapshot`, `click --uid`, `fill --uid`), in Python over CDP
+- **Curated verbs for the common path** - `eval`, `press`, `hover`, `type`,
+  `wait-text` and `network-get` beside those three: the interactions whose
+  raw CDP form is JavaScript or prose quoted inside JSON inside a shell line
+- **One answer for every dialog** - `--dialog` fixes the reply to every
+  JavaScript dialog before the invocation starts, and every dialog it
+  answered is reported back under `dialogs`
 - **Named browser instances** - Long-lived Chrome with a registry and named
   profiles that keep a login across restarts
-- **External browsers** - `--endpoint http://127.0.0.1:9222` drives a browser
-  you already have open and logged in, writing nothing to the registry
+- **External browsers** - `--endpoint` and `--chrome-profile` drive a Chrome
+  you started for debugging on a data directory of its own, writing nothing
+  to the registry
 - **Frame-aware tools** - Iframe/CDP frame tree management, execution context
   resolution, and storage inspection
 - **Interstitial detection** - Multi-signal heuristic detection for Cloudflare,
@@ -24,6 +31,9 @@ Browser automation, debugging, and anti-detect browsing CLI. Provides:
 - **Anything else CDP can do** - File upload, viewport emulation, cookies,
   PDF export and page management have no curated verb and need none; `bt
   guide` has a worked example of each
+- **Performance captures** - `trace` writes Chrome trace JSON and can drive
+  the interaction it is capturing; `heap` writes a `.heapsnapshot`; `insights`
+  reads a trace back as English, behind the optional runtime below
 - **CPU profiling** - `browser-tools-profiler`, a second command installed
   alongside `bt`, with timed capture and threshold-triggered capture
 
@@ -74,24 +84,55 @@ succeed with the first free two-digit suffix, such as `browser-tools-01`,
 use the printed value as the handle for later commands.
 
 **`bt guide` is the manual.** It is the complete CLI surface -- every verb,
-every refusal with its exit code, the login walkthrough, the UID rule, and the
-`--endpoint` rules -- and reading it is enough to drive a browser with this
-tool. A test fails the build when a verb has no entry in it.
+every refusal with its exit code, the login walkthrough, the UID rule, the
+performance captures and the `--endpoint` rules -- and reading it is enough to
+drive a browser with this tool. A test fails the build when a verb has no entry
+in it.
 
-To drive a browser you started yourself, pass its debugging port instead of an
-instance name:
+To drive a Chrome you started yourself, pass its endpoint or its data directory
+instead of an instance name. It has to be a Chrome started for debugging on a
+directory of its own. The browser you already have open will not do: measured
+on Chrome 153, it refuses remote debugging on its default data directory,
+writes no port file, and starts no endpoint.
+
+```
+DevTools remote debugging requires a non-default data directory. Specify this
+using --user-data-dir.
+```
+
+So start one:
 
 ```bash
-# Chrome started with --remote-debugging-port=9222, already logged in.
-bt snapshot --endpoint http://127.0.0.1:9222
-bt click --uid 0BDAEF756714-14 --endpoint http://127.0.0.1:9222
+"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+  --user-data-dir="$HOME/.local/share/bt-debug-profile" \
+  --remote-debugging-port=0
+```
+
+`--remote-debugging-port=0` asks Chrome for a free port and records it in that
+directory's `DevToolsActivePort` file. Log in by hand in that window, then
+reach it by the directory or by the endpoint:
+
+```bash
+bt snapshot --chrome-profile ~/.local/share/bt-debug-profile
+bt click --uid 0BDAEF756714-14 --chrome-profile ~/.local/share/bt-debug-profile
+bt snapshot --endpoint http://127.0.0.1:PORT
+bt snapshot --endpoint ws://127.0.0.1:PORT/devtools/browser/ID
 ```
 
 Nothing is written to the registry, so `status` does not list it and `stop` and
-`cleanup` cannot reach it -- which is what keeps them away from your real Chrome
+`cleanup` cannot reach it -- which is what keeps them away from your own Chrome
 profile directory. Only `127.0.0.1` and `::1` are accepted; forward a remote
-browser with `ssh -L 9222:127.0.0.1:9222 <host>`. `Browser.close` and
+browser with `ssh -L 9787:127.0.0.1:9787 <host>`. Do not use 9222 for any of
+this: it is the DevTools default port, so on a machine someone is working on,
+whatever answers there is most likely their own browser. `Browser.close` and
 `Browser.crash` are refused over `--endpoint`.
+
+Chrome 144 and later can ask the person to click Allow for each connection, and
+show an automation banner while one is open. Neither has been seen on this
+machine, so treat this path as one for an agent beside a person at the keyboard;
+an unattended agent cannot supply an approval. The manual's EXTERNAL BROWSERS
+section carries the refusals, the timeouts, and what a timeout does and does not
+prove.
 
 ### Development setup
 
@@ -110,8 +151,15 @@ Runtime requirements:
 - **Camoufox** (`camoufox fetch`) for anti-detect Firefox workflows, with the
   `camoufox` extra
 
-The default install depends on `websockets` only. There is no Node.js
-dependency: the Node `chrome-devtools-mcp` path was removed in RFC-01.
+The default install depends on `websockets` only, and `pip install
+browser-tools` brings no Node.js with it.
+
+One opt-in adds a Node runtime, and nothing else does. `bt insights --setup`
+installs the pinned trace engine from a committed lockfile into the installed
+package, so `bt insights` can read a trace back as English. It needs Node.js
+22+ and npm on PATH, runs only `npm ci --omit=dev --ignore-scripts`, and is
+never run for you. Skip it and the rest of the tool is unaffected; `bt
+insights` is then exit 2 and names the command.
 
 ## Architecture
 
@@ -136,11 +184,27 @@ cli.py                       CLI entry point (argparse, verb dispatch, exit code
         |       +-- process_utils.py     Chrome process and port utilities
         |
         +-- endpoint.py              `--endpoint URL`: loopback check, refusals
+        |       +-- chrome_discovery.py  `--chrome-profile DIR`: read DevToolsActivePort
+        |       +-- external_connection.py Bounded external connections, approval handshake
+        |       +-- devtools_http.py     DevTools HTTP reads, to the validated address only
+        |
         +-- passthrough.py           Raw `Domain.method` send + the focus guard
         +-- curated.py               The curated verbs over one short-lived CDP handler
+        |       +-- curated_runtime.py   eval / press / hover / type / wait-text / network-get
+        |       +-- dialog_policy.py     The invocation's fixed answer to every dialog
+        |
+        +-- captures.py              Bounded captures: `trace` and `heap`
+        +-- insights.py              `insights --setup` and offline trace analysis
+        +-- extras.py                Optional-dependency gating
+        +-- step_run.py              A Step Run: one invocation, one session, many steps
+        |       +-- step_list.py         Read a Step List; refuse a bad one before step 1
+        |
         +-- one_shot.py              Connect, resolve a page target, attach, detach
+        |       +-- attached_session.py  The handler's client over an attached session
+        |
         +-- events.py                attach / wait / console-list / network-list
         +-- list_verbs.py            frames / storage
+        +-- usage.py                 The one exception that means exit 2
         +-- user_settings.py         The persistent settings file (window border)
         |
         +-- core/                    Vendored chrome-agent core (RFC-01; see NOTICE)
@@ -156,6 +220,7 @@ cli.py                       CLI entry point (argparse, verb dispatch, exit code
         |       +-- native_snapshot.py   Accessibility-tree snapshot and UID scheme
         |       +-- native_interaction.py UID click / fill
         |       +-- frame_manager.py     Frame tree management
+        |       +-- frame_sessions.py    One session per out-of-process frame
         |       +-- interstitial.py      Challenge detection and the retry policy
         |       +-- screencast.py        Screencast capture state machine
         |       +-- screenshot_utils.py  Blank-frame detection

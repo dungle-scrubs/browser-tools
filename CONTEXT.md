@@ -34,20 +34,51 @@ glossary rather than left to name code that does not exist.
   refuses a name outside the instance-name character set, a resolved path
   outside the root, and a profile a live instance holds.
 - **External Endpoint** - a browser this tool did not launch, driven per
-  invocation with `--endpoint URL` and absent from the registry. Loopback
-  only. The absence of a registry entry is the safety property: an external
-  browser's user-data-dir is the person's real profile directory, and the
+  invocation and absent from the registry. Reached three ways: `--endpoint`
+  with an HTTP DevTools address, `--endpoint` with a raw
+  `ws://HOST:PORT/devtools/browser/ID`, or `--chrome-profile DIR`, which reads
+  the `DevToolsActivePort` file in the user-data-dir Chrome was started on.
+  Loopback only. The absence of a registry entry is the safety property: the
+  directory behind it is the person's, not one this tool made, and the
   registry is what `stop` and `cleanup` act on. `Browser.close` and
   `Browser.crash` are refused over an endpoint; everything else passes.
+  Measured on Chrome 153, the browser refuses remote debugging on its own
+  default data directory, so an External Endpoint is always a Chrome started
+  for debugging on a profile of its own, never the everyday browser.
 - **Interstitial** - an anti-bot challenge page (Cloudflare, DataDome,
   Akamai, PerimeterX, Imperva, AWS WAF). Detected by multi-signal
   heuristics after navigation; some types auto-retry.
+- **Curated Verb** - a `bt` subcommand that owns a CDP interaction the caller
+  would otherwise assemble by hand. A gap becomes one when its raw CDP form
+  needs JavaScript or prose quoted inside JSON inside a shell line, or when
+  the obvious thing takes more than one CDP call. Otherwise it is a recipe in
+  The Manual, not a verb.
 - **Bounded Capture** - the family of `screencast`, `trace` and `heap`:
   one invocation starts, drives or waits, collects, writes and exits. Nothing
   outlives it. Screencast ends at its duration or frame cap; trace ends at its
   duration or Step Run bound; heap completes when its snapshot arrives.
   A trace wraps the existing Step Run and cannot itself be a step. A heap
   snapshot completes within its own step.
+- **Capture Verb** - a Curated Verb that is a Bounded Capture: `screencast`,
+  `trace` and `heap`.
+- **Analysis Verb** - a Curated Verb that reads a file a Capture Verb wrote
+  and computes over it, touching no browser except to read its version.
+  `insights` is the only one, and it takes no instance argument for that
+  reason.
+- **Payload Reachability** - the rule that decides whether a capability can be
+  a recipe at all. A capability whose result arrives as CDP events, or as a
+  stream handle a later call must redeem, cannot be expressed through raw
+  passthrough or through a Step List: passthrough returns one command's return
+  value and collects no events, and no step reads another step's output. Such
+  a capability is a Curated Verb or it does not exist. Tracing, heap snapshots
+  and response bodies all fall under it, which is why `trace`, `heap` and
+  `network-get` are verbs rather than documented CDP calls.
+- **Dialog Policy** - the answer `bt` gives to every JavaScript dialog raised
+  during an invocation, fixed before the invocation starts. `--dialog dismiss`
+  is the default and actively declines; `--dialog accept[:TEXT]` confirms. The
+  invocation owns it, so a step cannot override the run's. Every answered
+  dialog is recorded under `dialogs` in that invocation's own document, which
+  is what distinguishes a policy that fired from one that never had to.
 - **Step Run** - the whole of `run`: one invocation, one CDP connection, one
   attached session, many steps. It is the only place a browser-driving verb
   runs over a session it did not open. Nothing outlives the invocation, so it

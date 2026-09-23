@@ -33,7 +33,13 @@ WHAT THIS IS FOR
     the JavaScript has run.
   - Watching a page work: console messages, network traffic, CDP events,
     screenshots, screencasts.
-  - A browser the person already has open and logged in, through --endpoint.
+  - Measuring one: `trace` and `insights` for load and Web Vitals, `heap`
+    for what the page retains, `browser-tools-profiler` for JavaScript CPU.
+  - A Chrome the person started for debugging on a profile of its own,
+    through --endpoint or --chrome-profile. Not the browser they already
+    have open: Chrome refuses remote debugging on its default data
+    directory, so the everyday browser cannot be reached. See EXTERNAL
+    BROWSERS.
 
   It is not an HTTP client. Fetching a URL and parsing the body is faster
   with curl. Use this when the page has to actually run.
@@ -158,6 +164,21 @@ CURATED VERBS
       result is a boolean for confirm/beforeunload, text or null for prompt,
       and null for alert. There is no count limit or escalation. If no dialog
       fires, the dialogs key is absent. Other standalone verbs do not subscribe.
+
+      Worked both ways, against a page whose button calls confirm():
+
+        bt eval 'confirm("Delete this?")' --dialog accept
+          {"value": true, "type": "boolean", ..., "dialogs": [{"type":
+           "confirm", "message": "Delete this?", "answer": "accept",
+           "result": true}]}
+
+        bt eval 'confirm("Delete this?")'
+          {"value": false, "type": "boolean", ..., "dialogs": [{"type":
+           "confirm", "message": "Delete this?", "answer": "dismiss",
+           "result": false}]}
+
+      The second one passed no --dialog. The dialogs entry is how you see
+      that the default answered rather than that no dialog fired.
 
   navigate <URL> [--target SPEC | --url SUB] [--dialog dismiss|accept[:TEXT]]
       Navigate the selected page with Page.navigate. The active default dismiss
@@ -797,12 +818,19 @@ EXTERNAL BROWSERS
   starts for debugging on a non-default profile, and logs into by hand. It
   goes on the browser-driving verbs, per invocation.
 
-    bt snapshot --endpoint http://127.0.0.1:9222
-    bt Page.navigate '{"url": "https://..."}' --endpoint http://127.0.0.1:9222
+    bt snapshot --endpoint http://127.0.0.1:9787
+    bt Page.navigate '{"url": "https://..."}' --endpoint http://127.0.0.1:9787
 
   Start the browser yourself with --remote-debugging-port=PORT, log in by hand
   in that browser, then pass that port. There is no instance name, so every
   invocation carries the flag.
+
+  NOT 9222. That is the DevTools default port, so on a machine someone is
+  working on, whatever answers there is most likely their own browser, with
+  their tabs and their cookies. Dialling a port you did not start reaches
+  into whatever is behind it, and LOOPBACK ONLY below says what an endpoint
+  grants. Start yours on a port of its own, or on --remote-debugging-port=0
+  and let bt read the number, as below.
 
   Raw WebSocket attachment, and discovery from a debugging profile
   (Chrome's per-connection Allow click is unverified end to end, pending
@@ -926,7 +954,7 @@ EXTERNAL BROWSERS
     browser on another machine by forwarding it, and the endpoint is loopback
     again:
 
-      ssh -L 9222:127.0.0.1:9222 <host>
+      ssh -L 9787:127.0.0.1:9787 <host>
 
   - Browser.close and Browser.crash are refused: they would end every window
     and tab the person had open. Everything else passes. To close one tab,
@@ -945,6 +973,31 @@ EXTERNAL BROWSERS
 
 
 PERFORMANCE CAPTURES AND CPU PROFILING
+
+  Four things live here. Pick by the question you are asking.
+
+    Why is this page slow to load, and what were its Web Vitals?
+        trace, then insights on the file it wrote.
+    Which JavaScript function is burning the CPU?
+        browser-tools-profiler, at the end of this section.
+    What is this page still holding on to?
+        heap, read in the DevTools Memory panel.
+    What would a scoring tool say about this page load?
+        the Lighthouse recipe, below.
+
+  screencast, trace and heap are Bounded Captures. One invocation starts the
+  capture, drives or waits, collects, writes its file and exits. Nothing
+  outlives it, so there is no start verb and no stop verb for any of them.
+
+  WHY THESE ARE VERBS AND NOT RECIPES. A CDP payload that arrives as events,
+  or as a stream handle a later call has to redeem, cannot be assembled from
+  a Step List. Raw passthrough returns one command's return value and
+  collects no events, and no step reads another step's output. A trace
+  arrives one of those two ways depending on its transfer mode, and a heap
+  snapshot arrives as chunked events. So each of these is a curated verb or
+  the capability is absent; there is no recipe to fall back on. The same rule
+  puts CPU profiling in a command of its own: a profile is an
+  enable-start-stop sequence, and one bt invocation does not outlive it.
 
   trace [INSTANCE] --out FILE [--duration SECONDS] [--steps FILE]
       [--categories LIST] [--timeout SECONDS] [--target SPEC] [--endpoint URL]
@@ -968,6 +1021,15 @@ PERFORMANCE CAPTURES AND CPU PROFILING
       but exits 1. Validation failure exits 2 and starts no capture.
       Use --steps to drive the interaction: a plain load window cannot reveal
       a slow click that never happened. trace itself cannot be a Step List step.
+      Examples, a fixed window and a driven one:
+        bt trace --out window.json --duration 3
+        bt trace --steps load.steps --out load.json
+      Result: {"trace": {"path": "/abs/window.json", "events": 538,
+               "bytes": 264837, "dataLossOccurred": false,
+               "durationMs": 3004.02, "endedBy": "duration",
+               "categories": [...]}}
+      With --steps the document also carries the Run Document under run, and
+      endedBy is "steps".
 
   insights --setup
       Explicitly install the optional analysis runtime. Requires Node.js 22+
@@ -1040,12 +1102,63 @@ PERFORMANCE CAPTURES AND CPU PROFILING
       insights cannot itself be a Step List step.
 
   heap [INSTANCE] --out FILE [--target SPEC] [--endpoint URL]
-      Write a .heapsnapshot for the DevTools Memory panel. stdout reports path,
-      nodes, edges, bytes and chunks. Heap is valid inside a Step List.
-      Use heap to inspect retained objects and memory use. Use the CPU profiler
-      below to find JavaScript functions that consume CPU time. A heap snapshot
-      completes in one invocation, so it belongs on bt. Both heap and trace are
-      Bounded Captures, like screencast: nothing outlives the invocation.
+      Write a .heapsnapshot for the DevTools Memory panel. It shows what the
+      page still retains. stdout reports path, nodes, edges, bytes and chunks.
+      heap is valid inside a Step List, because the snapshot completes within
+      its own step.
+      Example: bt heap --out page.heapsnapshot
+      Result: {"path": "/abs/page.heapsnapshot", "nodes": 26528,
+               "edges": 99696, "bytes": 2234404, "chunks": 3}
+
+  LIGHTHOUSE IS A RECIPE, NOT A VERB. Lighthouse is a Node CLI that audits a
+  browser over its debugging port, so it audits a bt instance. There is no
+  `bt lighthouse` and none is planned. bt installs nothing for this; npx
+  fetches Lighthouse when the line below runs.
+
+    bt launch --headless > instance.json
+    NAME=$(python3 -c 'import json;print(json.load(open("instance.json"))["name"])')
+    PORT=$(bt status "$NAME" |
+      python3 -c 'import json,sys;print(json.load(sys.stdin)[0]["port"])')
+    npx -y lighthouse@latest https://example.com --port="$PORT" \
+      --output=json --output-path=./lighthouse.json
+    bt stop "$NAME"
+
+  Measured against Chrome 151: it runs as written, Lighthouse 13.5.0 exits 0,
+  and ./lighthouse.json holds 161 audits and five category scores. The
+  instance keeps its name, port and pid throughout and stops on the last line.
+
+  READ THE PORT OUT OF THE INSTANCE, IN THE SAME SCRIPT. A --port with no
+  browser on it does not fail. Lighthouse's launcher starts a Chrome of its
+  own on that port, audits with it, kills it and exits 0, and the clean
+  report you get came from a browser you never chose. Never type a port
+  number here. Do not pass --quiet either: the log line "Found existing
+  Chrome already running using port N, using that." is the proof it attached
+  to your instance.
+
+  LAUNCH IT HEADLESS. Lighthouse opens its tab through Puppeteer, which
+  brings that tab to the front. NEVER TAKE THE SCREEN does not cover it:
+  those refusals are bt's, and Lighthouse speaks CDP straight to the port. A
+  headed run takes the person's screen for a few seconds mid-audit.
+
+  WHAT IT CHANGES IN THE BROWSER. One extra tab exists while the audit runs,
+  which shifts numeric --target indices, so use --url SUBSTRING for any bt
+  call made during one. A default run clears the browser-wide HTTP cache, and
+  the audited origin's service workers and cache storage. Pass
+  --disable-storage-reset to turn that off. Cookies, localStorage and
+  IndexedDB are untouched, so an audit inside a `launch --profile NAME`
+  instance audits the signed-in page.
+
+  WHAT IT DOES NOT REPORT. Lighthouse audits one navigation and drives no
+  interaction, so its INP breakdown comes back notApplicable on every run of
+  this recipe. Capture it with `trace --steps` instead, with the navigation
+  in the same step list, and read that trace with `insights`; a trace holding
+  the click alone yields no Insight Sets at all. It does not go the other way
+  either: trace and insights produce no audit list and no category scores,
+  because that scoring is Lighthouse's own and no bt verb reproduces it.
+  Camoufox has no debugging port and cannot be audited at all.
+
+  A non-HTML URL still writes a report, with runtimeError.code NOT_HTML and
+  exit 1. Read runtimeError, not the exit code alone.
 
   `browser-tools-profiler` is installed next to `bt` and profiles the page's
   JavaScript. It is a separate command because a profile is an
