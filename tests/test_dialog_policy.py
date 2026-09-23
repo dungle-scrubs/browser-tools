@@ -76,6 +76,110 @@ def test_plain_verb_and_run_omit_dialogs(curated_browser, tmp_path):
     assert "dialogs" not in result["steps"][0]["result"]
 
 
+@pytest.mark.parametrize("verb", ["press", "type", "hover", "wait-text"])
+def test_other_carriers_answer_page_handlers(curated_browser, verb):
+    html = '<input aria-label="Field"><button>Hover</button><p>Ready</p>'
+    invoke(curated_browser, "navigate", "data:text/html," + quote(html))
+    if verb in {"press", "type"}:
+        event = "keydown" if verb == "press" else "input"
+        invoke(curated_browser, "eval", f"""document.querySelector('input').focus();
+          document.querySelector('input').addEventListener('{event}', () => {{
+            window.answer = confirm('{verb}');
+          }}, {{once:true}})""")
+        args = [verb, "x"]
+    elif verb == "hover":
+        invoke(curated_browser, "eval", """document.querySelector('button').onmouseenter =
+          () => { window.answer = confirm('hover'); }""")
+        tree = invoke(curated_browser, "snapshot")["snapshot"]
+        uid = re.search(r'uid=([^\s\]]+).*button.*Hover', tree)
+        assert uid, tree
+        args = [verb, "--uid", uid[1]]
+    else:
+        # Trigger during this invocation's first text read, without a timer race.
+        invoke(curated_browser, "eval", """Object.defineProperty(document.body, 'innerText', {
+          get() { delete this.innerText; window.answer = confirm('wait-text');
+            return 'Ready'; }, configurable: true
+        })""")
+        args = [verb, "Ready"]
+    result = invoke(curated_browser, *args)
+    assert result["dialogs"] == [
+        {"type": "confirm", "message": verb, "answer": "dismiss", "result": False}
+    ]
+    assert invoke(curated_browser, "eval", "window.answer")["value"] is False
+
+
+def test_navigate_accepts_beforeunload(curated_browser):
+    invoke(curated_browser, "navigate", "data:text/html," + quote('<button>Activate</button>'))
+    tree = invoke(curated_browser, "snapshot")["snapshot"]
+    uid = re.search(r'uid=([^\s\]]+).*button.*Activate', tree)
+    assert uid, tree
+    invoke(curated_browser, "click", "--uid", uid[1])
+    invoke(curated_browser, "eval", "window.onbeforeunload = () => 'Leave?'")
+    result = invoke(curated_browser, "navigate", "about:blank", "--dialog", "accept")
+    assert len(result["dialogs"]) == 1
+    record = result["dialogs"][0]
+    assert record["type"] == "beforeunload"
+    assert isinstance(record["message"], str)
+    assert record["answer"] == "accept" and record["result"] is True
+    assert invoke(curated_browser, "eval", "location.href")["value"] == "about:blank"
+
+
+def test_snapshot_does_not_subscribe_to_dialogs(curated_browser, monkeypatch, capsys):
+    from browser_tools.attached_session import AttachedSessionClient
+
+    subscribed = []
+    original = AttachedSessionClient.on
+
+    def observe(self, event, callback):
+        subscribed.append(event)
+        original(self, event, callback)
+
+    monkeypatch.setattr(AttachedSessionClient, "on", observe)
+    assert cli.main(["snapshot", "--endpoint", curated_browser]) == 0
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert "snapshot" in json.loads(captured.out)
+    assert "Page.javascriptDialogOpening" not in subscribed
+    subscribed.clear()
+    assert cli.main(["eval", "42", "--endpoint", curated_browser]) == 0
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert json.loads(captured.out)["value"] == 42
+    assert subscribed.count("Page.javascriptDialogOpening") == 1
+
+
+def test_plain_click_has_no_dialog_output_or_fixed_delay(curated_browser):
+    import statistics
+    import time
+
+    from browser_tools import curated
+
+    invoke(curated_browser, "navigate", "data:text/html," + quote(
+        '<button onclick="window.clicked=(window.clicked || 0)+1">Plain</button>'
+    ))
+    tree = invoke(curated_browser, "snapshot")["snapshot"]
+    uid = re.search(r'uid=([^\s\]]+).*button.*Plain', tree)
+    assert uid, tree
+    timings = {"baseline": [], "dismiss": []}
+    for _ in range(10):
+        for name in timings:
+            # Disable only the policy for the control; use the same awaited click.
+            with curated._cdp_handler_session(
+                int(curated_browser.rsplit(":", 1)[1]),
+                dialog="dismiss" if name == "dismiss" else None,
+            ) as handler:
+                started = time.monotonic()
+                result = curated.click(instance=None, uid=uid[1], handler=handler)
+                records = handler.dialog_document()
+                timings[name].append(time.monotonic() - started)
+                assert records == {} and "dialogs" not in result
+    baseline = statistics.median(timings["baseline"])
+    active = statistics.median(timings["dismiss"])
+    print(json.dumps({"plainClickMedianSeconds": {"baseline": baseline, "dismiss": active}}))
+    assert active < baseline + 0.05
+    assert invoke(curated_browser, "eval", "window.clicked")["value"] == 20
+
+
 @pytest.mark.parametrize("step", [
     "eval '42' --dialog accept", "click --uid x --dialog=dismiss",
     "Runtime.evaluate '{}' --dialog accept", "eval '42' --dial accept",

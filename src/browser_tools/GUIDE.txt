@@ -158,6 +158,8 @@ CURATED VERBS
       Act on the node a snapshot named. Missing --uid or --text is a usage
       error (exit 2). A UID that names a node with no DOM node behind it, or
       a node that is not an element, is exit 1.
+      click actively dismisses dialogs by default, even without --dialog.
+      fill does not carry a dialog policy; use it inside run when needed.
 
   wait-idle [--timeout-ms MS] [--idle-ms MS]
   wait-stable [--timeout-ms MS] [--stable-ms MS]
@@ -171,6 +173,7 @@ CURATED VERBS
       targetId. A JavaScript exception is exit 1, with its description on
       stderr and nothing on stdout. Raw Runtime.evaluate does not enforce
       that exception contract.
+      --dialog defaults to dismiss and actively answers dialogs during eval.
 
       --await awaits the value the expression returns. It does not make the
       body an async function, so a top-level await is a SyntaxError even with
@@ -187,11 +190,13 @@ CURATED VERBS
       ArrowLeft, ArrowRight, ArrowUp, ArrowDown, Home, End, PageUp, PageDown,
       or F1 through F12. Modifiers are Alt, Control, Meta, Shift. Unknown
       names are exit 2 with the valid list. Example: bt press Enter
+      --dialog defaults to dismiss and actively answers dialogs from key handlers.
       Result: {"key":"Enter","modifiers":[],"dispatched":["keyDown","keyUp"]}
 
   hover --uid UID [--target SPEC | --url SUB] [--dialog dismiss|accept[:TEXT]]
       Move the native pointer to the UID's box centre, setting CSS :hover.
       Synthetic mouseover from JavaScript does not set that CSS state.
+      --dialog defaults to dismiss and actively answers dialogs from hover handlers.
       Example: bt hover --uid 2F0B815AF686-32
       Result: {"uid":"2F0B815AF686-32","x":412.5,"y":208.0}
 
@@ -205,6 +210,7 @@ CURATED VERBS
         cat ./message.txt | bt type --file -
       Result: {"chars":123,"source":"file","path":"/absolute/message.txt"}
       Positional text uses source "text" and has no path. Stdin's path is "-".
+      --dialog defaults to dismiss and actively answers dialogs from input handlers.
 
   wait-text <substring> [--timeout-ms MS] [--target SPEC | --url SUB] [--dialog dismiss|accept[:TEXT]]
       Wait for rendered body text to contain the substring. Default 5000ms.
@@ -214,6 +220,7 @@ CURATED VERBS
       Result: {"found":true,"substring":"Order placed","waitedMs":812}
       Choose wait-idle for "has network activity stopped?", wait-stable for
       "has the DOM stopped changing?", and wait-text for "is this text here?".
+      --dialog defaults to dismiss and actively answers dialogs while waiting.
 
   network-get (--url SUB | --request-id ID) [--response-file PATH] [--target SPEC]
               [--duration SECONDS] [--reload]
@@ -385,9 +392,10 @@ RUNNING MANY STEPS IN ONE INVOCATION
       eval, press, hover, type, wait-text, network-get,
       wait-idle, wait-stable, wait, detect, console-list, network-list, frames,
       storage get, screenshot, screencast, and any raw Domain.method. A step may
-      NOT name an instance, --endpoint, --target, --dialog or a page-selecting --url: those belong to the
-      run, which resolves them once. attach is not a step (it runs until stdin
-      ends, so nothing could follow it), and neither are launch, status, stop,
+      NOT name an instance, --endpoint, --target, --dialog or a page-selecting
+      --url: those belong to the run, which resolves them once.
+      attach is not a step (it runs until stdin ends, so nothing could follow
+      it), and neither are launch, status, stop,
       cleanup, profile, window-border, guide, help, navigate or run itself. Any of these
       in a step list is a usage error (exit 2).
 
