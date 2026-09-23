@@ -140,6 +140,27 @@ def target_selector(target: str | None, url: str | None) -> tuple[str | None, st
 
 
 @contextlib.contextmanager
+def capture_session(
+    instance: str | None,
+    target: str | None,
+    registry_path: str | None,
+    endpoint: str | None,
+) -> Generator[CDPHandler]:
+    """A plain session for a Bounded Capture that drives nothing itself.
+
+    ``run_session`` also calls ``start_run_network()``, which enables the
+    Network domain and retains response metadata for every request. A Step Run
+    needs that, because a step may call ``network-get``. A ``trace --duration``
+    or a ``heap`` has no steps, so it is extra browser state and extra CDP
+    traffic switched on inside a measurement window, for a buffer nothing can
+    read. ``screencast``, the other Bounded Capture, has always used the plain
+    session.
+    """
+    with _handler_for(None, instance, target, registry_path, endpoint) as handler:
+        yield handler
+
+
+@contextlib.contextmanager
 def run_session(
     instance: str | None,
     target: str | None,

@@ -475,9 +475,8 @@ class NodeMcpSession:
     _INIT_TIMEOUT = 120.0
     _CALL_TIMEOUT = 60.0
 
-    def __init__(self, *, headless: bool = True, channel: str = "stable") -> None:
+    def __init__(self, *, headless: bool = True) -> None:
         self._headless = headless
-        self._channel = channel
         self._broker: Any = None
         self._page_scoped: frozenset[str] = frozenset()
         self._page_id: int | None = None

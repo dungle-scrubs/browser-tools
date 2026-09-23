@@ -496,15 +496,39 @@ def _add_curated_verbs(
 
     for verb in ("trace", "heap"):
         capture = sub.add_parser(verb, help=f"Capture a bounded {verb} to a file")
-        capture.add_argument("instance", nargs="?", metavar="INSTANCE")
-        capture.add_argument("--out", required=True, metavar="FILE")
-        capture.add_argument("--target", metavar="SPEC")
+        capture.add_argument(
+            "instance", nargs="?", metavar="INSTANCE", help="Instance (omit if only one)"
+        )
+        capture.add_argument(
+            "--out", required=True, metavar="FILE", help="Write the capture here"
+        )
+        capture.add_argument(
+            "--target", metavar="SPEC", help="Select the page target (1-based index or id)"
+        )
         _add_endpoint(capture)
         if verb == "trace":
-            capture.add_argument("--duration", type=float, metavar="SECONDS")
-            capture.add_argument("--steps", metavar="FILE")
-            capture.add_argument("--timeout", type=float, metavar="SECONDS")
-            capture.add_argument("--categories", action="append", metavar="LIST")
+            # `--steps` is the same runner as `run`, which carries --frames.
+            # Without it a step list that reaches an interaction inside a
+            # cross-origin iframe under `bt run --frames all` silently cannot
+            # under `bt trace --steps`, and an OOPIF interaction is exactly
+            # the case --steps exists to capture.
+            _add_frames(capture)
+            capture.add_argument(
+                "--duration", type=float, metavar="SECONDS",
+                help="Record a plain window of this many seconds",
+            )
+            capture.add_argument(
+                "--steps", metavar="FILE",
+                help="Run a Step List inside the capture; the only shape that reaches an interaction",
+            )
+            capture.add_argument(
+                "--timeout", type=float, metavar="SECONDS",
+                help="Bound the whole step run, as in `run`",
+            )
+            capture.add_argument(
+                "--categories", action="append", metavar="LIST",
+                help="Replace the default DevTools category set; use --categories=LIST when it starts with a dash",
+            )
 
     screencast = sub.add_parser(
         "screencast", help="Capture a bounded screencast and write its frames"
@@ -887,6 +911,7 @@ def _run(args: argparse.Namespace) -> int:
             instance=args.instance, out=args.out, duration=args.duration, source=args.steps,
             timeout=args.timeout, target=args.target, endpoint=args.endpoint,
             registry_path=registry_path,
+            all_frames=getattr(args, "frames", "page") == "all",
             categories=None if args.categories is None else [
                 item.strip() for item in args.categories[0].split(",")
             ],

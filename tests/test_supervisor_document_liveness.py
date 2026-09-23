@@ -262,12 +262,37 @@ async def _await_complete(cdp: CDPClient, *, url: str, kind: str) -> dict[str, A
             try:
                 last = await _document_state(cdp, info["targetId"])
             except Exception as exc:  # a paused target can stop answering
+                # continue, not break. Target.getTargets is a snapshot, and
+                # Chrome swaps OOPIF targets on a cross-process commit, so a
+                # target listed here can be gone by the time attachToTarget
+                # reaches it and answer "No such target id". Breaking
+                # abandoned every later matching target for the whole round,
+                # so a dead entry sitting ahead of the live one starved it for
+                # the full DOCUMENT_TIMEOUT_SECONDS and failed with exactly
+                # that message.
                 last = f"{type(exc).__name__}: {exc}"
-                break
+                continue
             if last["state"] == "complete":
                 return last
         await asyncio.sleep(0.25)
     raise AssertionError(f"{kind} {url} never completed: {last}")
+
+
+def _tagged(site: dict[str, str], tag: str) -> dict[str, str]:
+    """Per-test URLs.
+
+    The browser fixture is module-scoped and no test closes its tabs, so every
+    test opened the same parent URL. _await_complete returns on the first
+    target matching (type, url), which meant a later test could be satisfied
+    instantly by an earlier test's still-open, already-complete tab. The stall
+    case is the one the module calls the real guard, and it could pass without
+    ever observing a document opened while the supervisor was stalled.
+    """
+    joiner = "&" if "?" in site["parent"] else "?"
+    return {
+        "parent": f"{site['parent']}{joiner}case={tag}",
+        "child": site["child"],
+    }
 
 
 async def _open_tab_and_check(port: int, site: dict[str, str]) -> None:
@@ -313,10 +338,12 @@ async def _window_open_and_check(port: int, site: dict[str, str]) -> None:
 
 
 def test_a_cross_origin_iframe_loads_under_supervision(supervised_browser, site) -> None:
+    site = _tagged(site, "iframe")
     asyncio.run(_open_tab_and_check(supervised_browser["port"], site))
 
 
 def test_a_window_open_tab_loads_under_supervision(supervised_browser, site) -> None:
+    site = _tagged(site, "window-open")
     asyncio.run(_window_open_and_check(supervised_browser["port"], site))
 
 
@@ -324,6 +351,7 @@ def test_a_stalled_supervisor_does_not_wedge_new_documents(supervised_browser, s
     """The field failure, reproduced as far as it can be: freeze the supervisor
     mid-flight and keep opening documents. A supervisor that never pauses a
     target has nothing to release, so a frozen one changes nothing."""
+    site = _tagged(site, "stalled")
     supervisor = supervised_browser["supervisor"]
     supervisor.send_signal(signal.SIGSTOP)
     try:
@@ -334,6 +362,7 @@ def test_a_stalled_supervisor_does_not_wedge_new_documents(supervised_browser, s
 
 
 def test_the_supervisor_attaches_to_page_targets_only(supervised_browser, site) -> None:
+    site = _tagged(site, "page-targets")
     """Marking is a top-document job. An OOPIF, a worker, or an extension page
     is protocol traffic the supervisor would have to keep draining, and a
     session it could leave paused, for nothing it uses."""

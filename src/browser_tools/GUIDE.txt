@@ -745,7 +745,10 @@ PERFORMANCE CAPTURES AND CPU PROFILING
       Supply --duration (positive decimal seconds), --steps, or both. There is
       no default window. With both, capture ends at whichever bound comes first.
       --steps uses the same Step List validation and runner as `run`; all
-      validation precedes Tracing.start. --timeout bounds the whole step run.
+      validation precedes Tracing.start. --timeout bounds the whole step run,
+      and --frames all reaches cross-origin iframes exactly as it does for
+      `run`. --timeout 0 means no deadline, so it contradicts --duration and
+      is refused (exit 2); pass one or the other.
       --categories is one comma-separated list replacing the DevTools default
       set. It cannot repeat. Use the default for complete performance analysis.
       Write it as --categories=LIST when the list starts with a dash, which

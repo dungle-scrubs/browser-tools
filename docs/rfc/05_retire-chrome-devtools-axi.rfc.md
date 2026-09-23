@@ -363,7 +363,8 @@ naming the reason and the remedy. A body is never silently truncated.
 
 ```
 bt trace [INSTANCE] --out FILE (--duration SECONDS | --steps FILE)
-         [--categories LIST] [--timeout SECONDS] [--target ...] [--endpoint URL]
+         [--categories LIST] [--timeout SECONDS] [--frames SCOPE]
+         [--target ...] [--endpoint URL]
 bt heap  [INSTANCE] --out FILE [--target ...] [--endpoint URL]
 ```
 
@@ -428,7 +429,16 @@ Consequences, stated rather than left to drift:
 - **`--timeout` means what it means in `run`**: it bounds the whole step run,
   measured from step 1, and `handler.set_deadline` clamps every wait inside it.
   `--duration` bounds the trace window. With both, the trace ends at whichever
-  fires first, and the document reports which.
+  fires first, and the document reports which. `--timeout 0` means no deadline
+  in `run` and `wait`, and `--duration` has to bound the run as well, because
+  one thread cannot close the trace on time otherwise. The two therefore
+  contradict each other and the combination is refused, rather than letting
+  `--duration` silently turn an explicit opt-out into a deadline.
+- **`--frames` carries too**, because `--steps` is the same runner as `run`.
+  Without it a step list that reaches an interaction inside a cross-origin
+  iframe under `bt run --frames all` silently could not under
+  `bt trace --steps`, and an OOPIF interaction is exactly the case `--steps`
+  exists to capture.
 - **Exit code reports the run; the document reports the trace.** If a step
   fails, the run stops at that step, `Tracing.end` still runs, the trace is
   still written, and the verb exits 1. The exit code is never overridden by a

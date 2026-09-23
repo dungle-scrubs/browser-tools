@@ -25,7 +25,7 @@ def test_node_launcher_passes_the_test_binary(monkeypatch):
 
     monkeypatch.setattr(node_broker, "McpBroker", broker)
     with pytest.raises(StopBeforeLaunch):
-        NodeMcpSession(channel="stable").__enter__()
+        NodeMcpSession().__enter__()
     assert commands == [[
         "npx", "-y", "chrome-devtools-mcp@latest", "--isolated",
         "--executablePath", "/test/chrome-headless-shell", "--headless",
