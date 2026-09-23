@@ -92,6 +92,20 @@ REGISTRY_ENV_VAR = "BROWSER_TOOLS_REGISTRY"
 #: Testing or a headless shell, and nothing registers as an application.
 CHROME_BINARY_ENV_VAR = "BROWSER_TOOLS_CHROME_BINARY"
 
+#: Where this tool's own port allocation starts. The vendored allocator
+#: (``core.registry.allocate_port``) probes upward from
+#: ``core.registry.BASE_PORT``, upstream chrome-agent's default of 9222 --
+#: the DevTools default port. On a machine someone is working on, whatever
+#: answers on 9222 is most likely their own browser, so an instance this
+#: tool parked there is indistinguishable from it and every rule that says
+#: "never dial 9222" breaks the moment this tool is the one that put a
+#: browser on it (E55). RFC-01's vendoring rules correct a verbatim
+#: module's behaviour at the call site, so the launch paths raise the base
+#: for the duration of the vendored call (``_safe_allocation_base``). In
+#: step with ``tests/conftest.py`` ``TEST_BASE_PORT`` so one number keeps
+#: one meaning. ``--port`` still pins an exact port and bypasses allocation.
+ALLOCATION_BASE_PORT = 9422
+
 #: Root for persistent per-profile user-data-dirs. It is durable storage, and
 #: deliberately outside the vendored session root (/tmp/chrome-agent) so the
 #: launch-time orphan sweep never reaps a profile.
@@ -977,6 +991,30 @@ def looks_like_domain_method(token: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
+@contextlib.contextmanager
+def _safe_allocation_base() -> Generator[None]:
+    """Run one vendored port allocation above the DevTools default port.
+
+    ``core/registry.py`` is verbatim: ``BASE_PORT`` and ``MAX_PORT`` are
+    module globals and ``allocate_port`` takes no base argument, so the only
+    call-site lever is to set them for the duration of the vendored call and
+    restore them after -- the same set-call-restore shape the test suite's
+    conftest uses for its own session. Restored even on failure, so a launch
+    that dies mid-call leaks nothing into the process. The window is a
+    single-threaded CLI path, so no concurrent allocation observes the
+    changed globals.
+    """
+    original_base = core_registry.BASE_PORT
+    original_max = core_registry.MAX_PORT
+    core_registry.BASE_PORT = ALLOCATION_BASE_PORT
+    core_registry.MAX_PORT = ALLOCATION_BASE_PORT + 100
+    try:
+        yield
+    finally:
+        core_registry.BASE_PORT = original_base
+        core_registry.MAX_PORT = original_max
+
+
 def launch(
     *,
     engine: str = DEFAULT_ENGINE,
@@ -1068,19 +1106,20 @@ def launch(
         binary = chrome_binary_from_env() or resolve_channel_binary(channel)
 
         try:
-            info = asyncio.run(
-                core_launcher.launch_browser(
-                    port_override=port,
-                    fingerprint=fingerprint,
-                    headless=headless,
-                    working_dir=os.getcwd(),
-                    registry_path=registry_path,
-                    extra_args=browser_args or None,
-                    window_border=window_border,
-                    binary=binary,
-                    user_data_dir=str(user_data_dir) if user_data_dir is not None else None,
+            with _safe_allocation_base():
+                info = asyncio.run(
+                    core_launcher.launch_browser(
+                        port_override=port,
+                        fingerprint=fingerprint,
+                        headless=headless,
+                        working_dir=os.getcwd(),
+                        registry_path=registry_path,
+                        extra_args=browser_args or None,
+                        window_border=window_border,
+                        binary=binary,
+                        user_data_dir=str(user_data_dir) if user_data_dir is not None else None,
+                    )
                 )
-            )
         except BrowserNotFoundError as exc:
             raise LifecycleError(str(exc)) from exc
         except (RuntimeError, TimeoutError, OSError) as exc:
@@ -1176,14 +1215,15 @@ def _launch_camoufox(
     """
     pid, pid_start = _spawn_camoufox_process(user_data_dir, headless)
 
-    info = core_registry.register(
-        working_dir=os.getcwd(),
-        pid=pid,
-        browser_version="camoufox",
-        user_data_dir=str(user_data_dir),
-        registry_path=registry_path,
-        pid_start=pid_start,
-    )
+    with _safe_allocation_base():
+        info = core_registry.register(
+            working_dir=os.getcwd(),
+            pid=pid,
+            browser_version="camoufox",
+            user_data_dir=str(user_data_dir),
+            registry_path=registry_path,
+            pid_start=pid_start,
+        )
     annotate_entry(
         info.name,
         engine="camoufox",
