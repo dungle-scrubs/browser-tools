@@ -71,6 +71,64 @@ def isolated_profile_roots(tmp_path_factory, monkeypatch):
     monkeypatch.setenv(lifecycle.LEGACY_PROFILES_ENV_VAR, str(root / "legacy"))
 
 
+#: The port a person's own Chrome is most likely to be on, and the port every
+#: DevTools default names. A test that reaches it drives the developer's real
+#: browser: it opens an unauthenticated CDP session to whatever they had open
+#: and can read their tabs. It happened once, from a test that passed
+#: ``--endpoint http://127.0.0.1:9222`` while relying on a transport double to
+#: intercept it; a later change moved the connection and the double stopped
+#: intercepting, so the invocation went out to the real browser. The double was
+#: the whole protection, and a double is not a boundary.
+FORBIDDEN_PORT = 9222
+
+
+@pytest.fixture(autouse=True)
+def no_test_talks_devtools_on_the_default_port(monkeypatch):
+    """Fail any test that opens a DevTools conversation with ``FORBIDDEN_PORT``.
+
+    Two chokepoints, because every path in the tree ends at one of them:
+    ``urllib.request.urlopen`` for the ``/json*`` reads, vendored and not, and
+    ``CDPClient.__init__`` for the WebSocket, which ``ExternalClient``
+    inherits. Guarding the URL rather than the function name means a route
+    nobody thought of is still stopped.
+
+    Not guarded: a bare TCP connect. ``core.registry.allocate_port`` probes
+    from 9222 upward to find a free port, which is one connect and close and
+    is how ``bt launch`` picks its port at all. Refusing that would refuse the
+    suite's whole launch path to prevent nothing.
+    """
+    import urllib.request
+
+    from browser_tools.core.cdp_client import CDPClient
+
+    real_urlopen = urllib.request.urlopen
+    real_init = CDPClient.__init__
+
+    def refuse(where):
+        raise AssertionError(
+            f"a test spoke DevTools to port {FORBIDDEN_PORT} ({where}). That is the "
+            "default DevTools port and, on a developer machine, a browser they are "
+            "using. Bind a port with socket() and pass that number instead."
+        )
+
+    def names_the_port(url):
+        return f":{FORBIDDEN_PORT}/" in url or url.endswith(f":{FORBIDDEN_PORT}")
+
+    def guarded_urlopen(request, *args, **kwargs):
+        url = request if isinstance(request, str) else request.full_url
+        if names_the_port(url):
+            refuse(url)
+        return real_urlopen(request, *args, **kwargs)
+
+    def guarded_init(self, ws_url, *args, **kwargs):
+        if isinstance(ws_url, str) and names_the_port(ws_url):
+            refuse(ws_url)
+        return real_init(self, ws_url, *args, **kwargs)
+
+    monkeypatch.setattr(urllib.request, "urlopen", guarded_urlopen)
+    monkeypatch.setattr(CDPClient, "__init__", guarded_init)
+
+
 @pytest.fixture
 def sample_mcp_response():
     """Sample MCP tool response."""

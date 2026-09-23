@@ -39,10 +39,10 @@ class TestResolveEndpointPort:
         ],
     )
     def test_loopback_forms_resolve_to_the_port(self, url):
-        assert endpoint.resolve_endpoint_port(url) == 9222
+        assert endpoint.resolve_endpoint_port(url).port == 9222
 
     def test_a_bare_host_and_port_is_read_as_http(self):
-        assert endpoint.resolve_endpoint_port("127.0.0.1:1234") == 1234
+        assert endpoint.resolve_endpoint_port("127.0.0.1:1234").port == 1234
 
     @pytest.mark.parametrize(
         "url",
@@ -123,14 +123,14 @@ class TestBrowserLifetimeRefusal:
 class TestTheRegistryStaysOut:
     def test_the_port_comes_from_the_url_with_no_registry_read(self, tmp_path):
         registry = tmp_path / "registry.json"
-        assert lifecycle.resolve_cdp_port(None, str(registry), "http://127.0.0.1:9333") == 9333
+        assert lifecycle.resolve_cdp_port(None, str(registry), "http://127.0.0.1:9333").port == 9333
         assert not registry.exists()
 
     def test_an_instance_name_beside_an_endpoint_is_ignored_not_looked_up(self, tmp_path):
         """No lookup happens, so a name the registry has never heard of is fine."""
         registry = tmp_path / "registry.json"
         port = lifecycle.resolve_cdp_port("no-such-instance", str(registry), "http://127.0.0.1:9444")
-        assert port == 9444
+        assert port.port == 9444
         assert not registry.exists()
 
     def test_without_an_endpoint_the_registry_still_resolves(self, tmp_path):
@@ -276,7 +276,7 @@ class TestTheBrowserEnderRefusalIsOnlyForEndpoints:
         monkeypatch.setattr(lifecycle, "resolve_cdp_port", _fake_resolve)
 
         class _Cdp:
-            async def send(self, *, method, params=None, session_id=None):
+            async def send(self, *, method, params=None, session_id=None, timeout=None):
                 sent.append(method)
                 return {}
 
@@ -318,7 +318,7 @@ class TestAttachOverAnEndpoint:
             target="2",
             endpoint="http://127.0.0.1:9222",
         )
-        assert taken == [(9222, ["Page.loadEventFired"], "2", "index")]
+        assert taken == [(endpoint.resolve_endpoint_port("http://127.0.0.1:9222"), ["Page.loadEventFired"], "2", "index")]
 
     def test_an_empty_subscription_list_is_still_a_usage_error(self):
         from browser_tools import events as events_module
@@ -441,14 +441,32 @@ class TestConnectionDiagnosis:
         monkeypatch.setattr(
             "browser_tools.process_utils.find_listeners_on_port", lambda port: []
         )
-        message = one_shot.connection_failure_message(port=9222, cause=None, external=True)
-        assert "--remote-debugging-port=9222" in message
+        message = one_shot.connection_failure_message(
+            endpoint.resolve_endpoint_port("http://127.0.0.1:9222"), OSError("refused")
+        )
+        assert "--endpoint found no DevTools HTTP endpoint at 127.0.0.1:9222" in message
         assert "nothing is listening on port 9222" in message
+
+    def test_the_diagnosis_names_the_flag_that_was_typed(self, monkeypatch):
+        """A --chrome-profile failure must not tell the reader to check --endpoint."""
+        from browser_tools import one_shot
+        from browser_tools.endpoint import ResolvedEndpoint
+
+        monkeypatch.setattr(
+            "browser_tools.process_utils.find_listeners_on_port", lambda port: []
+        )
+        discovered = ResolvedEndpoint(
+            50900, "ws://[::1]:50900/devtools/browser/x", "ws://[::1]:50900/devtools/browser/x",
+            "[::1]", "--chrome-profile",
+        )
+        message = one_shot.connection_failure_message(discovered, OSError("refused"))
+        assert message.startswith("--chrome-profile found no DevTools HTTP endpoint at [::1]:50900")
+        assert "--endpoint" not in message
 
     def test_the_registry_path_message_is_unchanged(self):
         from browser_tools import one_shot
 
-        message = one_shot.connection_failure_message(port=9222, cause=None)
+        message = one_shot.registry_connection_failure_message(port=9222, cause=None)
         assert message == "No browser listening on port 9222. Start one with: bt launch"
 
 

@@ -205,7 +205,7 @@ class _FakeCDP:
         self.fail = fail or set()
         self._next = 0
 
-    async def send(self, method, params=None, session_id=None):
+    async def send(self, method, params=None, session_id=None, timeout=None):
         self.calls.append((method, params, session_id))
         if method in self.fail:
             raise RuntimeError(f"{method} failed")

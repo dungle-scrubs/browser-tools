@@ -447,7 +447,7 @@ def _make_fake_cdp_client_cls(shot_data="Zm9v", targets=None):
         async def __aexit__(self, *exc):
             return False
 
-        async def send(self, method, params=None, session_id=None):
+        async def send(self, method, params=None, session_id=None, timeout=None):
             calls.append((method, params, session_id))
             if method == "Target.getTargets":
                 return {"targetInfos": targets}
@@ -798,6 +798,7 @@ def test_eval_throw_regression_at_cli(monkeypatch, fake_handler, capsys):
     so removing the exceptionDetails check makes this regression go red.
     """
     import asyncio
+    import contextlib
     from unittest.mock import AsyncMock
 
     from test_passthrough import make_fake_cdp_client_cls
@@ -806,17 +807,24 @@ def test_eval_throw_regression_at_cli(monkeypatch, fake_handler, capsys):
 
     detail = {"text": "Uncaught", "exception": {"description": "Error: regression-marker"}}
     raw_client, _ = make_fake_cdp_client_cls(responder=lambda *_: {"exceptionDetails": detail})
-    monkeypatch.setattr("browser_tools.one_shot.CDPClient", raw_client)
-    monkeypatch.setattr(
-        "browser_tools.one_shot.get_ws_url_async", AsyncMock(return_value="ws://fake/browser")
-    )
+
+    # The double stands in for the whole external transport, so nothing here
+    # opens a socket. An earlier version doubled `one_shot.CDPClient` and named
+    # port 9222; when the external route moved off that class the double
+    # stopped intercepting and the invocation went out to the real browser on
+    # the default DevTools port.
+    @contextlib.asynccontextmanager
+    async def fake_external(endpoint):
+        yield raw_client("ws://fake/browser")
+
+    monkeypatch.setattr("browser_tools.one_shot.external_browser_connection", fake_external)
     assert (
         cli.main(
             [
                 "Runtime.evaluate",
                 json.dumps({"expression": 'throw new Error("regression-marker")'}),
                 "--endpoint",
-                "http://127.0.0.1:9222",
+                "ws://127.0.0.1:65000/devtools/browser/fake",
             ]
         )
         == 0
