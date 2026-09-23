@@ -43,15 +43,29 @@ lsof -nP -iTCP:9222 -sTCP:LISTEN >/dev/null 2>&1 && {
 python3 -c '
 import socket, sys, time
 s = socket.socket()
-s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 s.bind(("127.0.0.1", 9222))
 s.listen(1)
 print("holding 9222", flush=True)
 time.sleep(600)
-' &
+' > "$WORK/holder.log" 2>&1 &
 HOLDER=$!
 trap 'kill "$HOLDER" 2>/dev/null; rm -rf "$WORK"' EXIT
-sleep 1
+
+# Wait for the hold to be real, and say so when it is not. An earlier version
+# slept one second and carried on: when the bind failed the script proceeded
+# with no hold at all and reported nothing, which is the failure mode this
+# whole block exists to prevent. SO_REUSEADDR is gone for the same reason --
+# it made a failed bind look survivable.
+for _ in $(seq 1 50); do
+  grep -q 'holding 9222' "$WORK/holder.log" 2>/dev/null && break
+  sleep 0.1
+done
+if grep -q 'holding 9222' "$WORK/holder.log" 2>/dev/null; then
+  echo "9222 held by this probe"
+else
+  echo "9222 not held by this probe: $(tail -1 "$WORK/holder.log" 2>/dev/null)"
+  echo "  Something else is on it, so registry.allocate_port will skip it too."
+fi
 
 bt() { (cd "$REPO" && uv run bt "$@"); }
 cd "$WORK" || exit 1
@@ -66,6 +80,14 @@ npx -y lighthouse@latest https://example.com --port="$PORT" \
 lh_status=$?
 bt stop "$NAME"
 # --------------------------------------------------------------------------
+
+# The invariant this probe exists to protect: whatever the hold did, the
+# instance must not have landed on the DevTools default port. On a machine
+# someone is working on, whatever answers there is most likely their browser.
+if [ "$PORT" = "9222" ]; then
+  echo "FAIL: the probe's instance took 9222, the DevTools default port." >&2
+  exit 1
+fi
 
 echo
 echo "instance=$NAME port=$PORT lighthouse exit=$lh_status"
