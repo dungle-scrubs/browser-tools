@@ -80,6 +80,11 @@ LIFECYCLE VERBS
          [--headless] [--port PORT] [--fingerprint FILE] [--no-window-border]
          [-- BROWSER_ARGS]
       Launch a browser and register it. Prints the new instance as JSON.
+      Chrome's debugging port is allocated from 9422 upward, never 9222:
+      that is the DevTools default port, so whatever answers there on a
+      working machine is most likely someone's own browser. --port pins an
+      exact port instead. A Camoufox instance records a registry port it
+      does not use.
       --engine camoufox starts an anti-detect Camoufox instance. launch takes
       no positional argument: the name is assigned by the registry, and a bare
       token before -- is a usage error (exit 2), because it would otherwise be
