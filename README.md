@@ -127,12 +127,14 @@ this: it is the DevTools default port, so on a machine someone is working on,
 whatever answers there is most likely their own browser. `Browser.close` and
 `Browser.crash` are refused over `--endpoint`.
 
-Chrome 144 and later can ask the person to click Allow for each connection, and
-show an automation banner while one is open. Neither has been seen on this
-machine, so treat this path as one for an agent beside a person at the keyboard;
-an unattended agent cannot supply an approval. The manual's EXTERNAL BROWSERS
-section carries the refusals, the timeouts, and what a timeout does and does not
-prove.
+Measured on this machine's Chrome 153 with the person at the keyboard: a Chrome
+started on its own data directory with --remote-debugging-port needs no Allow
+click and shows no automation banner, so no person needs to be present for the
+working shape. The per-connection Allow flow belongs to the chrome://inspect
+remote-debugging toggle, which Chrome 153 refuses on the default data
+directory - the everyday browser cannot be attached to at all. The manual's
+EXTERNAL BROWSERS section carries the refusals, the timeouts, and what a
+timeout does and does not prove.
 
 ### Development setup
 
