@@ -635,8 +635,7 @@ def _add_rfc05_verbs(
         ))
         _add_endpoint(parser)
         _add_frames(parser)
-        if name != "network-get":
-            _add_dialog(parser)
+        _add_dialog(parser)
         if name == "navigate":
             pass
         elif name == "eval":
@@ -1309,6 +1308,13 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         return _run(args)
+    except curated.DialogCancelledError as exc:
+        # The records explain the failure, so they go to stdout even though the
+        # verb failed. A caller debugging a cancelled navigation is exactly the
+        # caller who needs to know a prompt was declined.
+        print(json.dumps(exc.document, indent=2))
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_OPERATIONAL
     except LifecycleError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_OPERATIONAL

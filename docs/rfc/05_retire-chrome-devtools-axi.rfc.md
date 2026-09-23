@@ -611,6 +611,12 @@ still hung. Measured against a real browser: `fill` on an
 field's own `input` handler, so `fill` drives the page exactly as the rule
 here says, and the list was wrong rather than the rule.
 
+`network-get` carries it too, for the same reason found the same way:
+`--reload` sends `Page.reload`, which runs `beforeunload`. Without the policy
+a `network-get --url X --reload` against a page with a `beforeunload` handler
+hangs and wedges the instance. `network-get` drives the page only on that
+flag, and carries the policy for it.
+
 **The subscription is unconditional.** `bt` subscribes to
 `Page.javascriptDialogOpening` for the whole invocation on every one of those
 verbs, whether or not `--dialog` was passed, because the default is a policy

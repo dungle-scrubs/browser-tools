@@ -131,8 +131,9 @@ CURATED VERBS
   browser. Each prints one JSON document on stdout.
 
   DIALOG POLICY
-      click, eval, press, type, hover, wait-text, navigate and run answer every
-      JavaScript dialog while they run. --dialog defaults to dismiss even when
+      click, fill, eval, press, type, hover, wait-text, navigate, network-get
+      and run answer every JavaScript dialog while they run. network-get only
+      drives the page with --reload, and carries the policy for that. --dialog defaults to dismiss even when
       omitted: the default actively declines dialogs. --dialog accept confirms
       them; --dialog accept:TEXT also supplies prompt text. Bare accept keeps
       a prompt's default text; accept: supplies an empty string.

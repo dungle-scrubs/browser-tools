@@ -1210,7 +1210,14 @@ class CDPHandler:
         if name == "navigate":
             result = await cdp.send("Page.navigate", arguments)
             if result.get("errorText"):
-                raise LifecycleError(result["errorText"])
+                # make_error, not raise: this was the only branch here that
+                # raised, and call_native's generic handler logs every
+                # exception through logger.warning. The project installs no
+                # logging handlers, so logging.lastResort printed
+                # "call_native(navigate) error: ..." to stderr on every failed
+                # navigation, naming an internal function beside the real
+                # message.
+                return make_error(result["errorText"])
             return make_text(json.dumps(result))
 
         if name == "take_snapshot":

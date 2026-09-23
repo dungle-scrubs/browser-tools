@@ -797,6 +797,21 @@ def screenshot(
     return payload
 
 
+class DialogCancelledError(LifecycleError):
+    """An action that failed after the dialog policy answered something.
+
+    Carries the dialog records so the caller is told why. Without this the
+    records are collected only on the success path, and the one case the
+    `navigate` verb exists for -- a beforeunload prompt that the default
+    `dismiss` declines, cancelling the navigation -- reported a bare
+    `net::ERR_ABORTED` with nothing saying a prompt had been declined.
+    """
+
+    def __init__(self, message: str, document: dict[str, Any]) -> None:
+        super().__init__(message)
+        self.document = document
+
+
 def _action(
     name: str, arguments: dict[str, Any], *, instance: str | None,
     target: str | None, url: str | None, registry_path: str | None,
@@ -806,7 +821,26 @@ def _action(
     with _handler_for(handler, instance, target, registry_path, endpoint, all_frames, url, dialog) as opened:
         if name in {"press", "hover", "type"}:
             _refuse_input_to_hidden_tab(opened)
-        result = json.loads(_native_or_raise(opened, name, arguments))
+        try:
+            result = json.loads(_native_or_raise(opened, name, arguments))
+        except LifecycleError as exc:
+            if handler is not None or dialog is None:
+                raise
+            records = opened.dialog_document()
+            if not records.get("dialogs"):
+                raise
+            declined = [
+                entry for entry in records["dialogs"]
+                if entry.get("type") == "beforeunload" and entry.get("answer") == "dismiss"
+            ]
+            if declined:
+                raise DialogCancelledError(
+                    f"{exc}: the page asked to confirm leaving and --dialog "
+                    f"{dialog} declined it, which cancels the navigation. Pass "
+                    "--dialog accept to leave the page.",
+                    records,
+                ) from exc
+            raise DialogCancelledError(str(exc), records) from exc
         if handler is None and dialog is not None:
             result.update(opened.dialog_document())
         return result
@@ -898,8 +932,15 @@ def network_get(
     duration: float = 2.0, reload: bool = False,
     registry_path: str | None = None, endpoint: str | None = None,
     handler: CDPHandler | None = None, all_frames: bool = False,
+    dialog: str = "dismiss",
 ) -> dict[str, Any]:
-    """Fetch a response without navigating, with an optional standalone reload."""
+    """Fetch a response without navigating, with an optional standalone reload.
+
+    Carries the dialog policy because ``--reload`` sends ``Page.reload``, which
+    runs ``beforeunload``. This is the same omission that left ``fill`` able to
+    hang: the rule is every verb that drives the page, and ``--reload`` drives
+    it.
+    """
     if (url is None) == (request_id is None):
         raise UsageError("network-get requires exactly one of --url SUB or --request-id ID")
     import math
@@ -912,7 +953,7 @@ def network_get(
                                   "response_file": response_file,
                                   "duration": duration, "reload": reload},
                    instance=instance, target=target, url=None, registry_path=registry_path,
-                   endpoint=endpoint, handler=handler, all_frames=all_frames, dialog=None)
+                   endpoint=endpoint, handler=handler, all_frames=all_frames, dialog=dialog)
 
 
 def navigate(

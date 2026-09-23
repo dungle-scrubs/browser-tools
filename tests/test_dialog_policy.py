@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import subprocess
 import sys
+import time
 from urllib.parse import quote
 
 import pytest
 
-from browser_tools import cli, step_list
+from browser_tools import cli, dialog_policy, step_list
 from browser_tools.dialog_policy import DialogPolicy
+from browser_tools.usage import UsageError
 
 
 def invoke(endpoint: str, *args: str) -> dict:
@@ -190,9 +193,11 @@ def test_step_cannot_override_policy(step):
 
 
 @pytest.mark.parametrize("argv", [
-    ["click", "--uid", "x"], ["eval", "42"], ["press", "Enter"],
+    ["click", "--uid", "x"], ["fill", "--uid", "x", "--text", "t"],
+    ["eval", "42"], ["press", "Enter"],
     ["type", "text"], ["hover", "--uid", "x"], ["wait-text", "text"],
-    ["navigate", "about:blank"], ["run", "steps.txt"],
+    ["navigate", "about:blank"], ["network-get", "--url", "x"],
+    ["run", "steps.txt"],
 ])
 def test_carriers_have_active_default_and_reject_invalid_policy(argv):
     args = cli.build_parser().parse_args(argv)
@@ -304,3 +309,147 @@ def test_fill_answers_a_dialog_its_own_input_handler_raises(curated_browser: str
         {"type": "alert", "message": "from-fill", "answer": "dismiss", "result": None}
     ]
     assert invoke(curated_browser, "eval", "document.title")["value"] == "fired"
+
+
+# An absolute bound, deliberately not derived from DRAIN_BUDGET_SECONDS: a
+# regression that removes the budget must fail this test rather than inherit
+# its own broken value and hang the suite.
+FLOOD_BOUND_SECONDS = 15.0
+
+
+@pytest.mark.asyncio
+async def test_a_dialog_flood_ends_the_drain_instead_of_running_forever():
+    """A page that opens dialogs faster than they are answered must not hang.
+
+    The drain's exit condition is "everything seen has been collected", and a
+    page calling alert() from a zero-delay interval makes that permanently
+    false. Measured before the budget existed: 191,145 dialogs answered in
+    three seconds with the drain still running, and nothing above it was
+    bounded either, so `bt eval` hung with no timeout at all.
+    """
+    cdp = DialogCDP()
+    policy = DialogPolicy("dismiss")
+    policy.start(cdp)
+    original = cdp.send
+
+    async def flood(method, params):
+        # Every answer releases script that opens the next dialog.
+        cdp.open("alert", "again")
+        return await original(method, params)
+
+    cdp.send = flood
+    cdp.open("alert", "first")
+
+    started = time.monotonic()
+    # wait_for, not a bare await: without the budget this drain never returns,
+    # and a test that hangs stops the whole suite instead of failing it.
+    document = await asyncio.wait_for(policy.document(), timeout=FLOOD_BOUND_SECONDS)
+    elapsed = time.monotonic() - started
+
+    assert elapsed < dialog_policy.DRAIN_BUDGET_SECONDS + 2.0, elapsed
+    assert document["dialogsTruncated"] is True
+    assert document["dialogs"], "the answers it did collect are still reported"
+    await policy.close()
+
+
+@pytest.mark.asyncio
+async def test_a_failed_answer_keeps_every_other_record():
+    """One dialog that vanished must not discard the rest, nor escape.
+
+    asyncio.gather without return_exceptions used to propagate the CDPError
+    from a "No dialog is showing" reply. cli.main catches LifecycleError and
+    UsageError, and that is neither, so the invocation died with a traceback
+    and printed nothing -- losing a whole Run Document to one late dialog.
+    """
+    cdp = DialogCDP()
+    policy = DialogPolicy("dismiss")
+    policy.start(cdp)
+    calls = {"n": 0}
+    original = cdp.send
+
+    async def flaky(method, params):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("No dialog is showing")
+        return await original(method, params)
+
+    cdp.send = flaky
+    cdp.open("alert", "vanished")
+    cdp.open("alert", "answered")
+
+    document = await policy.document()
+
+    assert len(document["dialogs"]) == 2
+    assert "error" in document["dialogs"][0]
+    assert "No dialog is showing" in document["dialogs"][0]["error"]
+    assert "error" not in document["dialogs"][1]
+    await policy.close()
+
+
+def test_a_non_string_policy_is_a_usage_error_not_an_attribute_error():
+    """step_run.run(dialog=...) is a public signature that can pass None."""
+    with pytest.raises(UsageError):
+        dialog_policy.validate_policy(None)
+
+
+def _raw(endpoint: str, *args: str, timeout: float = 25) -> subprocess.CompletedProcess:
+    """invoke() for the failure cases: it asserts exit 0 and empty stderr."""
+    return subprocess.run(
+        [sys.executable, "-m", "browser_tools.cli", *args, "--endpoint", endpoint],
+        capture_output=True, text=True, timeout=timeout,
+    )
+
+
+def _arm_beforeunload(endpoint: str) -> None:
+    """A beforeunload prompt only fires after the page has user activation."""
+    html = "<button>Go</button>"
+    invoke(endpoint, "Page.navigate", json.dumps({"url": "data:text/html," + quote(html)}))
+    tree = invoke(endpoint, "snapshot")["snapshot"]
+    uid = re.search(r"\[uid=([^\s\]]+)\] button", tree)
+    assert uid, tree
+    invoke(endpoint, "click", "--uid", uid[1])
+    invoke(endpoint, "eval", "window.onbeforeunload=()=>'x'")
+
+
+def test_a_cancelled_navigation_says_a_prompt_was_declined(curated_browser: str) -> None:
+    """The default declines beforeunload, which cancels the navigation.
+
+    That is the headline case of the verb, so the caller must be told why.
+    Before this, it reported a bare ``net::ERR_ABORTED`` with no ``dialogs``
+    key, plus an internal ``call_native(navigate) error:`` line on stderr from
+    a logger warning the project installs no handler for.
+    """
+    _arm_beforeunload(curated_browser)
+
+    done = _raw(curated_browser, "navigate", "about:blank")
+
+    assert done.returncode == 1
+    assert json.loads(done.stdout)["dialogs"] == [
+        {"type": "beforeunload", "message": "", "answer": "dismiss", "result": False}
+    ]
+    assert "--dialog accept" in done.stderr
+    assert "call_native(" not in done.stderr
+
+
+def test_accepting_beforeunload_lets_the_navigation_through(curated_browser: str) -> None:
+    _arm_beforeunload(curated_browser)
+
+    result = invoke(curated_browser, "navigate", "about:blank", "--dialog", "accept")
+
+    assert result["dialogs"] == [
+        {"type": "beforeunload", "message": "", "answer": "accept", "result": True}
+    ]
+
+
+def test_network_get_reload_answers_beforeunload_instead_of_hanging(curated_browser: str) -> None:
+    """``--reload`` sends Page.reload, which runs beforeunload.
+
+    The same omission that left ``fill`` able to hang. Without the policy this
+    call never returns and the instance is wedged.
+    """
+    _arm_beforeunload(curated_browser)
+
+    done = _raw(curated_browser, "network-get", "--url", "data:", "--reload", timeout=25)
+
+    assert done.returncode in (0, 1), done.stderr
+    assert "did not answer in time" not in done.stderr
