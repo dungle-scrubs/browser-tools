@@ -65,6 +65,7 @@ from .core import registry as core_registry
 from .core.launcher import BrowserNotFoundError
 from .core.registry import InstanceNotFoundError
 from .core.utils import process_is_ours, process_start_time
+from .endpoint import ResolvedEndpoint
 from .process_utils import (
     clean_stale_singleton_lock,
     pid_holds_user_data_dir,
@@ -932,8 +933,8 @@ def resolve_single_instance(registry_path: str | None = None) -> str:
 def resolve_cdp_port(
     instance: str | None,
     registry_path: str | None = None,
-    endpoint: str | None = None,
-) -> int:
+    endpoint: str | ResolvedEndpoint | None = None,
+) -> int | ResolvedEndpoint:
     """Resolve the CDP port every browser-driving verb sends to.
 
     One resolver, two sources. With ``endpoint`` set the port comes from that
@@ -949,7 +950,7 @@ def resolve_cdp_port(
         LifecycleError: The named instance is not registered (CLI exit 1).
     """
     if endpoint is not None:
-        return endpoint_module.resolve_endpoint_port(endpoint)
+        return endpoint if isinstance(endpoint, ResolvedEndpoint) else endpoint_module.resolve_endpoint_port(endpoint)
     if instance is None:
         instance = resolve_single_instance(registry_path=registry_path)
     try:

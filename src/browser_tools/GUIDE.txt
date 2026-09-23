@@ -794,8 +794,8 @@ PROFILES AND LOGIN
 EXTERNAL BROWSERS
 
   --endpoint URL drives a browser this tool did not launch: one the person
-  already has open, and already logged in. It goes on the browser-driving
-  verbs, per invocation.
+  starts for debugging on a non-default profile, and logs into by hand. It
+  goes on the browser-driving verbs, per invocation.
 
     bt snapshot --endpoint http://127.0.0.1:9222
     bt Page.navigate '{"url": "https://..."}' --endpoint http://127.0.0.1:9222
@@ -803,6 +803,115 @@ EXTERNAL BROWSERS
   Start the browser yourself with --remote-debugging-port=PORT, log in by hand
   in that browser, then pass that port. There is no instance name, so every
   invocation carries the flag.
+
+  Raw WebSocket attachment, and discovery from a debugging profile
+  (Chrome's per-connection Allow click is unverified end to end, pending
+  ticket 12 with the driving dev at the keyboard):
+
+    bt snapshot --endpoint ws://127.0.0.1:PORT/devtools/browser/ID
+    bt snapshot --chrome-profile DIR
+
+  --chrome-profile takes the USER DATA DIRECTORY Chrome was started on, the
+  one passed to Chrome's own --user-data-dir. It reads that directory's
+  DevToolsActivePort file. It is mutually exclusive with --endpoint. A missing
+  or malformed file fails immediately with exit 2 and names the path.
+
+  CHROME REFUSES REMOTE DEBUGGING ON A DEFAULT DATA DIRECTORY. Measured on
+  Chrome 153:
+
+    DevTools remote debugging requires a non-default data directory. Specify
+    this using --user-data-dir.
+
+  No port file is written and no endpoint starts, so the everyday browser
+  cannot be attached to at all. A DIR that is any channel's platform default
+  is refused with that text and the flow below. A channel name (stable, beta,
+  dev, canary) is still accepted and resolves to that channel's directory:
+
+    macOS: ~/Library/Application Support/Google/
+      Chrome, Chrome Beta, Chrome Dev, Chrome Canary
+    Windows: %LOCALAPPDATA%/Google/
+      Chrome, Chrome Beta, Chrome Dev, Chrome SxS, each followed by /User Data
+    Linux: ~/.config/google-chrome, google-chrome-beta,
+      google-chrome-unstable, google-chrome-canary
+      CHROME_CONFIG_HOME, then XDG_CONFIG_HOME, can override ~/.config.
+      CHROME_USER_DATA_DIR overrides the entire Linux discovery directory.
+
+  On macOS and Windows those are always the platform default, so a channel
+  name is always refused there. Only the Linux overrides can move a channel
+  somewhere Chrome will debug.
+
+  The flow that works. Start Chrome yourself, on a directory of its own:
+
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+      --user-data-dir="$HOME/.local/share/bt-debug-profile" \
+      --remote-debugging-port=0
+
+  then:
+
+    bt snapshot --chrome-profile ~/.local/share/bt-debug-profile
+
+  --remote-debugging-port=0 asks Chrome for a free port. Ask for a specific
+  one and it does not fall back: a free preferred port binds IPv4; with IPv4
+  occupied Chrome binds the SAME number on IPv6; with both occupied Chrome
+  keeps running with no endpoint and writes no port file.
+
+  WHICH FAMILY IS DIALLED IS VERIFIED, NOT RACED. The port file's second line
+  is the browser WebSocket path, and the GUID in it is the browser's whole
+  authentication: anything holding it has unauthenticated control of the
+  browser. So bt asks each loopback family for /json/version, which carries
+  no secret, and compares the webSocketDebuggerUrl in the reply against that
+  line. Only a peer that already knows the GUID is the Chrome that wrote the
+  file, and only that one is dialled. One family, one WebSocket, one Allow
+  click. If neither family proves itself, bt refuses and says so: the port
+  file is stale, or another process took the port. A Chrome 144+ approval
+  service answers 404 for every /json path by design and cannot be
+  discovered; pass its address with --endpoint ws://HOST:PORT/devtools/...,
+  which names the family explicitly.
+
+  Approval is per connection, not per browser session. Chrome asks the person
+  to click Allow and shows an automation banner. This is for an agent beside
+  a person at the keyboard. An unattended agent cannot supply approval.
+
+  EVERY WAIT HAS A BOUND. bt waits at most 30 seconds for the WebSocket
+  handshake and the Browser.getVersion that verifies the peer, at most 30
+  seconds more to list targets and attach a page session, at most 120 seconds
+  for any single CDP command a verb sends, and at most 5 seconds for the
+  detach on the way out. A verb that waits on EVENTS -- wait, attach,
+  console-list --duration -- keeps its own deadline; these bound one command's
+  reply, not the verb. A peer that completes the handshake and then stops
+  answering ends the invocation with exit 1 and a diagnostic; it never hangs.
+  The bounds are tested with non-answering peers; Chrome's real Allow click,
+  refusal, and banner remain unverified for ticket 12.
+
+  WHAT A TIMEOUT PROVES, AND WHAT IT DOES NOT. A connection that is accepted
+  and then goes quiet has at least three causes: Chrome waiting for Allow, a
+  browser whose UI thread is busy or hung, or a process that is not a browser
+  holding the port. Two plain TCP listeners produce it with no Chrome
+  anywhere. The diagnostic names all three and lists every process holding the
+  port with the user data directory each one holds; it does not assert one.
+
+  Not enabled: start debugging on a separate profile. Not permitted: an
+  administrator must change RemoteDebuggingAllowed
+  (devtools.remote_debugging.allowed). Discovery checks explicit managed
+  policy on desktop platforms, including the per-user macOS domain at
+  /Library/Managed Preferences/<user>/com.google.Chrome.plist, and reads both
+  the boolean and the integer spelling of a zero value. An absent file alone
+  cannot distinguish a disabled preference, a policy not visible to bt, or a
+  failed listener; check chrome://policy in that case. HTTP 403 means the
+  connection was not permitted, but does not by itself prove an administrator
+  blocked it.
+
+  THE PEER DOES NOT CHOOSE THE ADDRESS. --endpoint http://HOST:PORT reads the
+  browser WebSocket URL from /json/version, and that answer is re-checked
+  against the same loopback rule the flag itself runs. A listener that answers
+  with ws://192.0.2.1:41234/... is refused, not dialled. Every DevTools HTTP
+  read goes to the host that was validated, never to "localhost", which
+  resolves to either family and sometimes to neither.
+
+  help over an external endpoint reads /json/protocol from that same address
+  and prints the live schema. An endpoint that does not serve it gets static
+  usage instead, which does not tell you to launch a browser: launching one
+  would not be the browser you are attached to.
 
   THE BROWSER IS NOT REGISTERED. Nothing is written to the registry, so
   `status` does not list it, and `stop` and `cleanup` neither see it nor touch

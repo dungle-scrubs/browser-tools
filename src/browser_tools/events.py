@@ -40,6 +40,8 @@ import sys
 import time
 from typing import TYPE_CHECKING, Any
 
+from .endpoint import ResolvedEndpoint
+
 if TYPE_CHECKING:
     from .core.cdp_client import CDPClient
 
@@ -131,7 +133,7 @@ def run_attach(
     target: str | None = None,
     url: str | None = None,
     registry_path: str | None = None,
-    endpoint: str | None = None,
+    endpoint: str | ResolvedEndpoint | None = None,
 ) -> None:
     """Stream subscribed events as JSON lines until EOF or SIGTERM.
 
@@ -215,7 +217,7 @@ def _stdin_is_watchable() -> bool:
 
 
 async def _attach_external(
-    port: int,
+    port: int | ResolvedEndpoint,
     subscriptions: list[str],
     target_spec: str | None,
     target_by: str | None,
@@ -236,7 +238,7 @@ async def _attach_external(
     EOF, on SIGTERM or SIGINT, or when the browser drops the connection.
     """
     async with one_shot_page_session(
-        port, target_spec, target_by, external=True
+        port, target_spec, target_by
     ) as (cdp, session_id):
         enabled_domains: set[str] = set()
         handlers: dict[str, Any] = {}
@@ -271,7 +273,7 @@ async def _attach_external(
                 loop.add_signal_handler(sig, shutdown.set)
 
         print(
-            json.dumps({"status": "ready", "sessionId": session_id[:16], "endpoint": port}),
+            json.dumps({"status": "ready", "sessionId": session_id[:16], "endpoint": port.port if isinstance(port, ResolvedEndpoint) else port}),
             flush=True,
         )
 
@@ -393,7 +395,7 @@ def wait(
     target: str | None = None,
     url: str | None = None,
     registry_path: str | None = None,
-    endpoint: str | None = None,
+    endpoint: str | ResolvedEndpoint | None = None,
     handler: Any | None = None,
 ) -> dict[str, Any]:
     """Block for one matching event and return its JSON dict.
@@ -420,7 +422,7 @@ def wait(
 
     async def _wait() -> dict[str, Any]:
         async with one_shot_page_session(
-            port, spec, target_by, external=endpoint is not None
+            port, spec, target_by
         ) as (cdp, session_id):
             return await wait_on_session(cdp, session_id, event, match, timeout)
 

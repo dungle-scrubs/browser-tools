@@ -61,7 +61,7 @@ def make_fake_cdp_client_cls(calls: list[tuple[str, dict | None]], metrics_seque
         async def connect(self):
             self.connected = True
 
-        async def send(self, method, params=None, session_id=None):
+        async def send(self, method, params=None, session_id=None, timeout=None):
             calls.append((method, params))
             if method == "Profiler.stop":
                 return {"profile": FAKE_PROFILE}

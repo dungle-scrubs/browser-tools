@@ -41,6 +41,8 @@ from .usage import UsageError
 if TYPE_CHECKING:
     import argparse
 
+    from .endpoint import ResolvedEndpoint
+
 #: Verbs that drive the attached browser, and so may be a step. Written out
 #: rather than derived: RFC-01 and ``GUIDE.txt`` disagree about whether
 #: ``window-border`` takes ``--endpoint``, and a set built by subtracting one
@@ -101,7 +103,7 @@ EXCLUDED_VERBS: dict[str, str] = {
 
 #: Flags the invocation owns. A step carrying one is a usage error: the
 #: connection is opened once, for the whole run, before step 1.
-INVOCATION_FLAGS = ("--endpoint", "--target", "--url", "--dialog")
+INVOCATION_FLAGS = ("--endpoint", "--chrome-profile", "--target", "--url", "--dialog")
 
 
 @dataclass(frozen=True)
@@ -268,7 +270,7 @@ def _check_nothing_was_retargeted(args: argparse.Namespace, line: int) -> None:
 
     if getattr(args, "reload", False):
         raise _at(line, "network-get --reload is standalone only; a run preserves earlier steps")
-    for attribute, flag in (("target", "--target"), ("url", "--url"), ("endpoint", "--endpoint"), ("dialog", "--dialog")):
+    for attribute, flag in (("chrome_profile", "--chrome-profile"), ("target", "--target"), ("url", "--url"), ("endpoint", "--endpoint"), ("dialog", "--dialog")):
         if attribute == "url" and not url_selects_page(args.command):
             continue
         if getattr(args, attribute, None) is not None:
@@ -276,7 +278,7 @@ def _check_nothing_was_retargeted(args: argparse.Namespace, line: int) -> None:
 
 
 def _validate_passthrough(
-    argv: list[str], line: int, endpoint: str | None = None
+    argv: list[str], line: int, endpoint: str | ResolvedEndpoint | None = None
 ) -> tuple[str, dict[str, Any] | None]:
     """Check a ``Domain.method '{...}'`` step and return its method and params.
 
@@ -349,7 +351,7 @@ def _validate_passthrough(
 
 
 def validate(
-    text: str, registry_path: str | None = None, endpoint: str | None = None
+    text: str, registry_path: str | None = None, endpoint: str | ResolvedEndpoint | None = None
 ) -> list[Step]:
     """Parse a Step List and return its steps, or raise ``StepListError``.
 

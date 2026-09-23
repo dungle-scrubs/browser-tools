@@ -35,8 +35,10 @@ matching how it already maps ``AmbiguousTargetError``/``TargetNotFoundError``.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import functools
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -46,6 +48,12 @@ from .core.attach import AmbiguousTargetError, TargetNotFoundError, resolve_targ
 from .core.cdp_client import CDPClient, get_ws_url_async
 from .core.errors import CDPError, NoPageError
 from .core.registry import InstanceNotFoundError
+from .endpoint import ResolvedEndpoint
+from .external_connection import (
+    SESSION_TIMEOUT,
+    TEARDOWN_TIMEOUT,
+    external_browser_connection,
+)
 from .lifecycle import LifecycleError
 
 #: Domains the run's ``CDPRuntime`` owns for the whole run (RFC-03, "Domain-
@@ -131,17 +139,15 @@ async def domains_enabled(
         yield
     finally:
         for domain in reversed(turned_on):
-            with contextlib.suppress(CDPError, ConnectionError):
+            with contextlib.suppress(CDPError, ConnectionError, TimeoutError):
                 await cdp.send(method=f"{domain}.disable", session_id=session_id)
 
 
 @contextlib.asynccontextmanager
 async def one_shot_page_session(
-    port: int,
+    port: int | ResolvedEndpoint,
     target_spec: str | None,
     target_by: str | None,
-    *,
-    external: bool = False,
 ) -> AsyncGenerator[tuple[CDPClient, str]]:
     """Connect, resolve a page target, attach, yield the session, detach.
 
@@ -156,19 +162,44 @@ async def one_shot_page_session(
     Raises ``NoPageError`` when the browser has no page targets at all (see
     the module docstring for why this is the one no-page spelling now).
 
-    ``external`` says the port came from ``--endpoint`` rather than the
-    registry. A failed connection then also reports who holds the port and what
-    profile directory they hold, because there is no registry entry to compare
-    against and no ``bt status`` row to look the browser up in (#97).
+    A ``ResolvedEndpoint`` says the address came from ``--endpoint`` or
+    ``--chrome-profile`` rather than the registry, and that one fact decides
+    the whole connection: the send bounds of ``external_connection`` apply, the
+    browser WebSocket URL is validated before it is dialled, and a failure
+    reports who holds the port and what user data directory they hold, because
+    there is no registry entry to compare against and no ``bt status`` row to
+    look the browser up in (#97).
     """
-    try:
-        browser_ws_url = await get_ws_url_async(port=port, target_type="browser")
-    except ConnectionError as exc:
-        raise ConnectionError(
-            connection_failure_message(port=port, cause=exc.__cause__, external=external)
-        ) from exc
-    async with CDPClient(ws_url=browser_ws_url) as cdp:
-        targets_result = await cdp.send(method="Target.getTargets")
+    # The session scaffolding -- listing targets, attaching, detaching -- is
+    # answered by the browser process without a renderer, so on an external
+    # address it gets a tighter bound than the caller's own commands. A
+    # registry instance keeps the unbounded default: bt launched it, supervises
+    # it, and `bt status` can say what it is doing.
+    external = isinstance(port, ResolvedEndpoint)
+    open_bound = SESSION_TIMEOUT if external else None
+    close_bound = TEARDOWN_TIMEOUT if external else None
+    async with contextlib.AsyncExitStack() as stack:
+        if isinstance(port, ResolvedEndpoint):
+            # An address the person typed, not a registry row. Every send over
+            # it is bounded and the browser WebSocket URL is validated, whether
+            # the person gave the ws:// form, the http:// form, or a profile
+            # directory for discovery to read.
+            endpoint = port
+            if endpoint.websocket_url is None:
+                from .devtools_http import browser_websocket_url
+
+                url = await asyncio.to_thread(browser_websocket_url, endpoint)
+                endpoint = replace(endpoint, websocket_url=url)
+            cdp = await stack.enter_async_context(external_browser_connection(endpoint))
+        else:
+            try:
+                browser_ws_url = await get_ws_url_async(port=port, target_type="browser")
+            except ConnectionError as exc:
+                raise ConnectionError(
+                    registry_connection_failure_message(port=port, cause=exc.__cause__)
+                ) from exc
+            cdp = await stack.enter_async_context(CDPClient(ws_url=browser_ws_url))
+        targets_result = await cdp.send(method="Target.getTargets", timeout=open_bound)
         target_infos: list[dict[str, Any]] = targets_result.get("targetInfos", [])
 
         def _target_id(t: dict[str, Any]) -> str:
@@ -190,22 +221,34 @@ async def one_shot_page_session(
         session_result = await cdp.send(
             method="Target.attachToTarget",
             params={"targetId": target_id, "flatten": True},
+            timeout=open_bound,
         )
-        session_id = session_result["sessionId"]
+        session_id = session_result.get("sessionId")
+        if not isinstance(session_id, str) or not session_id:
+            # A peer that answers the shape of CDP but not its content. Reading
+            # the key straight out of the reply printed a bare KeyError
+            # traceback for a reply bt had already decided to trust.
+            raise ConnectionError(
+                "Target.attachToTarget returned no sessionId. The peer answers the "
+                "DevTools protocol's shape but not its content, so it is not a "
+                "browser bt can drive."
+            )
         try:
             yield cdp, session_id
         finally:
             with contextlib.suppress(Exception):
+                # Bounded like everything else. A verb that has already
+                # produced its answer must not then hang on teardown against a
+                # peer that has stopped answering.
                 await cdp.send(
                     method="Target.detachFromTarget",
                     params={"sessionId": session_id},
+                    timeout=close_bound,
                 )
 
 
-def connection_failure_message(
-    *, port: int, cause: BaseException | None, external: bool = False
-) -> str:
-    """Spell out why the DevTools HTTP endpoint on ``port`` did not answer.
+def registry_connection_failure_message(*, port: int, cause: BaseException | None) -> str:
+    """Spell out why a registered instance's DevTools HTTP endpoint went quiet.
 
     The vendored ``core.cdp_client.get_ws_url`` raises one ``ConnectionError``
     ("No browser listening ... chrome-agent launch") for every HTTP failure,
@@ -223,22 +266,46 @@ def connection_failure_message(
     core text and program name stay untouched in ``core/``.
     """
     if _is_timeout(cause):
-        message = (
+        return (
             f"Browser on port {port} is bound but did not answer the DevTools HTTP "
             f"endpoint before the timeout (busy or hung browser UI thread). "
             f"Check it with: bt status"
         )
-    else:
-        message = f"No browser listening on port {port}. Start one with: bt launch"
-    if not external:
-        return message
+    return f"No browser listening on port {port}. Start one with: bt launch"
+
+
+def connection_failure_message(endpoint: ResolvedEndpoint, cause: BaseException | None) -> str:
+    """Say why an external endpoint did not answer, and who holds its port.
+
+    An external browser has no registry entry, so there is no ``bt status`` row
+    to look it up in and no ``bt launch`` that would bring it back: both
+    remedies name verbs that cannot see it. What is left is the port itself, so
+    the message names the flag the person typed, the address it dialled, and
+    every process holding that port with the user data directory each one
+    holds.
+
+    Args:
+        endpoint: The address the flag resolved to.
+        cause: The read that failed, used only to separate "nothing is bound"
+            from "bound but silent".
+
+    Returns:
+        A multi-line diagnostic.
+    """
     from .endpoint import describe_endpoint
 
-    return (
-        f"--endpoint on port {port} did not answer. "
-        f"Start the browser with --remote-debugging-port={port}.\n"
-        f"{describe_endpoint(port)}"
-    )
+    if _is_timeout(cause):
+        opening = (
+            f"{endpoint.flag} reached {endpoint.host}:{endpoint.port} but it did not "
+            f"answer /json/version before the timeout. Chrome serves /json from its UI "
+            f"thread, so a wedged browser accepts the connection and never replies."
+        )
+    else:
+        opening = (
+            f"{endpoint.flag} found no DevTools HTTP endpoint at "
+            f"{endpoint.host}:{endpoint.port}. The read failed: {cause}"
+        )
+    return f"{opening}\n{describe_endpoint(endpoint.port)}"
 
 
 def _is_timeout(exc: BaseException | None) -> bool:

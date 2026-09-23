@@ -795,10 +795,15 @@ source or to Chrome's own documentation; the citations are in References.
   first line the listening port, second line the browser WebSocket path.
 - **The port is not reliably 9222.** Chrome reads the previous
   `DevToolsActivePort` on startup and tries to reuse its first-line port; with
-  no valid file it starts at 9222 and falls back to any available port when
-  that one is taken. This is why discovery reads the file rather than assuming
-  a port, and why a 404-then-try-`/devtools/browser` fallback on a hand-passed
-  port is not a substitute for discovery.
+  no valid file the cited implementation starts at 9222. It does not fall back
+  to an available port when that one is taken. Ticket 11 preflight measured
+  Chrome for Testing headless shell 151: a free preferred port binds IPv4;
+  when IPv4 is held it binds IPv6 on the same number; when both families are
+  held it writes no port file and keeps running without an endpoint. Only
+  `--remote-debugging-port=0` requests a free port. Discovery reads both lines
+  of the file, tries both loopback families, and verifies a DevTools response
+  before running a verb. Missing files fail promptly with a diagnostic naming
+  the both-families collision. Executable coverage: `tests/test_chrome_attach.py`.
 - **The enabling preference survives a normal restart**, because it is a
   persisted Local State preference. An administrator policy can disable the
   whole feature through `devtools.remote_debugging.allowed`, so a diagnostic
@@ -807,11 +812,18 @@ source or to Chrome's own documentation; the citations are in References.
   to allow every incoming connection and shows an automation banner while
   connected.
 
-**What is still unverified is local, not upstream.** None of this has been
-exercised against the Chrome installed on the driving dev's machine: the
-preference has never been set there and no port file exists. The implementing
-ticket re-establishes the behaviour against that Chrome before building. If it
-differs, the design here is wrong on arrival and the right answer is none of it.
+**Ticket 11 scope correction, measured:** the installed branded Chrome is 153,
+while the cited approval implementation is 144 and headless-shell port
+measurements are 151. Chrome 153 **refuses remote debugging on its computed
+default data directory**, run against the driving dev's real profile with their
+authorization: `DevTools remote debugging requires a non-default data
+directory. Specify this using --user-data-dir.` No port file, no endpoint.
+Ticket 12's first check is therefore done, and the answer is the restrictive
+one. Ticket 11 ships attachment to a Chrome deliberately started for debugging
+on its own profile; attachment to the person's everyday already-open Chrome is
+not narrowed by choice, it is declined by the browser. What remains for ticket
+12 is the Allow click and the automation banner, against a Chrome started that
+way. Real per-connection approval and the automation banner remain unverified.
 
 **The per-connection approval is a design constraint, not a detail.** A fully
 unattended agent cannot use `--chrome-profile`, because nobody is there to
@@ -832,20 +844,63 @@ What ships is deliberately thin, and it is gated, not ungated:
   loopback check runs on the `ws://` form exactly as on the HTTP form, against
   the same `LOOPBACK_HOSTS`, and the same non-loopback refusal text and tunnel
   remedy apply.
-- **Port-file discovery behind `--chrome-profile [CHANNEL]`**, a verb-level
-  flag on every verb that takes `--endpoint`, mutually exclusive with it.
-  `CHANNEL` is one of `stable`, `beta`, `dev`, `canary`, defaulting to
-  `stable`. It resolves that channel's default user-data directory for the
-  platform, reads `DevToolsActivePort`, and dials the resulting WebSocket. The
-  per-channel, per-platform directory table is the verb's own knowledge and is
-  the substance of the implementing ticket. A missing or malformed file is exit
-  2 naming the path it looked at.
-- **A bounded wait on Chrome's per-connection Allow prompt: 30 seconds**,
-  matching `wait`'s default, then exit 1 with a diagnostic naming the remedy:
-  `No approval received in 30s. Chrome asks permission for each debugging
-  connection; click Allow in the browser window.` Chrome also shows an
-  automation banner while connected. An unattended agent must never hang on a
-  click that is not coming.
+- **Port-file discovery behind `--chrome-profile DIR`**, a verb-level flag on
+  every verb that takes `--endpoint`, mutually exclusive with it. `DIR` is the
+  **user data directory** Chrome was started on, the one passed to Chrome's own
+  `--user-data-dir`. It reads that directory's `DevToolsActivePort` and dials
+  the verified WebSocket. A missing or malformed file is exit 2 naming the path
+  it looked at.
+
+  A channel name (`stable`, `beta`, `dev`, `canary`) is still accepted and
+  resolves through the per-channel, per-platform directory table. **When the
+  resolved directory is any channel's platform default the flag refuses**, with
+  Chrome's own restriction text and the `--user-data-dir` flow, because Chrome
+  writes no port file there and starts no endpoint. The first shape took a
+  channel name only, and the overrides that could move a channel's directory
+  existed on Linux alone, so on macOS and Windows the flag's single reachable
+  target was the one directory Chrome declines: it had no working
+  configuration. The refusal turns that dead end into the instruction.
+
+- **The loopback family is verified, not raced.** `DevToolsActivePort`'s second
+  line is the browser WebSocket path, and the GUID in it is the browser's whole
+  authentication. Sending it to both families to see which answers handed that
+  capability token to whatever held the other family -- measured: a plain
+  non-CDP listener logged `GET /devtools/browser/<guid>` -- and made the choice
+  of browser a race, which a CDP-speaking impostor won 2 runs in 10. Instead
+  each family is asked for `/json/version`, which carries no secret, and the
+  `webSocketDebuggerUrl` in the reply is compared against that line. Only a peer
+  that already knows the GUID is dialled, and exactly one is. That also makes
+  one invocation one connection, and so one Allow prompt, which is what this
+  section has always claimed. Neither family verifying is exit 2 naming the
+  stale-port-file case and the Chrome 144+ service, which answers 404 for
+  `/json/version` by design and is reached with `--endpoint ws://...` instead.
+
+- **The peer does not choose the host `bt` dials.** The HTTP form asks
+  `/json/version` for a WebSocket URL, so the loopback rule runs a second time,
+  on the answer. A listener on `127.0.0.1` answering
+  `ws://192.0.2.1:41234/devtools/browser/x` made `bt` dial off-box, which made
+  "loopback only, no escape hatch" false on the form this document presents
+  first. Every DevTools HTTP read also dials the validated host rather than
+  `localhost`, which resolves to either family and sometimes to neither.
+- **Every wait on the external route is bounded**, not only the opening
+  handshake. 30 seconds for the WebSocket handshake and the `Browser.getVersion`
+  that verifies the peer, matching `wait`'s default and the time a person needs
+  to click Allow; 30 seconds more to list targets and attach a page session,
+  both answered by the browser process without a renderer; 120 seconds for any
+  single CDP command a verb sends, which may reach a renderer doing real work;
+  5 seconds for the detach on the way out. These bound one command's reply and
+  not the verb, so a verb that waits on events keeps its own deadline. The first
+  shape bounded the handshake alone, and a peer that handshook, answered
+  `Browser.getVersion`, then went silent left `Runtime.evaluate` running past
+  two minutes; a wedged real Chrome reaches the same state.
+
+- **A timeout is reported as what it is.** A connection accepted and then quiet
+  has at least three causes -- Chrome waiting for Allow, a wedged browser, a
+  process that is not a browser -- and two plain TCP listeners produce it with
+  no Chrome anywhere. The diagnostic names all three and lists who holds the
+  port; it does not assert one. Chrome also shows an automation banner while
+  connected. An unattended agent must never hang on a click that is not
+  coming.
 - **It writes nothing to the registry, on any path**, including on failure.
 - **Every existing External Endpoint refusal, unchanged**: loopback only,
   `Browser.close` and `Browser.crash` refused. An auto-discovered port is as
@@ -864,12 +919,13 @@ discards it.
 
 Nothing here is promoted to first-class, advertised in the README, or aliased,
 until one end-to-end attach is verified on the driving dev's machine. That
-verification needs a human: the enabling preference has never been set there, no
-port file exists, and each connection needs an Allow click. So the 458 sampled
-mentions prove interest and not one verified attach, and the local evidence is
-consistent with this never having worked on that machine. If the verification
-fails, or a re-sample shows those mentions were configuration echoes, the right
-answer becomes none of it.
+verification needs a human: each connection needs an Allow click. So the 458
+sampled mentions prove interest and not one verified attach. The everyday-
+profile promise is now settled and settled against: Chrome declines it, so it
+is not a promise that can be made at any scope. What is left to verify is the
+deliberately started debugging profile, which discovery reaches end to end
+against a headless shell in `tests/test_chrome_attach.py` and which needs the
+Allow click tested against branded Chrome.
 
 ### 7. Documentation defects
 
@@ -967,8 +1023,12 @@ The `~/dev/firstmate` clone stays. Deleting it is out of scope.
 | `bt insights --insight` with an unknown name | exit 2 with the valid names listed. |
 | `bt insights` and the engine revision does not match the browser | exit 1 naming the remedy, unless `--ignore-engine-mismatch`. The stamp is present either way. |
 | `--endpoint ws://` and the host is not loopback | exit 2, the existing non-loopback refusal with the tunnel remedy. |
+| `--chrome-profile` and the directory is a channel's platform default | exit 2 quoting Chrome's own restriction and showing the `--user-data-dir` flow. |
 | `--chrome-profile` and the port file is missing or malformed | exit 2 naming the path it read. |
-| `--chrome-profile` and no approval arrives in 30 s | exit 1 naming the Allow click. |
+| `--chrome-profile` and neither loopback family answers `/json/version` with the port file's browser path | exit 2 naming the stale-port-file case and the `--endpoint ws://` route. |
+| `--endpoint http://` and `/json/version` answers with a non-loopback `webSocketDebuggerUrl` | exit 1 naming the address the peer chose; nothing is dialled. |
+| An external peer accepts the connection and does not answer in 30 s | exit 1 naming all three causes and who holds the port, asserting none. |
+| An external peer answers `Browser.getVersion` and then goes silent | exit 1 within the session or command bound; the invocation never hangs. |
 | A dialog is answered by the policy | recorded under `dialogs` with type, message, answer and result; never silent. |
 
 ## Security Considerations
@@ -995,6 +1055,18 @@ logged-in browser. Discovery through `--chrome-profile` makes such an endpoint
 easier to find and changes nothing about the refusals: loopback only, browser
 lifetime methods refused, and no registry entry, so no vendored cleanup path
 can reach the real profile directory.
+
+Two rules follow from that, and both were broken in the first implementation:
+
+- **The browser's GUID is never transmitted to an unverified peer.** The path
+  in `DevToolsActivePort` is the browser WebSocket's whole authentication.
+  Probing both loopback families with it disclosed it to whatever held the
+  other family, on every attach. Discovery now proves the peer already knows
+  it, by comparing `/json/version`'s answer, before anything is dialled.
+- **The peer never chooses the address `bt` dials.** The HTTP form asks a peer
+  for a WebSocket URL, so the loopback rule runs again on that answer.
+  Without it, a listener on loopback could send `bt` off-box, and "loopback
+  only, no escape hatch" was false.
 
 ## Alternatives Considered
 
@@ -1084,8 +1156,8 @@ which leaves the retirement short of two capabilities and reopens decision 2.
 6. Whether Chrome's documented per-connection approval behaves as documented
    on the driving dev's installed Chrome. The documentation is unambiguous and
    is cited; what is open is only whether that Chrome matches it. It is the
-   first thing the attach verification checks, because a per-connection prompt
-   is what makes this unusable unattended.
+   second thing the attach verification checks, after the Chrome 153 default-
+   profile restriction. A per-connection prompt makes this unusable unattended.
 
 ## References
 
@@ -1118,7 +1190,7 @@ which leaves the retirement short of two capabilities and reopens decision 2.
   https://chromium.googlesource.com/chromium/src/+/45ff52e032500bea7703cd4f22723b519fa81fa2/content/browser/devtools/devtools_http_handler.cc#598
 - `DevToolsActivePort` format, port line then path line: the same file, lines
   305-322.
-- Port reuse and fallback away from 9222: Chromium commit
+- Historical port reuse implementation (the fallback claim is corrected above): Chromium commit
   `cec7af242a1ec8b33becd04582467cddb2902a26`, lines 33-40, 101-120 and 162-186.
 - The preference persists in Local State, and the
   `devtools.remote_debugging.allowed` policy: Chromium commit

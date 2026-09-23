@@ -64,6 +64,9 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from .endpoint import ResolvedEndpoint
+from .external_connection import APPROVAL_TIMEOUT, SESSION_TIMEOUT
+
 if TYPE_CHECKING:
     from collections.abc import Generator
 
@@ -105,8 +108,8 @@ DEFAULT_STABLE_MS = 300
 
 
 def _resolve_port(
-    instance: str | None, registry_path: str | None, endpoint: str | None = None
-) -> int:
+    instance: str | None, registry_path: str | None, endpoint: str | ResolvedEndpoint | None = None
+) -> int | ResolvedEndpoint:
     """Resolve the CDP port for this invocation.
 
     ``endpoint`` drives an external browser and skips the registry entirely;
@@ -144,7 +147,7 @@ def capture_session(
     instance: str | None,
     target: str | None,
     registry_path: str | None,
-    endpoint: str | None,
+    endpoint: str | ResolvedEndpoint | None,
 ) -> Generator[CDPHandler]:
     """A plain session for a Bounded Capture that drives nothing itself.
 
@@ -166,7 +169,7 @@ def run_session(
     target: str | None,
     url: str | None,
     registry_path: str | None,
-    endpoint: str | None,
+    endpoint: str | ResolvedEndpoint | None,
     all_frames: bool = False,
     dialog: str | None = "dismiss",
 ) -> Generator[CDPHandler]:
@@ -179,7 +182,7 @@ def run_session(
     spec, by = target_selector(target, url)
     port = _resolve_port(instance, registry_path, endpoint)
     with _cdp_handler_session(
-        port, spec, by, external=endpoint is not None, all_frames=all_frames, dialog=dialog
+        port, spec, by, all_frames=all_frames, dialog=dialog
     ) as handler:
         handler.start_run_network()
         yield handler
@@ -192,7 +195,7 @@ def _handler_for(
     instance: str | None,
     target: str | None,
     registry_path: str | None,
-    endpoint: str | None,
+    endpoint: str | ResolvedEndpoint | None,
     all_frames: bool = False,
     url: str | None = None,
     dialog: str | None = None,
@@ -211,7 +214,7 @@ def _handler_for(
         return
     port = _resolve_port(instance, registry_path, endpoint)
     with _cdp_handler_session(
-        port, spec, external=endpoint is not None, all_frames=all_frames,
+        port, spec, all_frames=all_frames,
         **({"target_by": by} if url is not None else {}),
         **({"dialog": dialog} if dialog is not None else {}),
     ) as opened:
@@ -220,11 +223,10 @@ def _handler_for(
 
 @contextlib.contextmanager
 def _cdp_handler_session(
-    port: int,
+    port: int | ResolvedEndpoint,
     target_spec: str | None = None,
     target_by: str | None = None,
     *,
-    external: bool = False,
     all_frames: bool = False,
     dialog: str | None = None,
 ) -> Generator[CDPHandler]:
@@ -240,13 +242,13 @@ def _cdp_handler_session(
     reads ``--target``: a 1-based index into the page targets sorted by target
     ID, or a target ID prefix. None takes the first page in that order.
 
-    ``external`` says the port came from ``--endpoint``. A failed connection
-    then also reports who holds the port and what profile directory they hold:
-    there is no registry entry to compare against and no ``bt status`` row to
-    look the browser up in (#97).
+    A ``ResolvedEndpoint`` says the address came from ``--endpoint`` or
+    ``--chrome-profile``. A failed connection then also reports who holds the
+    port and what user data directory they hold: there is no registry entry to
+    compare against and no ``bt status`` row to look the browser up in (#97).
     """
     handler = CDPHandler(
-        f"http://127.0.0.1:{port}",
+        port if isinstance(port, ResolvedEndpoint) else f"http://127.0.0.1:{port}",
         mode="full",
         target_spec=target_spec,
         target_by=target_by,
@@ -256,7 +258,17 @@ def _cdp_handler_session(
         handler.configure_dialog_policy(dialog)
     thread = threading.Thread(target=handler.run, name="curated-cdp", daemon=True)
     thread.start()
-    deadline = time.monotonic() + HANDLER_CONNECT_TIMEOUT_SECONDS
+    # An external address gets the runtime's own bounds plus slack, so the
+    # runtime reports why it failed instead of this poll giving up first and
+    # reporting that it gave up. The reviewed build polled a shorter deadline
+    # than the connection it was waiting on, so a wedged peer produced a
+    # generic message while the real diagnosis was still coming.
+    timeout = (
+        APPROVAL_TIMEOUT + SESSION_TIMEOUT + 2.0
+        if isinstance(port, ResolvedEndpoint)
+        else HANDLER_CONNECT_TIMEOUT_SECONDS
+    )
+    deadline = time.monotonic() + timeout
     connected = False
     reason: str | None = None
     while time.monotonic() < deadline:
@@ -273,16 +285,22 @@ def _cdp_handler_session(
     if not connected:
         handler.stop()
         thread.join(timeout=2.0)
-        message = f"could not open a CDP session on the instance at port {port}"
+        number = port.port if isinstance(port, ResolvedEndpoint) else port
         if reason:
-            message = f"{message}: {reason}"
-        if external:
-            message = (
-                f"--endpoint on port {port} did not answer. "
-                f"Start the browser with --remote-debugging-port={port}.\n"
-                f"{browser_endpoint.describe_endpoint(port)}"
+            # The runtime reached the failure first, and its message already
+            # names the flag, the address and who holds the port.
+            raise LifecycleError(reason)
+        if isinstance(port, ResolvedEndpoint):
+            # The runtime never reported at all. Nothing is known beyond the
+            # address and the wait, so the message says only that, plus who
+            # holds the port -- there is no registry row to look this browser
+            # up in and no `bt launch` that would bring it back.
+            raise LifecycleError(
+                f"{port.flag} on port {number} did not open a CDP session in "
+                f"{timeout:.0f}s, and reported no reason.\n"
+                f"{browser_endpoint.describe_endpoint(number)}"
             )
-        raise LifecycleError(message)
+        raise LifecycleError(f"could not open a CDP session on the instance at port {number}")
     try:
         yield handler
     finally:
@@ -369,7 +387,7 @@ def snapshot(
     instance: str | None,
     target: str | None = None,
     registry_path: str | None = None,
-    endpoint: str | None = None,
+    endpoint: str | ResolvedEndpoint | None = None,
     handler: CDPHandler | None = None,
     all_frames: bool = False,
 ) -> dict[str, Any]:
@@ -390,7 +408,7 @@ def click(
     uid: str,
     target: str | None = None,
     registry_path: str | None = None,
-    endpoint: str | None = None,
+    endpoint: str | ResolvedEndpoint | None = None,
     handler: CDPHandler | None = None,
     all_frames: bool = False,
     dialog: str = "dismiss",
@@ -418,7 +436,7 @@ def fill(
     text: str,
     target: str | None = None,
     registry_path: str | None = None,
-    endpoint: str | None = None,
+    endpoint: str | ResolvedEndpoint | None = None,
     handler: CDPHandler | None = None,
     all_frames: bool = False,
     dialog: str = "dismiss",
@@ -451,7 +469,7 @@ def wait_idle(
     timeout_ms: int = DEFAULT_WAIT_TIMEOUT_MS,
     idle_ms: int = DEFAULT_IDLE_MS,
     registry_path: str | None = None,
-    endpoint: str | None = None,
+    endpoint: str | ResolvedEndpoint | None = None,
     handler: CDPHandler | None = None,
 ) -> dict[str, Any]:
     """Wait for network idle (frozen ``wait_idle``)."""
@@ -466,7 +484,7 @@ def wait_stable(
     timeout_ms: int = DEFAULT_WAIT_TIMEOUT_MS,
     stable_ms: int = DEFAULT_STABLE_MS,
     registry_path: str | None = None,
-    endpoint: str | None = None,
+    endpoint: str | ResolvedEndpoint | None = None,
     handler: CDPHandler | None = None,
 ) -> dict[str, Any]:
     """Wait for DOM quiescence (frozen ``wait_stable``)."""
@@ -519,7 +537,7 @@ def detect(
     *,
     instance: str | None,
     registry_path: str | None = None,
-    endpoint: str | None = None,
+    endpoint: str | ResolvedEndpoint | None = None,
     wait_seconds: float | None = None,
     handler: CDPHandler | None = None,
 ) -> dict[str, Any]:
@@ -569,7 +587,7 @@ def frames_list(
     *,
     instance: str | None,
     registry_path: str | None = None,
-    endpoint: str | None = None,
+    endpoint: str | ResolvedEndpoint | None = None,
     handler: CDPHandler | None = None,
     all_frames: bool = False,
 ) -> dict[str, Any]:
@@ -584,7 +602,7 @@ def frames_select(
     instance: str | None,
     pattern: str,
     registry_path: str | None = None,
-    endpoint: str | None = None,
+    endpoint: str | ResolvedEndpoint | None = None,
     handler: CDPHandler | None = None,
     all_frames: bool = False,
 ) -> dict[str, Any]:
@@ -598,7 +616,7 @@ def frames_reset(
     *,
     instance: str | None,
     registry_path: str | None = None,
-    endpoint: str | None = None,
+    endpoint: str | ResolvedEndpoint | None = None,
     handler: CDPHandler | None = None,
     all_frames: bool = False,
 ) -> dict[str, Any]:
@@ -618,7 +636,7 @@ def storage_get(
     instance: str | None,
     key: str | None = None,
     registry_path: str | None = None,
-    endpoint: str | None = None,
+    endpoint: str | ResolvedEndpoint | None = None,
     handler: CDPHandler | None = None,
     all_frames: bool = False,
 ) -> dict[str, Any]:
@@ -657,7 +675,7 @@ def screencast(
     fmt: str = "jpeg",
     max_frames: int = DEFAULT_SCREENCAST_MAX_FRAMES,
     registry_path: str | None = None,
-    endpoint: str | None = None,
+    endpoint: str | ResolvedEndpoint | None = None,
     handler: CDPHandler | None = None,
 ) -> dict[str, Any]:
     """Capture a bounded screencast and write its frames, in one invocation.
@@ -729,7 +747,7 @@ def _capture_for(handler: CDPHandler, duration: float, max_frames: int) -> int:
 
 
 async def _capture_screenshot(
-    port: int, target_spec: str | None, target_by: str | None, *, external: bool = False
+    port: int | ResolvedEndpoint, target_spec: str | None, target_by: str | None
 ) -> str:
     """Capture a full-page PNG over a one-shot session, guarding blank frames.
 
@@ -739,7 +757,7 @@ async def _capture_screenshot(
     shared retry budget): a near-uniform capture is retried after a short
     delay, matching the daemon's ``take_screenshot`` post-capture check.
     """
-    async with one_shot_page_session(port, target_spec, target_by, external=external) as (
+    async with one_shot_page_session(port, target_spec, target_by) as (
         cdp,
         session_id,
     ):
@@ -776,7 +794,7 @@ def screenshot(
     target: str | None = None,
     url: str | None = None,
     registry_path: str | None = None,
-    endpoint: str | None = None,
+    endpoint: str | ResolvedEndpoint | None = None,
     handler: CDPHandler | None = None,
 ) -> dict[str, Any]:
     """Capture a page screenshot (frozen ``take_screenshot``, CDP-native form).
@@ -801,7 +819,7 @@ def screenshot(
         port = _resolve_port(instance, registry_path, endpoint)
         spec, target_by = target_selector(target, url)
         data = asyncio.run(
-            _capture_screenshot(port, spec, target_by, external=endpoint is not None)
+            _capture_screenshot(port, spec, target_by)
         )
 
     if not data:
@@ -836,7 +854,7 @@ class DialogCancelledError(LifecycleError):
 def _action(
     name: str, arguments: dict[str, Any], *, instance: str | None,
     target: str | None, url: str | None, registry_path: str | None,
-    endpoint: str | None, handler: CDPHandler | None, all_frames: bool,
+    endpoint: str | ResolvedEndpoint | None, handler: CDPHandler | None, all_frames: bool,
     dialog: str | None = "dismiss",
 ) -> dict[str, Any]:
     with _handler_for(handler, instance, target, registry_path, endpoint, all_frames, url, dialog) as opened:
@@ -870,7 +888,7 @@ def _action(
 def eval_js(
     *, instance: str | None, source: str, await_promise: bool = False,
     target: str | None = None, url: str | None = None,
-    registry_path: str | None = None, endpoint: str | None = None,
+    registry_path: str | None = None, endpoint: str | ResolvedEndpoint | None = None,
     handler: CDPHandler | None = None, all_frames: bool = False,
     dialog: str = "dismiss",
 ) -> dict[str, Any]:
@@ -883,7 +901,7 @@ def eval_js(
 def press(
     *, instance: str | None, key: str, modifiers: str | None = None,
     target: str | None = None, url: str | None = None,
-    registry_path: str | None = None, endpoint: str | None = None,
+    registry_path: str | None = None, endpoint: str | ResolvedEndpoint | None = None,
     handler: CDPHandler | None = None, all_frames: bool = False,
     dialog: str = "dismiss",
 ) -> dict[str, Any]:
@@ -899,7 +917,7 @@ def press(
 def hover(
     *, instance: str | None, uid: str,
     target: str | None = None, url: str | None = None,
-    registry_path: str | None = None, endpoint: str | None = None,
+    registry_path: str | None = None, endpoint: str | ResolvedEndpoint | None = None,
     handler: CDPHandler | None = None, all_frames: bool = False,
     dialog: str = "dismiss",
 ) -> dict[str, Any]:
@@ -912,7 +930,7 @@ def hover(
 def type_text(
     *, instance: str | None, text: str | None = None, file: str | None = None,
     target: str | None = None, url: str | None = None,
-    registry_path: str | None = None, endpoint: str | None = None,
+    registry_path: str | None = None, endpoint: str | ResolvedEndpoint | None = None,
     handler: CDPHandler | None = None, all_frames: bool = False,
     dialog: str = "dismiss",
 ) -> dict[str, Any]:
@@ -935,7 +953,7 @@ def type_text(
 def wait_text(
     *, instance: str | None, substring: str, timeout_ms: int = DEFAULT_WAIT_TIMEOUT_MS,
     target: str | None = None, url: str | None = None,
-    registry_path: str | None = None, endpoint: str | None = None,
+    registry_path: str | None = None, endpoint: str | ResolvedEndpoint | None = None,
     handler: CDPHandler | None = None, all_frames: bool = False,
     dialog: str = "dismiss",
 ) -> dict[str, Any]:
@@ -951,7 +969,7 @@ def network_get(
     *, instance: str | None, url: str | None = None, request_id: str | None = None,
     response_file: str | None = None, target: str | None = None,
     duration: float = 2.0, reload: bool = False,
-    registry_path: str | None = None, endpoint: str | None = None,
+    registry_path: str | None = None, endpoint: str | ResolvedEndpoint | None = None,
     handler: CDPHandler | None = None, all_frames: bool = False,
     dialog: str = "dismiss",
 ) -> dict[str, Any]:
@@ -980,7 +998,7 @@ def network_get(
 def navigate(
     *, instance: str | None, destination: str,
     target: str | None = None, url: str | None = None,
-    registry_path: str | None = None, endpoint: str | None = None,
+    registry_path: str | None = None, endpoint: str | ResolvedEndpoint | None = None,
     handler: CDPHandler | None = None, all_frames: bool = False,
     dialog: str = "dismiss",
 ) -> dict[str, Any]:

@@ -89,7 +89,7 @@ class _RaceFakeCDP:
             if sid is None or sid == session_id:
                 cb(params)
 
-    async def send(self, method, params=None, session_id=None):
+    async def send(self, method, params=None, session_id=None, timeout=None):
         self.calls.append(method)
         if method.endswith(".enable"):
             self.handler_live_at_enable = any(self._handlers.values())
@@ -336,7 +336,7 @@ def _make_list_transport(fired, targets=None):
                 (cb, sid) for (cb, sid) in self._handlers.get(event, []) if cb is not callback
             ]
 
-        async def send(self, method, params=None, session_id=None):
+        async def send(self, method, params=None, session_id=None, timeout=None):
             if method == "Target.getTargets":
                 return {"targetInfos": targets}
             if method == "Target.attachToTarget":

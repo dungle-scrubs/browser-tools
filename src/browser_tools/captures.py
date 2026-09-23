@@ -8,12 +8,15 @@ import contextlib
 import json
 import time
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from . import curated, step_list, step_run
 from .lifecycle import LifecycleError
 from .one_shot import cli_cdp_errors, domains_enabled
 from .usage import UsageError
+
+if TYPE_CHECKING:
+    from .endpoint import ResolvedEndpoint
 
 DEFAULT_CATEGORIES: tuple[str, ...] = (
     "-*",
@@ -199,7 +202,7 @@ def trace(
     categories: list[str] | None = None,
     timeout: float | None = None,
     target: str | None = None,
-    endpoint: str | None = None,
+    endpoint: str | ResolvedEndpoint | None = None,
     registry_path: str | None = None,
     all_frames: bool = False,
 ) -> tuple[dict[str, Any], bool]:
@@ -347,7 +350,7 @@ def heap(
     instance: str | None,
     out: str,
     target: str | None = None,
-    endpoint: str | None = None,
+    endpoint: str | ResolvedEndpoint | None = None,
     registry_path: str | None = None,
     handler: Any = None,
 ) -> dict[str, Any]:

@@ -57,7 +57,7 @@ def make_fake_cdp_client_cls(targets=None):
         async def __aexit__(self, *exc):
             return False
 
-        async def send(self, method, params=None, session_id=None):
+        async def send(self, method, params=None, session_id=None, timeout=None):
             calls.append((method, params, session_id))
             if method == "Target.getTargets":
                 return {"targetInfos": targets}
@@ -187,7 +187,7 @@ class TestOneShotPageSession:
             async def __aexit__(self, *exc):
                 return False
 
-            async def send(self, method, params=None, session_id=None):
+            async def send(self, method, params=None, session_id=None, timeout=None):
                 if method == "Target.getTargets":
                     return {
                         "targetInfos": [
@@ -362,9 +362,11 @@ class TestConnectionFailureMessage:
         assert "No browser listening" not in msg
 
     def test_unchained_error_defaults_to_no_browser(self):
-        from browser_tools.one_shot import connection_failure_message
+        from browser_tools.one_shot import registry_connection_failure_message
 
-        assert connection_failure_message(port=1, cause=None).startswith("No browser listening on port 1")
+        assert registry_connection_failure_message(port=1, cause=None).startswith(
+            "No browser listening on port 1"
+        )
 
     def test_mapped_to_lifecycle_error_by_cli_cdp_errors(self, monkeypatch):
         async def stalled(**kw):

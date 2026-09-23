@@ -22,13 +22,16 @@ from __future__ import annotations
 import sys
 import time
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from . import curated, passthrough, step_list
 from .events import WaitTimeout
 from .lifecycle import LifecycleError
 from .one_shot import cli_cdp_errors
 from .passthrough import HiddenTargetError
+
+if TYPE_CHECKING:
+    from .endpoint import ResolvedEndpoint
 
 #: ``bt run -`` reads the Step List from stdin.
 STDIN_SOURCE = "-"
@@ -235,7 +238,7 @@ def run(
     target: str | None = None,
     url: str | None = None,
     registry_path: str | None = None,
-    endpoint: str | None = None,
+    endpoint: str | ResolvedEndpoint | None = None,
     all_frames: bool = False,
     dialog: str = "dismiss",
 ) -> tuple[dict[str, Any], bool]:
