@@ -748,6 +748,9 @@ PERFORMANCE CAPTURES AND CPU PROFILING
       validation precedes Tracing.start. --timeout bounds the whole step run.
       --categories is one comma-separated list replacing the DevTools default
       set. It cannot repeat. Use the default for complete performance analysis.
+      Write it as --categories=LIST when the list starts with a dash, which
+      the DevTools set does: `--categories -*,v8` is read as a missing value
+      and exits 2, while `--categories=-*,v8` works.
       stdout contains trace.path, events, bytes, dataLossOccurred, durationMs,
       endedBy (duration, steps, timeout), categories, and a Run Document under
       run when --steps is present. Check dataLossOccurred before analysis.
