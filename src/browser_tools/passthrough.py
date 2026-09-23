@@ -39,6 +39,7 @@ from . import lifecycle
 from .core import protocol as core_protocol
 from .core import registry as core_registry
 from .core.registry import InstanceNotFoundError
+from .endpoint import ResolvedEndpoint
 from .lifecycle import LifecycleError
 from .one_shot import cli_cdp_errors, one_shot_page_session
 from .usage import UsageError as BaseUsageError
@@ -150,6 +151,38 @@ def strip_endpoint_flag(argv: list[str]) -> tuple[list[str], str | None]:
     return remaining, endpoint
 
 
+def strip_chrome_profile_flag(
+    argv: list[str], *, verbs: set[str] | frozenset[str] = frozenset()
+) -> tuple[list[str], str | None]:
+    """Extract the optional channel without consuming a following verb."""
+    from .chrome_discovery import CHANNELS
+
+    remaining: list[str] = []
+    channel: str | None = None
+    i = 0
+    while i < len(argv):
+        token = argv[i]
+        if token == "--chrome-profile" or token.startswith("--chrome-profile="):
+            if channel is not None:
+                raise UsageError("--chrome-profile may be given only once")
+            channel = token.split("=", 1)[1] if "=" in token else "stable"
+            if (
+                token == "--chrome-profile"
+                and i + 1 < len(argv)
+                and not argv[i + 1].startswith("-")
+                and argv[i + 1] not in verbs
+                and not lifecycle.looks_like_domain_method(argv[i + 1])
+            ):
+                i += 1
+                channel = argv[i]
+            if channel not in CHANNELS:
+                raise UsageError(f"unknown Chrome channel {channel!r}")
+        else:
+            remaining.append(token)
+        i += 1
+    return remaining, channel
+
+
 async def send_on_session(
     cdp: Any,
     session_id: str,
@@ -170,7 +203,7 @@ async def send_on_session(
 
 def extract_target_flags(
     argv: list[str],
-) -> tuple[list[str], str | None, str | None, str | None]:
+) -> tuple[list[str], str | None, str | None, str | ResolvedEndpoint | None]:
     """Pull ``--target`` / ``--url`` / ``--endpoint`` out of a passthrough argv.
 
     They may appear anywhere in the invocation. Returns
@@ -178,7 +211,14 @@ def extract_target_flags(
     ``--target`` and ``--url`` are given -- they select the same slot and
     cannot both be honored.
     """
+    argv, channel = strip_chrome_profile_flag(argv)
     argv, endpoint = strip_endpoint_flag(argv)
+    if channel is not None:
+        if endpoint is not None:
+            raise UsageError("--endpoint and --chrome-profile cannot be combined")
+        from .chrome_discovery import discover_chrome
+
+        endpoint = discover_chrome(channel)
     remaining: list[str] = []
     target: str | None = None
     url: str | None = None
@@ -296,7 +336,7 @@ def send(
     target: str | None = None,
     url: str | None = None,
     registry_path: str | None = None,
-    endpoint: str | None = None,
+    endpoint: str | ResolvedEndpoint | None = None,
 ) -> dict[str, Any]:
     """Send one raw CDP ``Domain.method`` call and return its JSON result.
 
@@ -380,11 +420,11 @@ Launch a browser first: bt launch
 
 
 def _resolve_help_port(
-    instance: str | None, registry_path: str | None, endpoint: str | None = None
-) -> int | None:
+    instance: str | None, registry_path: str | None, endpoint: str | ResolvedEndpoint | None = None
+) -> int | ResolvedEndpoint | None:
     """Resolve the port to query for live help, or None for static usage."""
     if endpoint is not None:
-        return browser_endpoint.resolve_endpoint_port(endpoint)
+        return endpoint if isinstance(endpoint, ResolvedEndpoint) else browser_endpoint.resolve_endpoint_port(endpoint)
     if instance is not None:
         try:
             info = core_registry.lookup(instance_name=instance, registry_path=registry_path)
@@ -407,7 +447,7 @@ def run_help(
     instance: str | None,
     query: str | None,
     registry_path: str | None = None,
-    endpoint: str | None = None,
+    endpoint: str | ResolvedEndpoint | None = None,
 ) -> None:
     """Print live-schema help from a running instance, else static usage.
 
@@ -418,6 +458,12 @@ def run_help(
     if port is None:
         print(STATIC_HELP, end="")
         return
+    if isinstance(port, ResolvedEndpoint):
+        if port.websocket_urls:
+            print(STATIC_HELP, end="")
+            print("Live protocol help is unavailable over a browser WebSocket; /json/protocol requires HTTP.")
+            return
+        port = port.port
     try:
         core_protocol.discover_protocol(port=port, query=query)
     except ConnectionError:

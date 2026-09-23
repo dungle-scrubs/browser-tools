@@ -43,6 +43,7 @@ one typo in a verb that accepts arbitrary method names.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from urllib.parse import urlparse
 
 from . import process_utils
@@ -67,42 +68,34 @@ class EndpointUsageError(UsageError):
     """A malformed or refused ``--endpoint`` invocation (CLI exit code 2)."""
 
 
-def resolve_endpoint_port(endpoint: str) -> int:
-    """Validate an external endpoint and return the port to drive.
+@dataclass(frozen=True)
+class ResolvedEndpoint:
+    """An external address, never an Instance or a registry record."""
 
-    Args:
-        endpoint: The ``--endpoint`` value, e.g. ``http://127.0.0.1:9222``.
+    port: int
+    url: str
+    websocket_urls: tuple[str, ...] = ()
 
-    Returns:
-        The TCP port of the remote debugging endpoint.
 
-    Raises:
-        EndpointUsageError: The URL is malformed, names a non-loopback host, or
-            carries no port. Nothing is sent anywhere first.
-    """
+def resolve_endpoint_port(endpoint: str) -> ResolvedEndpoint:
+    """Validate the entire address before any connection is attempted."""
     text = endpoint.strip()
     if "//" not in text:
         text = f"http://{text}"
-    parsed = urlparse(text)
-
-    if parsed.scheme not in ("http", "https"):
-        raise EndpointUsageError(
-            f"--endpoint {endpoint!r} is not an http(s) URL; "
-            "use http://127.0.0.1:<port>"
-        )
-
-    host = (parsed.hostname or "").strip("[]")
+    try:
+        parsed = urlparse(text)
+        host = parsed.hostname
+        port = parsed.port
+    except ValueError as exc:
+        raise EndpointUsageError(f"invalid --endpoint {endpoint!r}: {exc}") from exc
+    if parsed.scheme not in ("http", "https", "ws"):
+        raise EndpointUsageError("--endpoint requires an http(s) URL or ws://HOST:PORT/devtools/browser/ID")
     if not host:
-        raise EndpointUsageError(
-            f"--endpoint {endpoint!r} names no host; use http://127.0.0.1:<port>"
-        )
-
-    port = parsed.port
+        raise EndpointUsageError(f"--endpoint {endpoint!r} names no host")
     if port is None:
-        raise EndpointUsageError(
-            f"--endpoint {endpoint!r} names no port; use http://127.0.0.1:<port>"
-        )
-
+        raise EndpointUsageError(f"--endpoint {endpoint!r} names no port")
+    if not port:
+        raise EndpointUsageError("--endpoint port must be between 1 and 65535")
     if host not in LOOPBACK_HOSTS:
         raise EndpointUsageError(
             f"--endpoint {endpoint!r} is not loopback. A CDP endpoint is "
@@ -110,8 +103,16 @@ def resolve_endpoint_port(endpoint: str) -> int:
             f"{' and '.join(sorted(LOOPBACK_HOSTS))} are accepted. "
             + _TUNNEL_REMEDY.format(port=port)
         )
-
-    return port
+    if parsed.username or parsed.password or parsed.query or parsed.fragment:
+        raise EndpointUsageError("--endpoint cannot contain credentials, a query, or a fragment")
+    if parsed.scheme == "ws":
+        prefix = "/devtools/browser/"
+        if not parsed.path.startswith(prefix) or not parsed.path[len(prefix):] or any(
+            c.isspace() for c in text
+        ):
+            raise EndpointUsageError("--endpoint ws URL requires /devtools/browser/ID; HTTP discovery uses http://HOST:PORT")
+        return ResolvedEndpoint(port, text, (text,))
+    return ResolvedEndpoint(port, text)
 
 
 def refuse_browser_lifetime_method(method: str) -> None:

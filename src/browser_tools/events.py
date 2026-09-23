@@ -40,6 +40,8 @@ import sys
 import time
 from typing import TYPE_CHECKING, Any
 
+from .endpoint import ResolvedEndpoint
+
 if TYPE_CHECKING:
     from .core.cdp_client import CDPClient
 
@@ -131,7 +133,7 @@ def run_attach(
     target: str | None = None,
     url: str | None = None,
     registry_path: str | None = None,
-    endpoint: str | None = None,
+    endpoint: str | ResolvedEndpoint | None = None,
 ) -> None:
     """Stream subscribed events as JSON lines until EOF or SIGTERM.
 
@@ -215,7 +217,7 @@ def _stdin_is_watchable() -> bool:
 
 
 async def _attach_external(
-    port: int,
+    port: int | ResolvedEndpoint,
     subscriptions: list[str],
     target_spec: str | None,
     target_by: str | None,
@@ -271,7 +273,7 @@ async def _attach_external(
                 loop.add_signal_handler(sig, shutdown.set)
 
         print(
-            json.dumps({"status": "ready", "sessionId": session_id[:16], "endpoint": port}),
+            json.dumps({"status": "ready", "sessionId": session_id[:16], "endpoint": port.port if isinstance(port, ResolvedEndpoint) else port}),
             flush=True,
         )
 
@@ -393,7 +395,7 @@ def wait(
     target: str | None = None,
     url: str | None = None,
     registry_path: str | None = None,
-    endpoint: str | None = None,
+    endpoint: str | ResolvedEndpoint | None = None,
     handler: Any | None = None,
 ) -> dict[str, Any]:
     """Block for one matching event and return its JSON dict.

@@ -739,10 +739,15 @@ source or to Chrome's own documentation; the citations are in References.
   first line the listening port, second line the browser WebSocket path.
 - **The port is not reliably 9222.** Chrome reads the previous
   `DevToolsActivePort` on startup and tries to reuse its first-line port; with
-  no valid file it starts at 9222 and falls back to any available port when
-  that one is taken. This is why discovery reads the file rather than assuming
-  a port, and why a 404-then-try-`/devtools/browser` fallback on a hand-passed
-  port is not a substitute for discovery.
+  no valid file the cited implementation starts at 9222. It does not fall back
+  to an available port when that one is taken. Ticket 11 preflight measured
+  Chrome for Testing headless shell 151: a free preferred port binds IPv4;
+  when IPv4 is held it binds IPv6 on the same number; when both families are
+  held it writes no port file and keeps running without an endpoint. Only
+  `--remote-debugging-port=0` requests a free port. Discovery reads both lines
+  of the file, tries both loopback families, and verifies a DevTools response
+  before running a verb. Missing files fail promptly with a diagnostic naming
+  the both-families collision. Executable coverage: `tests/test_chrome_attach.py`.
 - **The enabling preference survives a normal restart**, because it is a
   persisted Local State preference. An administrator policy can disable the
   whole feature through `devtools.remote_debugging.allowed`, so a diagnostic
@@ -751,11 +756,18 @@ source or to Chrome's own documentation; the citations are in References.
   to allow every incoming connection and shows an automation banner while
   connected.
 
-**What is still unverified is local, not upstream.** None of this has been
-exercised against the Chrome installed on the driving dev's machine: the
-preference has never been set there and no port file exists. The implementing
-ticket re-establishes the behaviour against that Chrome before building. If it
-differs, the design here is wrong on arrival and the right answer is none of it.
+**Ticket 11 scope correction, pending the driving dev's confirmation:** the installed
+branded Chrome is 153, while the cited approval implementation is 144 and
+headless-shell port measurements are 151. Chrome 153's binary contains a
+startup diagnostic requiring a non-default data directory. This is evidence
+of a restriction, not a behavioral observation on the real profile. Ticket 12
+must test that restriction before testing the Allow click. Ticket 11 ships
+attachment to a Chrome deliberately started for debugging on its own profile;
+it does not promise attachment to the person's everyday already-open Chrome.
+Narrowing rather than dropping the primitive was the implementing session's
+recommendation, not a decision the driving dev has yet made; whether bt keeps
+the wider promise is theirs to settle.
+Real per-connection approval and the automation banner remain unverified.
 
 **The per-connection approval is a design constraint, not a detail.** A fully
 unattended agent cannot use `--chrome-profile`, because nobody is there to
@@ -811,9 +823,10 @@ until one end-to-end attach is verified on the driving dev's machine. That
 verification needs a human: the enabling preference has never been set there, no
 port file exists, and each connection needs an Allow click. So the 458 sampled
 mentions prove interest and not one verified attach, and the local evidence is
-consistent with this never having worked on that machine. If the verification
-fails, or a re-sample shows those mentions were configuration echoes, the right
-answer becomes none of it.
+consistent with this never having worked on that machine. A failed everyday-
+profile verification blocks promotion of that promise. The explicit ticket 11
+scope correction retains the primitives for deliberately started debugging
+profiles.
 
 ### 7. Documentation defects
 
@@ -1026,8 +1039,8 @@ which leaves the retirement short of two capabilities and reopens decision 2.
 6. Whether Chrome's documented per-connection approval behaves as documented
    on the driving dev's installed Chrome. The documentation is unambiguous and
    is cited; what is open is only whether that Chrome matches it. It is the
-   first thing the attach verification checks, because a per-connection prompt
-   is what makes this unusable unattended.
+   second thing the attach verification checks, after the Chrome 153 default-
+   profile restriction. A per-connection prompt makes this unusable unattended.
 
 ## References
 
@@ -1060,7 +1073,7 @@ which leaves the retirement short of two capabilities and reopens decision 2.
   https://chromium.googlesource.com/chromium/src/+/45ff52e032500bea7703cd4f22723b519fa81fa2/content/browser/devtools/devtools_http_handler.cc#598
 - `DevToolsActivePort` format, port line then path line: the same file, lines
   305-322.
-- Port reuse and fallback away from 9222: Chromium commit
+- Historical port reuse implementation (the fallback claim is corrected above): Chromium commit
   `cec7af242a1ec8b33becd04582467cddb2902a26`, lines 33-40, 101-120 and 162-186.
 - The preference persists in Local State, and the
   `devtools.remote_debugging.allowed` policy: Chromium commit

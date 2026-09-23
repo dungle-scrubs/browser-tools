@@ -41,6 +41,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from .core.cdp_client import CDPClient
+    from .endpoint import ResolvedEndpoint
 
 from . import lifecycle
 from .events import _target_slot  # pyright: ignore[reportPrivateUsage]
@@ -122,7 +123,7 @@ def _run_collection(
     target: str | None,
     url: str | None,
     registry_path: str | None,
-    endpoint: str | None = None,
+    endpoint: str | ResolvedEndpoint | None = None,
     handler: Any | None = None,
 ) -> list[dict[str, Any]]:
     """Shared resolve-instance-and-collect path for both list verbs.
@@ -193,7 +194,7 @@ def console_list(
     url: str | None = None,
     duration: float = DEFAULT_LIST_WINDOW_SECONDS,
     registry_path: str | None = None,
-    endpoint: str | None = None,
+    endpoint: str | ResolvedEndpoint | None = None,
     handler: Any | None = None,
 ) -> list[dict[str, Any]]:
     """Collect console messages over a short attach window and render them.
@@ -273,7 +274,7 @@ def network_list(
     url: str | None = None,
     duration: float = DEFAULT_LIST_WINDOW_SECONDS,
     registry_path: str | None = None,
-    endpoint: str | None = None,
+    endpoint: str | ResolvedEndpoint | None = None,
     handler: Any | None = None,
 ) -> list[dict[str, Any]]:
     """Collect network request/response events over a short attach window.

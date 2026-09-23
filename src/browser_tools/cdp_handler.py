@@ -25,6 +25,7 @@ if TYPE_CHECKING:
 
 from .core.attach import AmbiguousTargetError, TargetNotFoundError
 from .dialog_policy import DialogPolicy
+from .endpoint import ResolvedEndpoint
 from .lifecycle import LifecycleError
 
 logger = logging.getLogger(__name__)
@@ -350,7 +351,7 @@ class CDPRuntime:
 
     def __init__(
         self,
-        browser_url: str | None,
+        browser_url: str | ResolvedEndpoint | None,
         mode: str = "full",
         stealth: bool = False,
         target_spec: str | None = None,
@@ -664,8 +665,8 @@ class CDPRuntime:
         from .attached_session import AttachedSessionClient
         from .one_shot import one_shot_page_session
 
-        browser_url: str = self._browser_url  # type: ignore[assignment]  # guarded by if-self._browser_url
-        port = urlparse(browser_url).port
+        browser_url = self._browser_url
+        port = browser_url if isinstance(browser_url, ResolvedEndpoint) else urlparse(browser_url or "").port
         if port is None:
             self._connect_error = f"no port in browser url {browser_url}"
             logger.error("%s", self._connect_error)
@@ -938,7 +939,7 @@ class CDPHandler:
 
     def __init__(
         self,
-        browser_url: str | None,
+        browser_url: str | ResolvedEndpoint | None,
         mode: str = "full",
         stealth: bool = False,
         target_spec: str | None = None,

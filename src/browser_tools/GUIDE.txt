@@ -794,8 +794,8 @@ PROFILES AND LOGIN
 EXTERNAL BROWSERS
 
   --endpoint URL drives a browser this tool did not launch: one the person
-  already has open, and already logged in. It goes on the browser-driving
-  verbs, per invocation.
+  starts for debugging on a non-default profile, and logs into by hand. It
+  goes on the browser-driving verbs, per invocation.
 
     bt snapshot --endpoint http://127.0.0.1:9222
     bt Page.navigate '{"url": "https://..."}' --endpoint http://127.0.0.1:9222
@@ -803,6 +803,62 @@ EXTERNAL BROWSERS
   Start the browser yourself with --remote-debugging-port=PORT, log in by hand
   in that browser, then pass that port. There is no instance name, so every
   invocation carries the flag.
+
+  Raw WebSocket attachment and discovery (unverified end to end, pending
+  ticket 12 with the driving dev at the keyboard):
+
+    bt snapshot --endpoint ws://127.0.0.1:PORT/devtools/browser/ID
+    bt snapshot --chrome-profile [stable|beta|dev|canary]
+
+  --chrome-profile defaults to stable. It is mutually exclusive with
+  --endpoint and reads that channel's DevToolsActivePort, using both its port
+  and its browser WebSocket path. Both 127.0.0.1 and [::1] are tried and a
+  Browser.getVersion response is required before running the verb. No port
+  is assumed. A missing or malformed file fails immediately with exit 2 and
+  names the path. When a preferred port is occupied on IPv4, Chrome may bind
+  IPv6 on the SAME port. If both families are occupied, Chrome can keep
+  running without an endpoint or a port file. It does not pick a free port.
+  Start a deliberately separate debugging profile with
+  --remote-debugging-port=0 to ask Chrome to choose a free port, then pass the
+  recorded WebSocket URL with --endpoint. Do not point discovery at your
+  everyday profile and assume remote debugging is available.
+
+  Discovery directories (the user-data root, not its Default subdirectory):
+    macOS: ~/Library/Application Support/Google/
+      Chrome, Chrome Beta, Chrome Dev, Chrome Canary
+    Windows: %LOCALAPPDATA%/Google/
+      Chrome, Chrome Beta, Chrome Dev, Chrome SxS, each followed by /User Data
+    Linux: ~/.config/google-chrome, google-chrome-beta,
+      google-chrome-unstable, google-chrome-canary
+      CHROME_CONFIG_HOME, then XDG_CONFIG_HOME, can override ~/.config.
+      CHROME_USER_DATA_DIR overrides the entire Linux discovery directory.
+  On macOS and Windows a custom debugging profile needs the explicit
+  --endpoint URL; --chrome-profile only knows the channel's default root.
+
+  Chrome 153 on this machine contains a diagnostic requiring a non-default
+  data directory for remote debugging. That restriction has not been tested
+  against the driving dev's real profile. Ticket 12 must test it first. The
+  supported promise here is attachment to a Chrome deliberately started for
+  debugging on its own profile, not attachment to any already-open Chrome.
+
+  Approval is per connection, not per browser session. Chrome asks the person
+  to click Allow and shows an automation banner. bt waits at most 30 seconds
+  for the WebSocket handshake and DevTools verification, then exits 1:
+    No approval received in 30s. Chrome asks permission for each debugging
+    connection; click Allow in the browser window.
+  This is for an agent beside a person at the keyboard. An unattended agent
+  cannot supply approval. The timer is tested with a non-answering peer;
+  Chrome's real Allow click, refusal, and banner remain unverified for ticket 12.
+
+  Not enabled: start debugging on a separate profile. Not permitted: an
+  administrator must change RemoteDebuggingAllowed
+  (devtools.remote_debugging.allowed). Discovery checks explicit managed
+  policy on desktop platforms. An absent file alone cannot distinguish a
+  disabled preference, a policy not visible to bt, or a failed listener;
+  check chrome://policy in that case. HTTP 403 means the connection was not
+  permitted, but does not by itself prove an administrator blocked it.
+  Browser-WebSocket services do not provide /json/protocol; help prints
+  static usage for these endpoints instead of fetching a live schema.
 
   THE BROWSER IS NOT REGISTERED. Nothing is written to the registry, so
   `status` does not list it, and `stop` and `cleanup` neither see it nor touch

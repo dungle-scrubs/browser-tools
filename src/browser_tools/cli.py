@@ -94,7 +94,13 @@ ENDPOINT_HELP = (
 
 def _add_endpoint(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     """Give one browser-driving verb the ``--endpoint URL`` flag."""
-    parser.add_argument("--endpoint", metavar="URL", help=ENDPOINT_HELP)
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--endpoint", metavar="URL", help=ENDPOINT_HELP)
+    group.add_argument(
+        "--chrome-profile", nargs="?", const="stable",
+        choices=("stable", "beta", "dev", "canary"),
+        help="Discover a Chrome debugging port file (pending ticket 12 verification)",
+    )
     return parser
 
 
@@ -1330,6 +1336,21 @@ def main(argv: list[str] | None = None) -> int:
     """Entry point for both the ``browser-tools`` and ``bt`` console scripts."""
     raw_argv = sys.argv[1:] if argv is None else argv
 
+    try:
+        profile_probe, channel = passthrough.strip_chrome_profile_flag(raw_argv, verbs=_KNOWN_VERBS)
+    except UsageError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_USAGE
+    if channel is not None:
+        if any(t == "--endpoint" or t.startswith("--endpoint=") for t in profile_probe):
+            print("error: --endpoint and --chrome-profile cannot be combined", file=sys.stderr)
+            return EXIT_USAGE
+        verb = next((t for t in profile_probe if t in _KNOWN_VERBS), None)
+        if verb in REGISTRY_VERBS:
+            print(f"error: {verb} does not take --chrome-profile", file=sys.stderr)
+            return EXIT_USAGE
+        raw_argv = profile_probe
+
     refusal = _refuse_endpoint_misuse(raw_argv)
     if refusal is not None:
         print(f"error: {refusal}", file=sys.stderr)
@@ -1348,7 +1369,10 @@ def main(argv: list[str] | None = None) -> int:
             probe[0], registry_path=registry_path
         ):
             try:
-                return _run_passthrough(raw_argv, registry_path=registry_path)
+                return _run_passthrough(
+                    raw_argv + (["--chrome-profile", channel] if channel is not None else []),
+                    registry_path=registry_path,
+                )
             except LifecycleError as exc:
                 print(f"error: {exc}", file=sys.stderr)
                 return EXIT_OPERATIONAL
@@ -1374,13 +1398,20 @@ def main(argv: list[str] | None = None) -> int:
             return EXIT_USAGE
         args.instance = leading_instance
     else:
-        args = parser.parse_args(argv)
+        args = parser.parse_args(raw_argv)
 
     if args.command is None:
         parser.print_help(sys.stderr)
         return EXIT_USAGE
 
     try:
+        selected_channel = channel or getattr(args, "chrome_profile", None)
+        if selected_channel is not None:
+            if not hasattr(args, "endpoint"):
+                raise UsageError(f"{args.command} does not take --chrome-profile")
+            from .chrome_discovery import discover_chrome
+
+            args.endpoint = discover_chrome(selected_channel)
         return _run(args)
     except curated.DialogCancelledError as exc:
         # The records explain the failure, so they go to stdout even though the

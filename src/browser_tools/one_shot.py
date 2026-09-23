@@ -46,6 +46,8 @@ from .core.attach import AmbiguousTargetError, TargetNotFoundError, resolve_targ
 from .core.cdp_client import CDPClient, get_ws_url_async
 from .core.errors import CDPError, NoPageError
 from .core.registry import InstanceNotFoundError
+from .endpoint import ResolvedEndpoint
+from .external_connection import external_browser_connection
 from .lifecycle import LifecycleError
 
 #: Domains the run's ``CDPRuntime`` owns for the whole run (RFC-03, "Domain-
@@ -137,7 +139,7 @@ async def domains_enabled(
 
 @contextlib.asynccontextmanager
 async def one_shot_page_session(
-    port: int,
+    port: int | ResolvedEndpoint,
     target_spec: str | None,
     target_by: str | None,
     *,
@@ -161,13 +163,18 @@ async def one_shot_page_session(
     profile directory they hold, because there is no registry entry to compare
     against and no ``bt status`` row to look the browser up in (#97).
     """
-    try:
-        browser_ws_url = await get_ws_url_async(port=port, target_type="browser")
-    except ConnectionError as exc:
-        raise ConnectionError(
-            connection_failure_message(port=port, cause=exc.__cause__, external=external)
-        ) from exc
-    async with CDPClient(ws_url=browser_ws_url) as cdp:
+    async with contextlib.AsyncExitStack() as stack:
+        if isinstance(port, ResolvedEndpoint) and port.websocket_urls:
+            cdp = await stack.enter_async_context(external_browser_connection(port))
+        else:
+            number = port.port if isinstance(port, ResolvedEndpoint) else port
+            try:
+                browser_ws_url = await get_ws_url_async(port=number, target_type="browser")
+            except ConnectionError as exc:
+                raise ConnectionError(
+                    connection_failure_message(port=number, cause=exc.__cause__, external=external)
+                ) from exc
+            cdp = await stack.enter_async_context(CDPClient(ws_url=browser_ws_url))
         targets_result = await cdp.send(method="Target.getTargets")
         target_infos: list[dict[str, Any]] = targets_result.get("targetInfos", [])
 
