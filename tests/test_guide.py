@@ -377,6 +377,99 @@ class TestTheManualStatesWhatDoesNotCarry:
         assert "--key" in section
 
 
+class TestTheManualDefectCorrections:
+    """Every RFC-05 section 7 correction that prose tests can hold in place."""
+
+    @pytest.fixture
+    def no_carry_section(self, manual):
+        start = manual.index("WHAT DOES NOT CARRY BETWEEN INVOCATIONS")
+        end = manual.index("SELECTING A PAGE", start)
+        return flatten(manual[start:end])
+
+    @pytest.mark.parametrize(
+        ("override", "dependent_step"),
+        [
+            ("Emulation.setEmulatedMedia", "screenshot --path page-dark.png"),
+            ("Network.emulateNetworkConditions", "navigator.onLine"),
+            ("Emulation.setCPUThrottlingRate", "performance.now()"),
+            ("Emulation.setGeolocationOverride", "navigator.geolocation"),
+            ("Emulation.setUserAgentOverride", "navigator.userAgent"),
+        ],
+    )
+    def test_each_reverting_override_has_a_run_step_recipe(
+        self, no_carry_section, override, dependent_step
+    ):
+        assert override in no_carry_section
+        assert dependent_step in no_carry_section
+        assert no_carry_section.index(override) < no_carry_section.index(dependent_step)
+
+    def test_device_metrics_is_named_as_the_exception(self, no_carry_section):
+        assert "only Emulation.setDeviceMetricsOverride survives detachment" in no_carry_section
+        assert "worked example does not generalise" in no_carry_section
+
+    def test_keystroke_recipe_uses_the_native_default_action(self, flat):
+        assert "press for native keys and their default actions" in flat
+        assert "bt press Enter" in flat
+
+    def test_eval_and_raw_evaluation_have_different_exception_contracts(self, flat):
+        assert "A JavaScript exception is exit 1" in flat
+        assert "Raw Runtime.evaluate instead exits 0" in flat
+        assert "returns Chrome's exceptionDetails" in flat
+
+    def test_page_selection_names_both_defaults(self, manual):
+        curated = flatten(
+            manual[
+                manual.index("CURATED VERBS") : manual.index("RAW PROTOCOL")
+            ]
+        )
+        raw = flatten(
+            manual[
+                manual.index("RAW PROTOCOL") : manual.index(
+                    "NO CURATED VERB? SEND THE PROTOCOL"
+                )
+            ]
+        )
+        selecting = flatten(
+            manual[manual.index("SELECTING A PAGE") : manual.index("THE UID RULE")]
+        )
+        assert "handler-routed verbs" in curated
+        assert "pick the first page target" in curated
+        assert "omitting --target or --url is exit 1" in raw
+        assert "Raw passthrough does not pick the first page" in raw
+        assert "handler-routed curated verbs and run use --target 1" in selecting
+        assert "Raw Domain.method passthrough refuses instead (exit 1)" in selecting
+
+    def test_console_list_includes_the_replayed_buffer(self, flat):
+        assert "returns console messages from before it attached" in flat
+        assert "Chrome replays its buffered messages when Runtime is enabled" in flat
+        assert "--duration is how long it keeps listening after that replay" in flat
+
+    def test_unnamed_launches_are_suffixed_and_the_chosen_name_is_printed(
+        self, manual
+    ):
+        naming = flatten(
+            manual[manual.index("NAMING THE INSTANCE") : manual.index("LIFECYCLE VERBS")]
+        )
+        assert "A second unnamed launch from the same directory succeeds" in naming
+        assert "<directory>-02" in naming
+        assert "`launch` prints the name it chose" in naming
+        assert "There is no option to choose a name" in naming
+
+    def test_readme_states_suffixing_without_promising_a_chosen_name(self):
+        from pathlib import Path
+
+        readme = flatten(
+            (Path(__file__).resolve().parent.parent / "README.md").read_text()
+        )
+        assert "Repeated unnamed launches from one directory succeed" in readme
+        assert "prints the chosen name in its JSON result" in readme
+        assert "There is no caller-chosen name" in readme
+
+    def test_dialog_escape_names_navigation_hanging_too(self, flat):
+        assert "Navigating away can clear it; when that hangs too" in flat
+        assert "`stop` the instance and `launch` again" in flat
+
+
 # --------------------------------------------------------------------------- #
 # What `guide` itself prints
 # --------------------------------------------------------------------------- #
