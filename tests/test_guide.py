@@ -158,8 +158,11 @@ class TestEveryRefusalAppearsWithItsExitCode:
     def test_the_three_refusal_classes_each_name_a_remedy(self, flat):
         # The focus guard: open a second window instead of raising one.
         assert '"newWindow": true' in flat
-        # External endpoints: forward a remote browser to loopback.
-        assert "ssh -L 9222:127.0.0.1:9222 <host>" in flat
+        # External endpoints: forward a remote browser to loopback. The port is
+        # deliberately not 9222: the manual's own examples must not teach an
+        # agent to dial the DevTools default, which on a developer's machine is
+        # their own browser. Two agents reached one that way.
+        assert "ssh -L 9787:127.0.0.1:9787 <host>" in flat
         # Profile exclusivity: stop the holder.
         assert "bt stop web-01" in flat
 
@@ -211,6 +214,25 @@ class TestTheRequiredContent:
     def test_storage_key_is_described_as_a_frame_selector(self, flat):
         assert "It is NOT a cookie name or a local-storage key" in flat
         assert "frame URL pattern to select" in flat
+
+    def test_no_runnable_line_dials_the_devtools_default_port(self, manual):
+        """9222 may be named as a hazard. It may not be typed into an example.
+
+        The manual is what an agent reads before driving a browser, and an
+        example shaped like ``--endpoint http://127.0.0.1:9222`` is an
+        instruction to dial whatever holds the DevTools default port. On a
+        developer's machine that is their own Chrome, with their tabs and
+        their cookies, and it was reached that way twice during RFC-05.
+        """
+        offenders = [
+            line
+            for line in manual.splitlines()
+            if "9222" in line and ("--endpoint" in line or "ssh -L" in line)
+        ]
+        assert offenders == [], f"examples that dial 9222: {offenders}"
+
+    def test_the_endpoint_section_says_not_to_use_the_default_port(self, flat):
+        assert "NOT 9222" in flat
 
 
 # --------------------------------------------------------------------------- #
@@ -655,3 +677,120 @@ class TestSixVerbsManual:
                      'without reloading or losing page state',
                      'bodyOmitted', '--response-file']:
             assert text in flat
+
+
+# --------------------------------------------------------------------------- #
+# The performance surface reads as one thing, not as four additions
+# --------------------------------------------------------------------------- #
+
+
+class TestThePerformanceSection:
+    """RFC-05 ticket 13: profiler, trace, heap and Lighthouse in one section.
+
+    Documented one at a time, these read as four unrelated verbs. What a
+    reader actually asks first is which one to reach for, so the section
+    opens with that question and every claim below is held here.
+    """
+
+    @pytest.fixture
+    def section(self, manual):
+        start = manual.index("PERFORMANCE CAPTURES AND CPU PROFILING")
+        return flatten(manual[start:])
+
+    @pytest.mark.parametrize(
+        "question",
+        [
+            "Why is this page slow to load",
+            "Which JavaScript function is burning the CPU",
+            "What is this page still holding on to",
+            "What would a scoring tool say about this page load",
+        ],
+    )
+    def test_the_choosing_rule_is_stated_as_the_readers_question(
+        self, section, question
+    ):
+        assert question in section
+
+    def test_the_capture_family_uses_the_domain_term(self, section):
+        """`CONTEXT.md`'s noun, not a third phrasing of the same idea."""
+        assert "screencast, trace and heap are Bounded Captures" in section
+
+    def test_the_payload_reachability_rule_is_stated_once(self, flat):
+        rule = "cannot be assembled from a Step List"
+        assert flat.count(rule) == 1
+
+    @pytest.mark.parametrize("verb", ["trace", "heap", "insights"])
+    def test_each_capture_verb_has_a_worked_example(self, manual, verb):
+        assert f"bt {verb} " in manual
+
+    def test_the_dialog_policy_has_a_worked_example_of_both_answers(self, manual):
+        assert "bt eval 'confirm(\"Delete this?\")' --dialog accept" in manual
+        assert '"answer": "dismiss"' in flatten(manual)
+
+    def test_the_lighthouse_recipe_is_here_and_is_not_a_verb(self, section):
+        assert "LIGHTHOUSE IS A RECIPE, NOT A VERB" in section
+        assert "npx -y lighthouse@latest" in section
+        assert "There is no `bt lighthouse` and none is planned" in section
+
+    def test_the_recipe_reads_the_port_out_of_the_instance(self, section):
+        """A typed --port does not fail; it audits a browser nobody chose."""
+        assert "READ THE PORT OUT OF THE INSTANCE, IN THE SAME SCRIPT" in section
+        assert "Never type a port number here" in section
+        assert "starts a Chrome of its own on that port" in section
+
+    def test_the_recipe_carries_the_screen_hazard(self, section):
+        assert "LAUNCH IT HEADLESS" in section
+        assert "NEVER TAKE THE SCREEN does not cover it" in section
+
+    def test_the_recipe_says_what_it_does_not_report(self, section):
+        assert "WHAT IT DOES NOT REPORT" in section
+        assert "INP breakdown comes back notApplicable" in section
+        assert "no audit list and no category scores" in section
+
+
+class TestTheReadmeClaimsOnlyWhatChromePermits:
+    """The README promised a browser Chrome will not hand over.
+
+    Measured on Chrome 153: remote debugging is refused on the default data
+    directory, no port file is written and no endpoint starts. "Drives a
+    browser you already have open" was therefore false for the browser a
+    person actually has open.
+    """
+
+    @pytest.fixture
+    def readme(self):
+        from pathlib import Path
+
+        return flatten(
+            (Path(__file__).resolve().parent.parent / "README.md").read_text()
+        )
+
+    def test_it_says_what_an_external_browser_has_to_be(self, readme):
+        assert "started for debugging on a data directory of its own" in readme
+        assert "refuses remote debugging on its default data directory" in readme
+
+    def test_it_gives_the_command_that_starts_one(self, readme):
+        assert "--user-data-dir=\"$HOME/.local/share/bt-debug-profile\"" in readme
+        assert "--remote-debugging-port=0" in readme
+
+    def test_it_names_both_ways_in_and_does_not_type_the_default_port(self, readme):
+        assert "--chrome-profile ~/.local/share/bt-debug-profile" in readme
+        assert "ws://127.0.0.1:PORT/devtools/browser/ID" in readme
+        assert "--endpoint http://127.0.0.1:9222" not in readme
+
+    def test_the_one_dependency_claim_survives_and_the_extra_is_named(self, readme):
+        assert "The default install depends on `websockets` only" in readme
+        assert "brings no Node.js with it" in readme
+        assert "`bt insights --setup` installs the pinned trace engine" in readme
+
+    def test_the_capability_list_covers_the_rfc_05_surface(self, readme):
+        for claim in (
+            "`eval`, `press`, `hover`, `type`,",
+            "`wait-text` and `network-get`",
+            "`--dialog` fixes the reply to every",
+            "`trace` writes Chrome trace JSON",
+            "`heap` writes a `.heapsnapshot`",
+            "`insights` reads a trace back as English",
+            "`--endpoint` and `--chrome-profile` drive a Chrome",
+        ):
+            assert claim in readme

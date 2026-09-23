@@ -12,7 +12,7 @@ runs them.
 | Directory | What it measured | RFC section |
 |---|---|---|
 | `148/` | Which axi verbs have a raw CDP form and which need curation. Shell scripts against a live `bt` instance, one per verb group. `b10`-`b12` are the emulation-override probes that found five of six overrides revert. `b14`-`b17` are the dialog hang. | Design 1, 4, 5 |
-| `151/` | Lighthouse against a `bt` instance. `wrongport.sh` shows a wrong `--port` exiting 0 with a report from a browser Lighthouse launched itself. `focus-sample.sh` samples the frontmost window during a run. | Design 5 |
+| `151/` | Lighthouse against a `bt` instance. `wrongport.sh` shows a wrong `--port` exiting 0 with a report from a browser Lighthouse launched itself. `focus-sample.sh` samples the frontmost window during a run. `recipe-as-shipped.sh` re-runs the recipe exactly as `bt guide` now writes it, from any checkout, and is the probe behind the manual's "Measured against Chrome 151" line. | Design 5 |
 | `153/` | Two instances in one directory. The two registries show the `-NN` suffix. | Motivation |
 | `154/` | Tracing and heap. `exp-a*-steps.txt` are the step lists that fail in both transfer modes. `exp-b.py` is the single-invocation capture in both modes. `enginetest/` runs the real DevTools engine over a captured trace: `insights.mjs` for the Insight Set, `inp.mjs` for the interaction case, `coldstart.mjs` for the cost figures. | Design 2, 3 |
 | `156/` | The dialog policy and `Input.insertText`. `exp-dialog.py` runs the control and both candidate shapes. `exp-type.py` round-trips multi-line prose. | Design 1, 4 |

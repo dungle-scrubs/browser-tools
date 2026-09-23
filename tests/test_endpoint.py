@@ -385,7 +385,10 @@ class TestTheGuideDocumentsIt:
         guide = lifecycle.guide_text()
         assert "EXTERNAL BROWSERS" in guide
         assert "--endpoint URL" in guide
-        assert "ssh -L 9222:127.0.0.1:9222" in guide
+        # Not 9222. The manual's examples must not teach an agent to dial the
+        # DevTools default port, which on a developer's machine is their own
+        # browser; test_guide.py holds that rule for every example line.
+        assert "ssh -L 9787:127.0.0.1:9787" in guide
         assert "Browser.close and Browser.crash are refused" in guide
 
 
