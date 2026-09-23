@@ -72,6 +72,7 @@ STEP_VERBS = frozenset(
 
 #: Verbs that exist but cannot be a step, each with the reason a caller needs.
 EXCLUDED_VERBS: dict[str, str] = {
+    "navigate": "use a raw Page.navigate step; the run owns its dialog policy",
     "trace": "a trace owns a Step Run; nesting it inside a run is not supported",
     "attach": (
         "it streams until stdin reaches EOF, so it has no bounded end and could "
@@ -99,7 +100,7 @@ EXCLUDED_VERBS: dict[str, str] = {
 
 #: Flags the invocation owns. A step carrying one is a usage error: the
 #: connection is opened once, for the whole run, before step 1.
-INVOCATION_FLAGS = ("--endpoint", "--target", "--url")
+INVOCATION_FLAGS = ("--endpoint", "--target", "--url", "--dialog")
 
 
 @dataclass(frozen=True)
@@ -266,7 +267,7 @@ def _check_nothing_was_retargeted(args: argparse.Namespace, line: int) -> None:
 
     if getattr(args, "reload", False):
         raise _at(line, "network-get --reload is standalone only; a run preserves earlier steps")
-    for attribute, flag in (("target", "--target"), ("url", "--url"), ("endpoint", "--endpoint")):
+    for attribute, flag in (("target", "--target"), ("url", "--url"), ("endpoint", "--endpoint"), ("dialog", "--dialog")):
         if attribute == "url" and not url_selects_page(args.command):
             continue
         if getattr(args, attribute, None) is not None:

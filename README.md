@@ -67,6 +67,12 @@ Omit `INSTANCE` while exactly one instance is running; with several, every verb
 names the candidates rather than guessing. `bt help Domain.method` reads the
 protocol schema from the running browser.
 
+`bt launch` derives an instance name from the current directory and prints the
+chosen name in its JSON result. Repeated unnamed launches from one directory
+succeed with the first free two-digit suffix, such as `browser-tools-01`,
+`browser-tools-02`, then `browser-tools-03`. There is no caller-chosen name, so
+use the printed value as the handle for later commands.
+
 **`bt guide` is the manual.** It is the complete CLI surface -- every verb,
 every refusal with its exit code, the login walkthrough, the UID rule, and the
 `--endpoint` rules -- and reading it is enough to drive a browser with this
@@ -173,7 +179,9 @@ same directory is reused. To keep a session logged in:
   which directory you invoke from.
 - A profile is held by at most one live instance. Launching into a profile
   another instance holds fails naming the holder rather than opening a second
-  browser on the same directory.
+  browser on the same profile directory. This is profile exclusivity, not a
+  limit on launches from one working directory: repeated unnamed launches from
+  one working directory succeed with numbered instance-name suffixes.
 - Without `--profile`, a launch gets a fresh ephemeral directory and starts
   logged out.
 - `bt profile list` shows every profile with its path and its live holder, and

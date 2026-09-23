@@ -59,6 +59,14 @@ NAMING THE INSTANCE
   verb names the candidates rather than guessing (exit 1). Naming the instance
   twice is a usage error (exit 2).
 
+  `launch` derives the name from the current directory and always adds a
+  two-digit suffix. The first available name is <directory>-01. A second
+  unnamed launch from the same directory succeeds as <directory>-02 while the
+  first remains registered, then -03, and so on, using the first suffix free
+  in the registry. `launch` prints the name it chose in its JSON result. There
+  is no option to choose a name, so read that result before sending later
+  commands to the instance.
+
 
 LIFECYCLE VERBS
 
@@ -69,7 +77,8 @@ LIFECYCLE VERBS
       --engine camoufox starts an anti-detect Camoufox instance. launch takes
       no positional argument: the name is assigned by the registry, and a bare
       token before -- is a usage error (exit 2), because it would otherwise be
-      handed to the browser along with every flag after it.
+      handed to the browser along with every flag after it. See NAMING THE
+      INSTANCE for suffixing and how to capture the assigned name.
 
   status [INSTANCE]
       Every registered instance with liveness, engine, profile and page
@@ -130,28 +139,60 @@ CURATED VERBS
   Each takes [INSTANCE] as above, and --endpoint URL to drive an external
   browser. Each prints one JSON document on stdout.
 
+  When no page selector is given, the handler-routed verbs in this section
+  pick the first page target in the normative target-ID sort. A run uses the
+  same default for its shared page. This differs from raw protocol passthrough,
+  which refuses an omitted selector when several pages exist and lists them.
+  Standalone screenshot and the event/list verbs also use the strict selector.
+
+  DIALOG POLICY
+      click, fill, eval, press, type, hover, wait-text, navigate, network-get
+      and run answer every JavaScript dialog while they run. network-get only
+      drives the page with --reload, and carries the policy for that.
+      --dialog defaults to dismiss even when omitted: the default actively
+      declines dialogs. --dialog accept confirms them; --dialog accept:TEXT
+      also supplies prompt text. Bare accept keeps a prompt's default text;
+      accept: supplies an empty string.
+      Each answered dialog appears in the invocation's document under dialogs,
+      in order, with type, message, answer (accept or dismiss), and result.
+      result is a boolean for confirm/beforeunload, text or null for prompt,
+      and null for alert. There is no count limit or escalation. If no dialog
+      fires, the dialogs key is absent. Other standalone verbs do not subscribe.
+
+  navigate <URL> [--target SPEC | --url SUB] [--dialog dismiss|accept[:TEXT]]
+      Navigate the selected page with Page.navigate. The active default dismiss
+      declines beforeunload prompts; --dialog accept permits leaving the page.
+      Returns the Page.navigate result, plus dialogs when any were answered.
+      A browser navigation error is exit 1. This command does not wait for load.
+      Inside a Step List use Page.navigate; the run supplies its dialog policy.
+
   snapshot [--target SPEC]
       The accessibility tree, one UID per node. This is how you find something
       to click or fill.
 
-  click --uid UID [--target SPEC]
-  fill --uid UID --text T [--target SPEC]
+  click --uid UID [--target SPEC] [--dialog dismiss|accept[:TEXT]]
+  fill --uid UID --text T [--target SPEC] [--dialog dismiss|accept[:TEXT]]
       Act on the node a snapshot named. Missing --uid or --text is a usage
       error (exit 2). A UID that names a node with no DOM node behind it, or
       a node that is not an element, is exit 1.
+      Both actively dismiss dialogs by default, even without --dialog. fill
+      carries the policy because setting a value fires the field's own input
+      handler, and that handler can raise a dialog as directly as a click
+      handler does.
 
   wait-idle [--timeout-ms MS] [--idle-ms MS]
   wait-stable [--timeout-ms MS] [--stable-ms MS]
       Wait for network idle (default 5000ms deadline, 500ms quiet window), or
       for the DOM to stop changing (5000ms, 300ms).
 
-  eval '<js>' [--await] [--target SPEC | --url SUB]
+  eval '<js>' [--await] [--target SPEC | --url SUB] [--dialog dismiss|accept[:TEXT]]
       Evaluate JavaScript by value. Statement bodies run inside an IIFE and
       return their last expression's value. --await waits for a Promise;
       it also accepts a non-Promise. The result has value, type, url and
       targetId. A JavaScript exception is exit 1, with its description on
-      stderr and nothing on stdout. Raw Runtime.evaluate does not enforce
-      that exception contract.
+      stderr and nothing on stdout. Raw Runtime.evaluate instead exits 0 and
+      returns Chrome's exceptionDetails; it is not equivalent to eval.
+      --dialog defaults to dismiss and actively answers dialogs during eval.
 
       --await awaits the value the expression returns. It does not make the
       body an async function, so a top-level await is a SyntaxError even with
@@ -162,21 +203,23 @@ CURATED VERBS
         bt eval 'Promise.resolve({ready: true})' --await
         bt eval '(async () => (await fetch("/api")).status)()' --await
 
-  press <key> [--modifiers NAME[,NAME...]] [--target SPEC | --url SUB]
+  press <key> [--modifiers NAME[,NAME...]] [--target SPEC | --url SUB] [--dialog dismiss|accept[:TEXT]]
       Dispatch keyDown then keyUp, including native default actions. <key>
       is one printable character, Enter, Tab, Escape, Backspace, Delete,
       ArrowLeft, ArrowRight, ArrowUp, ArrowDown, Home, End, PageUp, PageDown,
       or F1 through F12. Modifiers are Alt, Control, Meta, Shift. Unknown
       names are exit 2 with the valid list. Example: bt press Enter
+      --dialog defaults to dismiss and actively answers dialogs from key handlers.
       Result: {"key":"Enter","modifiers":[],"dispatched":["keyDown","keyUp"]}
 
-  hover --uid UID [--target SPEC | --url SUB]
+  hover --uid UID [--target SPEC | --url SUB] [--dialog dismiss|accept[:TEXT]]
       Move the native pointer to the UID's box centre, setting CSS :hover.
       Synthetic mouseover from JavaScript does not set that CSS state.
+      --dialog defaults to dismiss and actively answers dialogs from hover handlers.
       Example: bt hover --uid 2F0B815AF686-32
       Result: {"uid":"2F0B815AF686-32","x":412.5,"y":208.0}
 
-  type (<text> | --file FILE) [--target SPEC | --url SUB]
+  type (<text> | --file FILE) [--target SPEC | --url SUB] [--dialog dismiss|accept[:TEXT]]
       Insert text at the caret with one Input.insertText; keep existing text.
       Exactly one source is required. --file reads UTF-8, and --file - reads
       stdin. It fires beforeinput and input, but no key events. Use press
@@ -186,8 +229,9 @@ CURATED VERBS
         cat ./message.txt | bt type --file -
       Result: {"chars":123,"source":"file","path":"/absolute/message.txt"}
       Positional text uses source "text" and has no path. Stdin's path is "-".
+      --dialog defaults to dismiss and actively answers dialogs from input handlers.
 
-  wait-text <substring> [--timeout-ms MS] [--target SPEC | --url SUB]
+  wait-text <substring> [--timeout-ms MS] [--target SPEC | --url SUB] [--dialog dismiss|accept[:TEXT]]
       Wait for rendered body text to contain the substring. Default 5000ms.
       Checks present text and installs a MutationObserver in one JS task,
       so text inserted by script during setup is not lost. Timeout is exit
@@ -195,6 +239,7 @@ CURATED VERBS
       Result: {"found":true,"substring":"Order placed","waitedMs":812}
       Choose wait-idle for "has network activity stopped?", wait-stable for
       "has the DOM stopped changing?", and wait-text for "is this text here?".
+      --dialog defaults to dismiss and actively answers dialogs while waiting.
 
   network-get (--url SUB | --request-id ID) [--response-file PATH] [--target SPEC]
               [--duration SECONDS] [--reload]
@@ -244,11 +289,16 @@ CURATED VERBS
   console-list [--target SPEC | --url SUBSTRING] [--duration SECONDS]
   network-list [--target SPEC | --url SUBSTRING] [--duration SECONDS]
       Collect console messages, or network requests and responses, over a
-      short attach window (default 2 seconds). network-list correlates
-      requests and responses by requestId, keeps rows in first-observation
-      order, and keeps request-only and response-only rows with the missing
-      fields null. Both subscribe before enabling their domain, so an event
-      emitted during enable is in the result.
+      short attach window (default 2 seconds). A standalone console-list also
+      returns console messages from before it attached: Chrome replays its
+      buffered messages when Runtime is enabled. --duration is how long it
+      keeps listening after that replay; it does not limit the result to new
+      messages. Inside a run, Runtime is already enabled, so console-list gets
+      no replay there. network-list correlates requests and responses by
+      requestId, keeps rows in first-observation order, and keeps request-only
+      and response-only rows with the missing fields null. Network does not
+      replay earlier traffic. Both verbs subscribe before enabling their
+      domain, so an event emitted during enable is in the result.
 
   frames list | frames select PATTERN | frames reset
       Inspect and select page frames. PATTERN is a frame URL substring. Any
@@ -334,12 +384,15 @@ CURATED VERBS
 
 RUNNING MANY STEPS IN ONE INVOCATION
 
-  run FILE [--timeout SECONDS]
-  run -    [--timeout SECONDS]
+  run FILE [--timeout SECONDS] [--dialog dismiss|accept[:TEXT]]
+  run -    [--timeout SECONDS] [--dialog dismiss|accept[:TEXT]]
       Run an ordered list of steps against one browser, in one invocation, over
       one CDP connection. FILE is the list; `-` reads it from stdin. Takes
       [INSTANCE] and --endpoint URL as above, and --target SPEC or --url
       SUBSTRING to pick the page the whole run drives.
+      --dialog defaults to dismiss and actively answers dialogs in every step,
+      including raw CDP steps. The run owns the policy; a step cannot override
+      it. Answered dialogs are recorded once, at the top of the Run Document.
 
       One step per line, each line a verb phrase exactly as you would type it
       after the instance name. Blank lines and lines starting with # are
@@ -362,11 +415,12 @@ RUNNING MANY STEPS IN ONE INVOCATION
       A STEP IS A VERB, NOT AN INVOCATION. Steps may be: snapshot, click, fill,
       eval, press, hover, type, wait-text, network-get,
       wait-idle, wait-stable, wait, detect, console-list, network-list, frames,
-      storage get, screenshot, screencast, heap, and any raw Domain.method. A step may
-      NOT name an instance, --endpoint, --target or --url: those belong to the
-      run, which resolves them once. attach is not a step (it runs until stdin
-      ends, so nothing could follow it), and neither are launch, status, stop,
-      cleanup, profile, window-border, guide, help, trace or run itself. Any of these
+      storage get, screenshot, screencast, heap, and any raw Domain.method.
+      A step may NOT name an instance, --endpoint, --target, --dialog or a
+      page-selecting --url: those belong to the run, which resolves them once.
+      attach is not a step (it runs until stdin ends, so nothing could follow
+      it), and neither are launch, status, stop, cleanup, profile,
+      window-border, guide, help, navigate, trace or run itself. Any of these
       in a step list is a usage error (exit 2).
 
       FRAME SELECTION LASTS. `frames select` in one step governs the steps after
@@ -477,7 +531,9 @@ RAW PROTOCOL
       print the JSON result. No curated verb needs to exist for the method.
       Parameters must parse to a JSON object; anything else is a usage error
       (exit 2). Methods that raise the window are refused; see NEVER TAKE THE
-      SCREEN.
+      SCREEN. With several pages, omitting --target or --url is exit 1 and the
+      diagnostic lists every page. Raw passthrough does not pick the first
+      page; handler-routed curated verbs and run do.
 
   help [INSTANCE] [Domain.method] [--endpoint URL]
       With a running instance, print the live CDP protocol schema read from
@@ -552,9 +608,43 @@ WHAT DOES NOT CARRY BETWEEN INVOCATIONS
 
   Each invocation opens its own session, works, and detaches. Page state
   stays behind: the page you navigated is still loaded, cookies are still
-  set, a viewport override is still in force. Session state does not, and
-  four things an agent reaches for are session state. Each fails loudly
-  rather than quietly doing nothing.
+  set, and a device metrics override is still in force. Session state does
+  not. The five emulation overrides below revert silently when the invocation
+  detaches, so a standalone set exits 0 but has no effect on the next command.
+  Put each override and the work that depends on it in one Step Run.
+
+  Colour scheme:
+
+    Emulation.setEmulatedMedia '{"features":[{"name":"prefers-color-scheme","value":"dark"}]}'
+    screenshot --path page-dark.png
+
+  Network conditions:
+
+    Network.emulateNetworkConditions '{"offline":true,"latency":0,"downloadThroughput":0,"uploadThroughput":0}'
+    Runtime.evaluate '{"expression":"navigator.onLine","returnByValue":true}'
+
+  CPU throttling:
+
+    Emulation.setCPUThrottlingRate '{"rate":4}'
+    Runtime.evaluate '{"expression":"(()=>{const end=performance.now()+500;let n=0;while(performance.now()<end)n++;return n})()","returnByValue":true}'
+
+  Geolocation:
+
+    Browser.grantPermissions '{"origin":"https://example.com","permissions":["geolocation"]}'
+    Emulation.setGeolocationOverride '{"latitude":48.8566,"longitude":2.3522,"accuracy":10}'
+    Runtime.evaluate '{"expression":"new Promise(r=>navigator.geolocation.getCurrentPosition(p=>r([p.coords.latitude,p.coords.longitude])))","awaitPromise":true,"returnByValue":true}'
+
+  User agent:
+
+    Emulation.setUserAgentOverride '{"userAgent":"my-test-agent/1.0"}'
+    Runtime.evaluate '{"expression":"navigator.userAgent","returnByValue":true}'
+
+  Each block is a Step List fragment for `bt run FILE` or `bt run -`; it is
+  not a sequence of standalone commands. The nearby device-metrics recipe is
+  the exception: only Emulation.setDeviceMetricsOverride survives detachment,
+  so that worked example does not generalise to any of these five overrides.
+
+  Other session state fails loudly rather than quietly doing nothing:
 
   A DOM nodeId. DOM.getDocument and DOM.querySelector mint node ids owned by
   the session that asked. One reused in the next invocation fails with
@@ -574,13 +664,15 @@ WHAT DOES NOT CARRY BETWEEN INVOCATIONS
   fails with "No dialog is showing" (exit 1), even while the command that
   opened it is still running. The unhandled dialog then blocks the page and
   later commands against it hang. Navigating away can clear it; when that
-  hangs too, `stop` the instance and `launch` again.
+  hangs too, `stop` the instance and `launch` again. The driving verbs avoid
+  reaching that state by answering dialogs inside the invocation with their
+  active --dialog policy (default dismiss).
 
   Page.addScriptToEvaluateOnNewDocument does not rescue this. Registering
   window.alert=()=>{} works when the same invocation also navigates, and
   does nothing when a later invocation navigates, because the registration
-  belongs to the session that made it. Measured both ways. So a page that
-  raises dialogs cannot be driven through them one command at a time.
+  belongs to the session that made it. Measured both ways. Use a carrying verb
+  or run so its dialog policy can answer within the same invocation.
 
   A selected frame. `frames select` binds to the process that ran it, so a
   later `storage get` does not see it. That is what `storage get --key` is
@@ -597,6 +689,12 @@ SELECTING A PAGE
 
   --url SUBSTRING selects by URL substring instead. --target and --url are
   mutually exclusive; giving both is a usage error (exit 2).
+
+  With several pages and neither selector, handler-routed curated verbs and
+  run use --target 1. Raw Domain.method passthrough refuses instead (exit 1)
+  and lists the pages. Standalone screenshot, attach, wait, console-list and
+  network-list use that strict behaviour too. Choose a selector whenever the
+  first page is not deliberately the page you want.
 
 
 THE UID RULE

@@ -237,6 +237,7 @@ def run(
     registry_path: str | None = None,
     endpoint: str | None = None,
     all_frames: bool = False,
+    dialog: str = "dismiss",
 ) -> tuple[dict[str, Any], bool]:
     """Validate a Step List, then run it. Returns ``(document, succeeded)``.
 
@@ -246,13 +247,18 @@ def run(
     cannot be reached at all - which is before step 1, so there is no
     document to print either.
     """
+    from .dialog_policy import validate_policy
+
+    validate_policy(dialog)
     steps = step_list.validate(
         read_source(source), registry_path=registry_path, endpoint=endpoint
     )
     with curated.run_session(
-        instance, target, url, registry_path, endpoint, all_frames
+        instance, target, url, registry_path, endpoint, all_frames, dialog=dialog
     ) as handler:
-        return execute(steps, handler, registry_path, timeout)
+        document, succeeded = execute(steps, handler, registry_path, timeout)
+        document.update(handler.dialog_document())
+        return document, succeeded
 
 
 __all__ = [

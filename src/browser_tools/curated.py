@@ -168,6 +168,7 @@ def run_session(
     registry_path: str | None,
     endpoint: str | None,
     all_frames: bool = False,
+    dialog: str | None = "dismiss",
 ) -> Generator[CDPHandler]:
     """The one session a Step Run holds for all of its steps.
 
@@ -178,7 +179,7 @@ def run_session(
     spec, by = target_selector(target, url)
     port = _resolve_port(instance, registry_path, endpoint)
     with _cdp_handler_session(
-        port, spec, by, external=endpoint is not None, all_frames=all_frames
+        port, spec, by, external=endpoint is not None, all_frames=all_frames, dialog=dialog
     ) as handler:
         handler.start_run_network()
         yield handler
@@ -194,6 +195,7 @@ def _handler_for(
     endpoint: str | None,
     all_frames: bool = False,
     url: str | None = None,
+    dialog: str | None = None,
 ) -> Generator[CDPHandler]:
     """Yield the session this verb runs on, opening one only if it must.
 
@@ -211,6 +213,7 @@ def _handler_for(
     with _cdp_handler_session(
         port, spec, external=endpoint is not None, all_frames=all_frames,
         **({"target_by": by} if url is not None else {}),
+        **({"dialog": dialog} if dialog is not None else {}),
     ) as opened:
         yield opened
 
@@ -223,6 +226,7 @@ def _cdp_handler_session(
     *,
     external: bool = False,
     all_frames: bool = False,
+    dialog: str | None = None,
 ) -> Generator[CDPHandler]:
     """Yield a connected one-shot :class:`CDPHandler`, then tear it down.
 
@@ -248,6 +252,8 @@ def _cdp_handler_session(
         target_by=target_by,
         all_frames=all_frames,
     )
+    if dialog is not None:
+        handler.configure_dialog_policy(dialog)
     thread = threading.Thread(target=handler.run, name="curated-cdp", daemon=True)
     thread.start()
     deadline = time.monotonic() + HANDLER_CONNECT_TIMEOUT_SECONDS
@@ -387,6 +393,7 @@ def click(
     endpoint: str | None = None,
     handler: CDPHandler | None = None,
     all_frames: bool = False,
+    dialog: str = "dismiss",
 ) -> dict[str, Any]:
     """Native UID click (frozen ``click``), over the #40 interaction path.
 
@@ -396,10 +403,12 @@ def click(
     check unable to fire: it was always "current", so a UID from a different
     tree resolved against it by ordinal and named whatever now sat there.
     """
-    with _handler_for(handler, instance, target, registry_path, endpoint, all_frames) as handler:
+    standalone = handler is None
+    with _handler_for(handler, instance, target, registry_path, endpoint, all_frames, dialog=dialog) as handler:
         _refuse_input_to_hidden_tab(handler)
         text = _native_or_raise(handler, "click", {"uid": uid})
-    return {"uid": uid, "result": text}
+        records = handler.dialog_document() if standalone else {}
+    return {"uid": uid, "result": text, **records}
 
 
 def fill(
@@ -412,15 +421,23 @@ def fill(
     endpoint: str | None = None,
     handler: CDPHandler | None = None,
     all_frames: bool = False,
+    dialog: str = "dismiss",
 ) -> dict[str, Any]:
     """Native UID fill (frozen ``fill``), over the #40 interaction path.
 
     Takes no snapshot, for the reason :func:`click` gives.
+
+    Carries the dialog policy because setting a value fires the field's own
+    ``input`` handler, and that handler can raise a dialog as directly as a
+    click handler does. Measured before this carried it: ``fill`` against an
+    ``<input oninput="alert(...)">`` never returned.
     """
-    with _handler_for(handler, instance, target, registry_path, endpoint, all_frames) as handler:
+    standalone = handler is None
+    with _handler_for(handler, instance, target, registry_path, endpoint, all_frames, dialog=dialog) as handler:
         _refuse_input_to_hidden_tab(handler)
         result = _native_or_raise(handler, "fill", {"uid": uid, "value": text})
-    return {"uid": uid, "text": text, "result": result}
+        records = handler.dialog_document() if standalone else {}
+    return {"uid": uid, "text": text, "result": result, **records}
 
 
 # ---------------------------------------------------------------------------
@@ -801,15 +818,53 @@ def screenshot(
     return payload
 
 
+class DialogCancelledError(LifecycleError):
+    """An action that failed after the dialog policy answered something.
+
+    Carries the dialog records so the caller is told why. Without this the
+    records are collected only on the success path, and the one case the
+    `navigate` verb exists for -- a beforeunload prompt that the default
+    `dismiss` declines, cancelling the navigation -- reported a bare
+    `net::ERR_ABORTED` with nothing saying a prompt had been declined.
+    """
+
+    def __init__(self, message: str, document: dict[str, Any]) -> None:
+        super().__init__(message)
+        self.document = document
+
+
 def _action(
     name: str, arguments: dict[str, Any], *, instance: str | None,
     target: str | None, url: str | None, registry_path: str | None,
     endpoint: str | None, handler: CDPHandler | None, all_frames: bool,
+    dialog: str | None = "dismiss",
 ) -> dict[str, Any]:
-    with _handler_for(handler, instance, target, registry_path, endpoint, all_frames, url) as opened:
+    with _handler_for(handler, instance, target, registry_path, endpoint, all_frames, url, dialog) as opened:
         if name in {"press", "hover", "type"}:
             _refuse_input_to_hidden_tab(opened)
-        return json.loads(_native_or_raise(opened, name, arguments))
+        try:
+            result = json.loads(_native_or_raise(opened, name, arguments))
+        except LifecycleError as exc:
+            if handler is not None or dialog is None:
+                raise
+            records = opened.dialog_document()
+            if not records.get("dialogs"):
+                raise
+            declined = [
+                entry for entry in records["dialogs"]
+                if entry.get("type") == "beforeunload" and entry.get("answer") == "dismiss"
+            ]
+            if declined:
+                raise DialogCancelledError(
+                    f"{exc}: the page asked to confirm leaving and --dialog "
+                    f"{dialog} declined it, which cancels the navigation. Pass "
+                    "--dialog accept to leave the page.",
+                    records,
+                ) from exc
+            raise DialogCancelledError(str(exc), records) from exc
+        if handler is None and dialog is not None:
+            result.update(opened.dialog_document())
+        return result
 
 
 def eval_js(
@@ -817,11 +872,12 @@ def eval_js(
     target: str | None = None, url: str | None = None,
     registry_path: str | None = None, endpoint: str | None = None,
     handler: CDPHandler | None = None, all_frames: bool = False,
+    dialog: str = "dismiss",
 ) -> dict[str, Any]:
     """Evaluate an expression or statement body; a JS throw is exit 1."""
     return _action("eval", {"source": source, "await_promise": await_promise},
                    instance=instance, target=target, url=url, registry_path=registry_path,
-                   endpoint=endpoint, handler=handler, all_frames=all_frames)
+                   endpoint=endpoint, handler=handler, all_frames=all_frames, dialog=dialog)
 
 
 def press(
@@ -829,6 +885,7 @@ def press(
     target: str | None = None, url: str | None = None,
     registry_path: str | None = None, endpoint: str | None = None,
     handler: CDPHandler | None = None, all_frames: bool = False,
+    dialog: str = "dismiss",
 ) -> dict[str, Any]:
     """Dispatch a keyDown/keyUp pair with the fields default actions need."""
     from .curated_runtime import key_event
@@ -836,7 +893,7 @@ def press(
     key_event(key, modifiers)
     return _action("press", {"key": key, "modifiers": modifiers},
                    instance=instance, target=target, url=url, registry_path=registry_path,
-                   endpoint=endpoint, handler=handler, all_frames=all_frames)
+                   endpoint=endpoint, handler=handler, all_frames=all_frames, dialog=dialog)
 
 
 def hover(
@@ -844,11 +901,12 @@ def hover(
     target: str | None = None, url: str | None = None,
     registry_path: str | None = None, endpoint: str | None = None,
     handler: CDPHandler | None = None, all_frames: bool = False,
+    dialog: str = "dismiss",
 ) -> dict[str, Any]:
     """Move the native pointer over the live UID's box, including CSS :hover."""
     return _action("hover", {"uid": uid},
                    instance=instance, target=target, url=url, registry_path=registry_path,
-                   endpoint=endpoint, handler=handler, all_frames=all_frames)
+                   endpoint=endpoint, handler=handler, all_frames=all_frames, dialog=dialog)
 
 
 def type_text(
@@ -856,6 +914,7 @@ def type_text(
     target: str | None = None, url: str | None = None,
     registry_path: str | None = None, endpoint: str | None = None,
     handler: CDPHandler | None = None, all_frames: bool = False,
+    dialog: str = "dismiss",
 ) -> dict[str, Any]:
     """Insert positional or UTF-8 file text at the caret with one insertText."""
     if (text is None) == (file is None):
@@ -870,7 +929,7 @@ def type_text(
     arguments["text"] = text
     return _action("type", arguments,
                    instance=instance, target=target, url=url, registry_path=registry_path,
-                   endpoint=endpoint, handler=handler, all_frames=all_frames)
+                   endpoint=endpoint, handler=handler, all_frames=all_frames, dialog=dialog)
 
 
 def wait_text(
@@ -878,13 +937,14 @@ def wait_text(
     target: str | None = None, url: str | None = None,
     registry_path: str | None = None, endpoint: str | None = None,
     handler: CDPHandler | None = None, all_frames: bool = False,
+    dialog: str = "dismiss",
 ) -> dict[str, Any]:
     """Wait for a substring in rendered text without a check/subscription gap."""
     if timeout_ms < 0:
         raise UsageError("wait-text --timeout-ms must be non-negative")
     return _action("wait-text", {"substring": substring, "timeout_ms": timeout_ms},
                    instance=instance, target=target, url=url, registry_path=registry_path,
-                   endpoint=endpoint, handler=handler, all_frames=all_frames)
+                   endpoint=endpoint, handler=handler, all_frames=all_frames, dialog=dialog)
 
 
 def network_get(
@@ -893,8 +953,15 @@ def network_get(
     duration: float = 2.0, reload: bool = False,
     registry_path: str | None = None, endpoint: str | None = None,
     handler: CDPHandler | None = None, all_frames: bool = False,
+    dialog: str = "dismiss",
 ) -> dict[str, Any]:
-    """Fetch a response without navigating, with an optional standalone reload."""
+    """Fetch a response without navigating, with an optional standalone reload.
+
+    Carries the dialog policy because ``--reload`` sends ``Page.reload``, which
+    runs ``beforeunload``. This is the same omission that left ``fill`` able to
+    hang: the rule is every verb that drives the page, and ``--reload`` drives
+    it.
+    """
     if (url is None) == (request_id is None):
         raise UsageError("network-get requires exactly one of --url SUB or --request-id ID")
     import math
@@ -907,4 +974,17 @@ def network_get(
                                   "response_file": response_file,
                                   "duration": duration, "reload": reload},
                    instance=instance, target=target, url=None, registry_path=registry_path,
-                   endpoint=endpoint, handler=handler, all_frames=all_frames)
+                   endpoint=endpoint, handler=handler, all_frames=all_frames, dialog=dialog)
+
+
+def navigate(
+    *, instance: str | None, destination: str,
+    target: str | None = None, url: str | None = None,
+    registry_path: str | None = None, endpoint: str | None = None,
+    handler: CDPHandler | None = None, all_frames: bool = False,
+    dialog: str = "dismiss",
+) -> dict[str, Any]:
+    """Navigate the page, answering beforeunload with the invocation policy."""
+    return _action("navigate", {"url": destination},
+                   instance=instance, target=target, url=url, registry_path=registry_path,
+                   endpoint=endpoint, handler=handler, all_frames=all_frames, dialog=dialog)
