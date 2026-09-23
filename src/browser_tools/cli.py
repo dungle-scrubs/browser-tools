@@ -28,7 +28,7 @@ import json
 import sys
 from typing import Any
 
-from . import curated, events, lifecycle, list_verbs, passthrough, step_run, user_settings
+from . import captures, curated, events, lifecycle, list_verbs, passthrough, step_run, user_settings
 from .lifecycle import LifecycleError
 from .passthrough import UsageError as PassthroughUsageError
 from .usage import UsageError
@@ -74,6 +74,8 @@ _KNOWN_VERBS = {
     "screenshot",
     "screencast",
     "run",
+    "trace",
+    "heap",
 }
 
 
@@ -492,6 +494,18 @@ def _add_curated_verbs(
     )
     _add_endpoint(screenshot)
 
+    for verb in ("trace", "heap"):
+        capture = sub.add_parser(verb, help=f"Capture a bounded {verb} to a file")
+        capture.add_argument("instance", nargs="?", metavar="INSTANCE")
+        capture.add_argument("--out", required=True, metavar="FILE")
+        capture.add_argument("--target", metavar="SPEC")
+        _add_endpoint(capture)
+        if verb == "trace":
+            capture.add_argument("--duration", type=float, metavar="SECONDS")
+            capture.add_argument("--steps", metavar="FILE")
+            capture.add_argument("--timeout", type=float, metavar="SECONDS")
+            capture.add_argument("--categories", action="append", metavar="LIST")
+
     screencast = sub.add_parser(
         "screencast", help="Capture a bounded screencast and write its frames"
     )
@@ -729,6 +743,21 @@ def check_preconditions(args: argparse.Namespace, *, known_instances: set[str] |
     if command == "storage" and getattr(args, "storage_action", None) != "get":
         raise PassthroughUsageError("storage takes one sub-action: get")
 
+    if command == "trace":
+        import math
+
+        trace_duration = args.duration
+        if trace_duration is None and args.steps is None:
+            raise UsageError("trace requires --duration SECONDS or --steps FILE")
+        if trace_duration is not None and (not math.isfinite(trace_duration) or trace_duration <= 0):
+            raise UsageError("trace --duration must be finite and positive")
+        if args.timeout is not None and (not math.isfinite(args.timeout) or args.timeout < 0):
+            raise UsageError("trace --timeout must be finite and non-negative")
+        if args.categories is not None and (
+            len(args.categories) != 1 or not all(part.strip() for part in args.categories[0].split(","))
+        ):
+            raise UsageError("trace --categories takes one non-empty comma-separated list")
+
     if command == "screencast":
         removed = getattr(args, "removed_action", None)
         if removed is not None:
@@ -853,6 +882,21 @@ def _run(args: argparse.Namespace) -> int:
         _print_json(step_envelope(args, registry_path))
         return EXIT_OK
 
+    if args.command == "trace":
+        document, succeeded = captures.trace(
+            instance=args.instance, out=args.out, duration=args.duration, source=args.steps,
+            timeout=args.timeout, target=args.target, endpoint=args.endpoint,
+            registry_path=registry_path,
+            categories=None if args.categories is None else [
+                item.strip() for item in args.categories[0].split(",")
+            ],
+        )
+        _print_json(document)
+        if not succeeded:
+            diagnostic = step_run.describe_failure(document["run"])
+            print(f"error: {diagnostic}", file=sys.stderr)
+        return EXIT_OK if succeeded else EXIT_OPERATIONAL
+
     if args.command == "run":
         return _run_step_list(args, registry_path)
 
@@ -911,6 +955,7 @@ _CURATED_COMMANDS = frozenset(
         "storage",
         "screenshot",
         "screencast",
+        "heap",
     }
 )
 
@@ -1085,6 +1130,10 @@ def _curated_envelope(
             endpoint=args.endpoint,
             handler=handler,
         )
+
+    if args.command == "heap":
+        return captures.heap(instance=args.instance, out=args.out, target=args.target,
+                             endpoint=args.endpoint, registry_path=registry_path, handler=handler)
 
     if args.command == "screencast":
         return curated.screencast(

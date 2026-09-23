@@ -117,6 +117,7 @@ class TestTheStepSurface:
             "frames": "frames list",
             "storage": "storage get",
             "screencast": "screencast --dir /tmp/x",
+            "heap": "heap --out /tmp/x.heapsnapshot",
             "wait": "wait --event Page.loadEventFired",
             "eval": "eval '1+1'",
             "press": "press Enter",

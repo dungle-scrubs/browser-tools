@@ -362,11 +362,11 @@ RUNNING MANY STEPS IN ONE INVOCATION
       A STEP IS A VERB, NOT AN INVOCATION. Steps may be: snapshot, click, fill,
       eval, press, hover, type, wait-text, network-get,
       wait-idle, wait-stable, wait, detect, console-list, network-list, frames,
-      storage get, screenshot, screencast, and any raw Domain.method. A step may
+      storage get, screenshot, screencast, heap, and any raw Domain.method. A step may
       NOT name an instance, --endpoint, --target or --url: those belong to the
       run, which resolves them once. attach is not a step (it runs until stdin
       ends, so nothing could follow it), and neither are launch, status, stop,
-      cleanup, profile, window-border, guide, help or run itself. Any of these
+      cleanup, profile, window-border, guide, help, trace or run itself. Any of these
       in a step list is a usage error (exit 2).
 
       FRAME SELECTION LASTS. `frames select` in one step governs the steps after
@@ -737,7 +737,32 @@ EXTERNAL BROWSERS
   process holds.
 
 
-CPU PROFILING
+PERFORMANCE CAPTURES AND CPU PROFILING
+
+  trace [INSTANCE] --out FILE [--duration SECONDS] [--steps FILE]
+      [--categories LIST] [--timeout SECONDS] [--target SPEC] [--endpoint URL]
+      Write unmodified Chrome trace JSON for the DevTools Performance panel.
+      Supply --duration (positive decimal seconds), --steps, or both. There is
+      no default window. With both, capture ends at whichever bound comes first.
+      --steps uses the same Step List validation and runner as `run`; all
+      validation precedes Tracing.start. --timeout bounds the whole step run.
+      --categories is one comma-separated list replacing the DevTools default
+      set. It cannot repeat. Use the default for complete performance analysis.
+      stdout contains trace.path, events, bytes, dataLossOccurred, durationMs,
+      endedBy (duration, steps, timeout), categories, and a Run Document under
+      run when --steps is present. Check dataLossOccurred before analysis.
+      A failed or timed-out run still writes the trace and prints the document,
+      but exits 1. Validation failure exits 2 and starts no capture.
+      Use --steps to drive the interaction: a plain load window cannot reveal
+      a slow click that never happened. trace itself cannot be a Step List step.
+
+  heap [INSTANCE] --out FILE [--target SPEC] [--endpoint URL]
+      Write a .heapsnapshot for the DevTools Memory panel. stdout reports path,
+      nodes, edges, bytes and chunks. Heap is valid inside a Step List.
+      Use heap to inspect retained objects and memory use. Use the CPU profiler
+      below to find JavaScript functions that consume CPU time. A heap snapshot
+      completes in one invocation, so it belongs on bt. Both heap and trace are
+      Bounded Captures, like screencast: nothing outlives the invocation.
 
   `browser-tools-profiler` is installed next to `bt` and profiles the page's
   JavaScript. It is a separate command because a profile is an
