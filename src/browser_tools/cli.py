@@ -59,6 +59,7 @@ _KNOWN_VERBS = {
     "network-list",
     "snapshot",
     "click",
+    "navigate",
     "fill",
     "eval",
     "press",
@@ -345,6 +346,7 @@ def _add_run_verb(
     run_parser.add_argument(
         "--url", metavar="SUBSTRING", help="Select the page target by URL substring"
     )
+    _add_dialog(run_parser)
     _add_endpoint(run_parser)
     _add_frames(run_parser)
 
@@ -380,6 +382,7 @@ def _add_curated_verbs(
     click.add_argument(
         "--target", metavar="SPEC", help="Select the page target (1-based index or id)"
     )
+    _add_dialog(click)
     _add_endpoint(click)
     _add_frames(click)
 
@@ -592,7 +595,7 @@ def _browser_args_from_remainder(remainder: list[str] | None) -> list[str]:
 
 #: Verbs whose ``--target`` and ``--url`` name the same thing two ways.
 _TARGET_OR_URL_VERBS = frozenset({"attach", "wait", "console-list", "network-list", "run", "screenshot",
-                                "eval", "press", "hover", "type", "wait-text"})
+                                "navigate", "eval", "press", "hover", "type", "wait-text"})
 
 
 def url_selects_page(command: str) -> bool:
@@ -600,10 +603,18 @@ def url_selects_page(command: str) -> bool:
     return command in _TARGET_OR_URL_VERBS
 
 
+def _add_dialog(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--dialog", default=None, metavar="dismiss|accept[:TEXT]",
+        help="Answer every JavaScript dialog (default: dismiss, even without this flag)",
+    )
+
+
 def _add_rfc05_verbs(
     sub: argparse._SubParsersAction[argparse.ArgumentParser],  # pyright: ignore[reportPrivateUsage]
 ) -> None:
     for name, help_text in (
+        ("navigate", "Navigate the page with an active dialog policy"),
         ("eval", "Evaluate JavaScript; throws fail with exit 1"),
         ("press", "Press and release a key with native default actions"),
         ("hover", "Move the native pointer over a snapshot UID"),
@@ -612,7 +623,7 @@ def _add_rfc05_verbs(
         ("network-get", "Fetch a response from the run or a bounded observation window"),
     ):
         parser = sub.add_parser(name, help=help_text)
-        if name in {"eval", "press", "type", "wait-text"}:
+        if name in {"navigate", "eval", "press", "type", "wait-text"}:
             parser.add_argument("operands", nargs="*", metavar="ARG")
             parser.set_defaults(instance=None)
         else:
@@ -623,7 +634,11 @@ def _add_rfc05_verbs(
         ))
         _add_endpoint(parser)
         _add_frames(parser)
-        if name == "eval":
+        if name != "network-get":
+            _add_dialog(parser)
+        if name == "navigate":
+            pass
+        elif name == "eval":
             parser.add_argument("--await", dest="await_promise", action="store_true")
         elif name == "press":
             parser.add_argument("--modifiers", metavar="NAME[,NAME...]")
@@ -661,7 +676,7 @@ def _rfc05_operands(args: argparse.Namespace, known_instances: set[str] | None) 
             if value in known:
                 inline, value = value, None
     args.instance = _one_instance(args.instance, inline)
-    field = {"eval": "source", "press": "key", "type": "text", "wait-text": "substring"}[args.command]
+    field = {"navigate": "destination", "eval": "source", "press": "key", "type": "text", "wait-text": "substring"}[args.command]
     setattr(args, field, value)
     delattr(args, "operands")
 
@@ -682,8 +697,13 @@ def check_preconditions(args: argparse.Namespace, *, known_instances: set[str] |
     command = getattr(args, "command", None)
     _rfc05_operands(args, known_instances)
 
-    if command in {"eval", "press", "wait-text"}:
-        field = {"eval": "source", "press": "key", "wait-text": "substring"}[command]
+    if hasattr(args, "dialog"):
+        from .dialog_policy import validate_policy
+
+        args.dialog = validate_policy(args.dialog if args.dialog is not None else "dismiss")
+
+    if command in {"navigate", "eval", "press", "wait-text"}:
+        field = {"navigate": "destination", "eval": "source", "press": "key", "wait-text": "substring"}[command]
         if getattr(args, field) is None:
             raise UsageError(f"{command} requires {field}")
     if command == "press":
@@ -876,6 +896,7 @@ def _run_step_list(args: argparse.Namespace, registry_path: str | None) -> int:
     document, succeeded = step_run.run(
         instance=args.instance,
         source=args.file,
+        dialog=args.dialog,
         timeout=args.timeout,
         target=args.target,
         url=args.url,
@@ -897,6 +918,7 @@ _CURATED_COMMANDS = frozenset(
     {
         "snapshot",
         "click",
+        "navigate",
         "fill",
         "eval",
         "press",
@@ -980,12 +1002,16 @@ def _curated_envelope(
     operational failures the ``curated`` functions raise are ``LifecycleError``
     (exit 1), handled by the caller.
     """
-    if args.command in {"eval", "press", "hover", "type", "wait-text", "network-get"}:
+    if args.command in {"navigate", "eval", "press", "hover", "type", "wait-text", "network-get"}:
         common: dict[str, Any] = {
             "instance": args.instance, "target": args.target, "url": args.url,
             "registry_path": registry_path, "endpoint": args.endpoint, "handler": handler,
             "all_frames": getattr(args, "frames", "page") == "all",
         }
+        if args.command != "network-get":
+            common["dialog"] = args.dialog
+        if args.command == "navigate":
+            return curated.navigate(destination=args.destination, **common)
         if args.command == "eval":
             return curated.eval_js(source=args.source, await_promise=args.await_promise, **common)
         if args.command == "press":
@@ -1013,6 +1039,7 @@ def _curated_envelope(
         return curated.click(
             instance=args.instance,
             uid=args.uid,
+            dialog=args.dialog,
             target=args.target,
             registry_path=registry_path,
             endpoint=args.endpoint,

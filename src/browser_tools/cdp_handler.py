@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from .curated_runtime import ResponseBuffer
 
 from .core.attach import AmbiguousTargetError, TargetNotFoundError
+from .dialog_policy import DialogPolicy
 from .lifecycle import LifecycleError
 
 logger = logging.getLogger(__name__)
@@ -345,6 +346,7 @@ class CDPRuntime:
     _all_frames: bool = False
     _frame_sessions: Any = None
     network_responses: dict[str, ResponseBuffer] | None = None
+    dialog_policy: DialogPolicy | None = None
 
     def __init__(
         self,
@@ -688,6 +690,9 @@ class CDPRuntime:
 
         try:
             self._cdp_client = AttachedSessionClient(cdp, session_id)
+            if self.dialog_policy is not None:
+                self.dialog_policy.start(self._cdp_client)
+                self._sessions.push_async_callback(self.dialog_policy.close)
 
             # SUBSCRIBE FIRST, then enable. `Runtime.enable` replays the
             # execution contexts that already exist, and enabling before the
@@ -1010,6 +1015,15 @@ class CDPHandler:
         """See :meth:`CDPRuntime.record_caller_enable`."""
         self._rt.record_caller_enable(method)
 
+    def configure_dialog_policy(self, value: str) -> None:
+        """Set the invocation policy before the runtime thread starts."""
+        self._rt.dialog_policy = DialogPolicy(value)
+
+    def dialog_document(self) -> dict[str, Any]:
+        """Wait only for observed answers and return their ordered records."""
+        policy = self._rt.dialog_policy
+        return self.submit(policy.document()) if policy is not None else {}
+
     def start_run_network(self) -> None:
         """Enable and retain network responses before the first step runs."""
         self.submit(self._rt.start_run_network())
@@ -1192,6 +1206,12 @@ class CDPHandler:
 
         if name in {"eval", "press", "hover", "type", "wait-text", "network-get"}:
             return await self._dispatch_curated_action(cdp, name, arguments)
+
+        if name == "navigate":
+            result = await cdp.send("Page.navigate", arguments)
+            if result.get("errorText"):
+                raise LifecycleError(result["errorText"])
+            return make_text(json.dumps(result))
 
         if name == "take_snapshot":
             documents = self._cross_process_documents()

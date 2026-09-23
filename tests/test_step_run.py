@@ -236,7 +236,7 @@ class TestOneSessionForTheWholeRun:
         import contextlib
 
         @contextlib.contextmanager
-        def fake_session(instance, target, url, registry_path, endpoint, all_frames=False):
+        def fake_session(instance, target, url, registry_path, endpoint, all_frames=False, dialog="dismiss"):
             opened.append((instance, target, url, endpoint))
             yield handler
 
@@ -802,7 +802,7 @@ class TestTheRunOwnsTheSessionItOpened:
         import contextlib as _ctx
 
         @_ctx.contextmanager
-        def fake_cdp_session(port, spec=None, by=None, external=False, all_frames=False):
+        def fake_cdp_session(port, spec=None, by=None, external=False, all_frames=False, dialog=None):
             try:
                 yield handler
             finally:
