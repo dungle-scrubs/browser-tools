@@ -69,27 +69,39 @@ NAMING THE INSTANCE
   two-digit suffix. The first available name is <directory>-01. A second
   unnamed launch from the same directory succeeds as <directory>-02 while the
   first remains registered, then -03, and so on, using the first suffix free
-  in the registry. `launch` prints the name it chose in its JSON result. There
-  is no option to choose a name, so read that result before sending later
-  commands to the instance.
+  in the registry. `launch` prints the name it chose in its JSON result; read
+  it before sending later commands to the instance.
+
+  `--name NAME` pins the base name instead (#178), so tooling that looks the
+  instance up by name does not depend on the directory the launch ran from:
+  `bt launch --profile shopify-admin --name shopify-admin` registers
+  `shopify-admin-01` from any directory. Names are lowercased, and letters,
+  digits, dots and hyphens are the allowed characters. The two-digit suffix
+  applies as for directory-derived names, so `--name graybox` registers
+  `graybox-01`.
 
 
 LIFECYCLE VERBS
 
-  launch [--engine chrome|camoufox] [--profile NAME] [--channel NAME]
-         [--headless] [--port PORT] [--fingerprint FILE] [--no-window-border]
-         [-- BROWSER_ARGS]
+  launch [--engine chrome|camoufox] [--profile NAME] [--name NAME]
+         [--channel NAME] [--headless] [--port PORT] [--fingerprint FILE]
+         [--no-window-border] [-- BROWSER_ARGS]
       Launch a browser and register it. Prints the new instance as JSON.
       Chrome's debugging port is allocated from 9422 upward, never 9222:
       that is the DevTools default port, so whatever answers there on a
       working machine is most likely someone's own browser. --port pins an
-      exact port instead. A Camoufox instance records a registry port it
+      exact port instead. --name pins the instance name (see NAMING THE
+      INSTANCE). A Camoufox instance records a registry port it
       does not use.
       --engine camoufox starts an anti-detect Camoufox instance. launch takes
-      no positional argument: the name is assigned by the registry, and a bare
-      token before -- is a usage error (exit 2), because it would otherwise be
-      handed to the browser along with every flag after it. See NAMING THE
-      INSTANCE for suffixing and how to capture the assigned name.
+      no positional argument: a bare token before -- is a usage error
+      (exit 2), because it would otherwise be handed to the browser along
+      with every flag after it.
+      A URL among the args after -- (#179) opens as the first page of the
+      headed launch window: `bt launch --profile p -- https://example.com`
+      comes up on that page, not about:blank. Several URLs open as tabs.
+      Under --headless the URLs are passed to Chrome verbatim, which opens
+      them itself.
 
   status [INSTANCE]
       Every registered instance with liveness, engine, profile and page

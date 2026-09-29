@@ -80,8 +80,9 @@ protocol schema from the running browser.
 `bt launch` derives an instance name from the current directory and prints the
 chosen name in its JSON result. Repeated unnamed launches from one directory
 succeed with the first free two-digit suffix, such as `browser-tools-01`,
-`browser-tools-02`, then `browser-tools-03`. There is no caller-chosen name, so
-use the printed value as the handle for later commands.
+`browser-tools-02`, then `browser-tools-03`. `--name NAME` derives the name
+from what you pass instead (lowercased, the same two-digit suffix applies), so
+`bt launch --name graybox` registers `graybox-01` from any directory.
 
 **`bt guide` is the manual.** It is the complete CLI surface -- every verb,
 every refusal with its exit code, the login walkthrough, the UID rule, the

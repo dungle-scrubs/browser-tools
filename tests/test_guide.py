@@ -475,9 +475,11 @@ class TestTheManualDefectCorrections:
         assert "A second unnamed launch from the same directory succeeds" in naming
         assert "<directory>-02" in naming
         assert "`launch` prints the name it chose" in naming
-        assert "There is no option to choose a name" in naming
+        # #178: a caller-chosen name exists now. The suffix still applies.
+        assert "--name NAME" in naming
+        assert "so `--name graybox` registers" in naming
 
-    def test_readme_states_suffixing_without_promising_a_chosen_name(self):
+    def test_readme_states_suffixing_and_the_chosen_name_flag(self):
         from pathlib import Path
 
         readme = flatten(
@@ -485,7 +487,7 @@ class TestTheManualDefectCorrections:
         )
         assert "Repeated unnamed launches from one directory succeed" in readme
         assert "prints the chosen name in its JSON result" in readme
-        assert "There is no caller-chosen name" in readme
+        assert "--name NAME" in readme
 
     def test_dialog_escape_names_navigation_hanging_too(self, flat):
         assert "Navigating away can clear it; when that hangs too" in flat

@@ -186,6 +186,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--profile", metavar="NAME", help="Named profile to record for this instance"
     )
     launch.add_argument(
+        "--name",
+        metavar="NAME",
+        help=(
+            "Instance name to derive from (default: the current directory). "
+            "Letters, digits, dots, hyphens; lowercased; the registry appends "
+            "a two-digit numeric suffix as it does for directory-derived names"
+        ),
+    )
+    launch.add_argument(
         "--channel", metavar="NAME", help="Chrome release channel (stable/beta/dev/canary)"
     )
     launch.add_argument("--headless", action="store_true", help="Run without a visible window")
@@ -672,9 +681,9 @@ def _browser_args_from_remainder(remainder: list[str] | None) -> list[str]:
     if remainder[0] == "--":
         return remainder[1:]
     raise PassthroughUsageError(
-        f"launch takes no positional arguments (got {remainder[0]!r}); instance "
-        f"names are assigned by the registry; use --profile NAME to bind a named "
-        f"profile. Flags for the browser itself go after '--', e.g. "
+        f"launch takes no positional arguments (got {remainder[0]!r}); name the "
+        f"instance with --name NAME or bind a profile with --profile NAME. Flags "
+        f"for the browser itself go after '--', e.g. "
         f"bt launch --headless -- --proxy-server=host:port"
     )
 
@@ -887,6 +896,7 @@ def _run(args: argparse.Namespace) -> int:
             window_border=not args.no_window_border,
             browser_args=_browser_args_from_remainder(args.browser_args),
             registry_path=registry_path,
+            name=args.name,
         )
         _print_json(
             {

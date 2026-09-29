@@ -1027,6 +1027,7 @@ def launch(
     window_border: bool = True,
     browser_args: list[str] | None = None,
     registry_path: str | None = None,
+    name: str | None = None,
 ) -> ExtendedInstance:
     """Launch a browser instance and record it with the extended schema.
 
@@ -1036,6 +1037,13 @@ def launch(
     stale singleton lock from a dead process is cleaned first, then a live holder
     of the profile fails the launch (exit 1) naming the holder -- never a second
     browser on the same dir, never a steal.
+
+    ``name`` (#178) pins the registered instance name instead of the
+    cwd-derived default. The vendored ``register`` derives the name from the
+    basename of the ``working_dir`` it is handed, and the module is verbatim,
+    so the correction lives at this call site: the requested name is validated
+    here and then handed over as that value. The registered name is the
+    sanitized form of what was asked for, and the launch result prints it.
     """
     engine = (engine or DEFAULT_ENGINE).lower()
     if engine not in VALID_ENGINES:
@@ -1048,6 +1056,18 @@ def launch(
     # create a profile no profile verb can name, or write outside the root.
     if profile is not None:
         validate_profile_name(profile)
+
+    # Explicit instance name (#178). The vendored cleaner (registry
+    # _derive_base_name) would silently strip other characters; failing fast
+    # beats a launch that registers "graybox01" when "graybox_01" was asked
+    # for. The check is a superset of what survives the cleaner, so a name
+    # accepted here registers verbatim (case aside -- the registry lowercases).
+    if name is not None and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.-]*", name):
+        raise LifecycleError(
+            f"Invalid instance name {name!r}: use letters, digits, dots and "
+            "hyphens, starting with a letter or digit. The registry lowercases "
+            "the name and appends a two-digit numeric suffix."
+        )
 
     # Hold the profile's launch lock for the WHOLE sequence: stale-lock
     # cleanup, the holder lookup, the launch, the registration and the
@@ -1092,6 +1112,7 @@ def launch(
                 headless=headless,
                 user_data_dir=user_data_dir,
                 registry_path=registry_path,
+                name=name,
             )
 
         # The environment variable wins, including over an explicit --channel.
@@ -1113,7 +1134,12 @@ def launch(
                         port_override=port,
                         fingerprint=fingerprint,
                         headless=headless,
-                        working_dir=os.getcwd(),
+                        # An explicit --name rides in as the working_dir value
+                        # (#178): the vendored register() derives the instance
+                        # name from this string's basename, and registry.py is
+                        # a verbatim vendored module that cannot grow a name
+                        # parameter (RFC-01, correction at the call site).
+                        working_dir=name if name is not None else os.getcwd(),
                         registry_path=registry_path,
                         extra_args=browser_args or None,
                         window_border=window_border,
@@ -1206,6 +1232,7 @@ def _launch_camoufox(
     headless: bool,
     user_data_dir: Path,
     registry_path: str | None,
+    name: str | None = None,
 ) -> ExtendedInstance:
     """Launch Camoufox as a detached instance and register it (engine=camoufox).
 
@@ -1213,12 +1240,14 @@ def _launch_camoufox(
     the long-lived runner (carrying ``--user-data-dir=`` on its argv), not a
     transient launcher. The vendored ``register`` allocates a name/port as for
     any instance; the port is unused by Camoufox but keeps the schema uniform.
+    An explicit ``name`` (#178) rides in as the working_dir value, the same
+    call-site correction the Chrome path makes.
     """
     pid, pid_start = _spawn_camoufox_process(user_data_dir, headless)
 
     with _safe_allocation_base():
         info = core_registry.register(
-            working_dir=os.getcwd(),
+            working_dir=name if name is not None else os.getcwd(),
             pid=pid,
             browser_version="camoufox",
             user_data_dir=str(user_data_dir),
