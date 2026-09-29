@@ -32,8 +32,18 @@
 # module docstring): targets are found by discovery instead of auto-attach and
 # only page targets are attached to, every attached session is resumed before
 # any marking work, and a watchdog exits the process when its event loop
-# stalls. Intra-package imports are rewritten to browser_tools.core. Otherwise
-# unchanged from chrome-agent v0.5.7. See RFC-01, section "Vendoring rules".
+# stalls. Re-attachment is identity-checked (#176): the supervisor is spawned
+# with its browser's user-data-dir, and before it re-connects to a port that
+# is still listening it verifies that the browser claiming the port on its
+# command line names that same directory -- the attribution signal the
+# registry's stop trusts, scanned via ps because the registry's /proc walk is
+# Linux-only and macOS is where browsers get launched from terminals. Without
+# the check, a supervisor whose browser closed inside the reconnect grace
+# window adopted the next browser that took its port, double-marking its tabs
+# under the old instance name. `bt stop` also ends the supervisor (lifecycle
+# layer, at the call site) so a stopped instance leaves none behind. Intra-
+# package imports are rewritten to browser_tools.core. Otherwise unchanged
+# from chrome-agent v0.5.7. See RFC-01, section "Vendoring rules".
 
 """Per-instance supervisor for chrome-agent.
 
@@ -806,6 +816,62 @@ async def _browser_gone(port: int) -> bool:
     return False
 
 
+async def _port_serves_our_browser(*, port: int, user_data_dir: str) -> bool:
+    """Whether the browser listening on ``port`` is the one this supervisor owns.
+
+    Attribution works the way the registry's stop trusts it: the browser that
+    claims the CDP port on its command line names its ``--user-data-dir``, and
+    a port claimed by a different directory is a different browser (#176). An
+    empty claimant set is undecidable, and undecidable stays conservative: the
+    caller treats True as "proceed with the reconnect", which is the pre-#176
+    behaviour.
+    """
+    claimants = _cdp_port_claimants(port=port)
+    return (not claimants) or (user_data_dir in claimants)
+
+
+def _cdp_port_claimants(port: int) -> set[str]:
+    """Profile dirs of every process claiming CDP ``port`` on its command line.
+
+    The registry has its own scan (``core.registry._cdp_port_claimants``), but
+    it walks ``/proc``, which Linux has and macOS does not -- and macOS is
+    where browsers get launched from terminals. There it returns an empty set,
+    and every check built on it degrades to "unattributable" forever, so the
+    #176 identity gate would never fire on the platform it was reported on.
+    This is the same scan over ``ps``, which works on both platforms.
+
+    ``-ww`` keeps macOS ps from truncating the command line to the terminal
+    width -- a truncated line can lose the ``--user-data-dir=`` token and read
+    as unattributable, the wrong direction.
+    """
+    import subprocess
+
+    try:
+        result = subprocess.run(
+            ["ps", "-axww", "-o", "command="],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        lines = result.stdout.splitlines()
+    except Exception:
+        return set()
+
+    needle = f"--remote-debugging-port={port}"
+    claimants: set[str] = set()
+    for line in lines:
+        tokens = line.split()
+        if needle not in tokens:
+            continue
+        for token in tokens:
+            if token.startswith("--user-data-dir="):
+                claimants.add(token.split("=", 1)[1])
+                break
+        else:
+            claimants.add("")
+    return claimants
+
+
 async def run_supervisor(
     *,
     port: int,
@@ -814,6 +880,7 @@ async def run_supervisor(
     draw_border: bool = True,
     border_setting: Callable[[], bool] = lambda: True,
     watchdog: bool = True,
+    user_data_dir: str | None = None,
 ) -> None:
     """Supervise a launched browser until it actually closes.
 
@@ -831,6 +898,13 @@ async def run_supervisor(
     a suspend. Instead, when the connection drops we consult the port via
     ``_browser_gone`` -- the same signal ``_instance_is_alive`` trusts -- and
     reconnect-and-resume if the browser is still up, retiring only once it is gone.
+
+    ``user_data_dir`` is the browser's profile directory, the supervisor's
+    identity anchor (#176): before a reconnect, the browser now answering on
+    the port must claim the same directory, or it is someone else's browser
+    and this supervisor exits instead of adopting it. ``None`` (tests driving
+    the loop directly, supervisors spawned before the field existed) skips
+    the check and keeps the old behaviour.
 
     A watchdog runs alongside: if this loop stops running (deadlock, a blocking
     call on the event loop), the process exits instead of sitting attached to
@@ -859,6 +933,7 @@ async def run_supervisor(
             border=BorderSetting(border_setting),
             heartbeat=heartbeat,
             retire=retire_instance,
+            user_data_dir=user_data_dir,
         )
     finally:
         if beat_task is not None:
@@ -874,6 +949,7 @@ async def _supervise_forever(
     border: BorderSetting,
     heartbeat: Heartbeat,
     retire,
+    user_data_dir: str | None = None,
 ) -> None:
     """Connect, supervise, and reconnect until the browser is gone."""
     while True:
@@ -898,14 +974,36 @@ async def _supervise_forever(
                 )
             return
 
-        # Transient drop -- the browser is still alive. Reconnect and resume
-        # supervising (re-installs the marker on the live tabs) rather than
-        # orphaning a live instance.
+        # Transient drop -- the browser is still alive. But "still alive" was
+        # judged by the PORT alone, and the port cannot tell "our browser
+        # survived a suspend" from "our browser closed inside the grace window
+        # and a new one took the port" (#176). Adopting the new browser
+        # double-marks its tabs under this supervisor's (old) name and never
+        # exits. So before reconnecting, verify the browser on the port claims
+        # OUR user-data-dir -- the same attribution signal the registry's stop
+        # trusts. A browser that does not is not ours, and this supervisor has
+        # nothing left to watch: it logs and exits without touching the
+        # stranger's browser.
+        if user_data_dir is not None and not await _port_serves_our_browser(
+            port=port, user_data_dir=user_data_dir
+        ):
+            log_supervisor_exit(
+                reason="port now serves a different browser",
+                name=name,
+                port=port,
+                registry_path=registry_path,
+            )
+            return
         await asyncio.sleep(0.5)
 
 
 def spawn_supervisor(
-    *, port: int, name: str, registry_path: str, draw_border: bool
+    *,
+    port: int,
+    name: str,
+    registry_path: str,
+    draw_border: bool,
+    user_data_dir: str | None = None,
 ) -> subprocess.Popen:
     """Spawn the detached per-instance supervisor process for a launched browser.
 
@@ -914,12 +1012,19 @@ def spawn_supervisor(
     closing that terminal SIGHUPs it while the browser -- launched with a new
     session of its own -- lives on. That leaves a live instance nothing marks
     and nothing ever retires (#65).
+
+    ``user_data_dir`` rides on the argv (#176) as the supervisor's identity
+    anchor: it is how the supervisor can later tell its own browser from a
+    stranger that took the same port.
     """
+    argv = [
+        sys.executable, "-m", "browser_tools.core.supervisor",
+        str(port), name, registry_path, "1" if draw_border else "0",
+    ]
+    if user_data_dir is not None:
+        argv.append(user_data_dir)
     return subprocess.Popen(
-        [
-            sys.executable, "-m", "browser_tools.core.supervisor",
-            str(port), name, registry_path, "1" if draw_border else "0",
-        ],
+        argv,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         start_new_session=True,
@@ -951,14 +1056,19 @@ def _log_on_signal(*signals: signal.Signals) -> None:
 
 
 def main() -> None:
-    """Entry point: `python -m browser_tools.core.supervisor PORT NAME REGISTRY_PATH DRAW_BORDER`."""
+    """Entry point: `python -m browser_tools.core.supervisor PORT NAME REGISTRY_PATH DRAW_BORDER [USER_DATA_DIR]`.
+
+    ``USER_DATA_DIR`` is the #176 identity anchor and may be absent: a
+    supervisor spawned without it keeps the old port-only reconnect trust.
+    """
     if len(sys.argv) < 5:
-        print("usage: python -m browser_tools.core.supervisor PORT NAME REGISTRY_PATH DRAW_BORDER", file=sys.stderr)
+        print("usage: python -m browser_tools.core.supervisor PORT NAME REGISTRY_PATH DRAW_BORDER [USER_DATA_DIR]", file=sys.stderr)
         sys.exit(2)
     port = int(sys.argv[1])
     name = sys.argv[2]
     registry_path = sys.argv[3]
     draw_border = sys.argv[4] == "1"
+    user_data_dir = sys.argv[5] if len(sys.argv) > 5 else None
     # The setting's owner lives outside the vendored core; this entry point is
     # the one place the supervisor is wired to it.
     from browser_tools.user_settings import window_border_enabled
@@ -972,6 +1082,7 @@ def main() -> None:
             registry_path=registry_path,
             draw_border=draw_border,
             border_setting=window_border_enabled,
+            user_data_dir=user_data_dir,
         ))
     except KeyboardInterrupt:
         log_supervisor_exit(

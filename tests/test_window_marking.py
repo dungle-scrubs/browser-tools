@@ -54,7 +54,9 @@ class _FakeProcess:
 def _patch_headed_launch(monkeypatch, captured: dict) -> None:
     """Stub everything a headed launch would otherwise really do."""
 
-    def fake_popen(args, stdout=None, stderr=None, env=None):
+    def fake_popen(args, stdout=None, stderr=None, env=None, **kwargs):
+        # kwargs: start_new_session arrives here (#177); on Python 3.14
+        # subprocess.run also forwards text=True for the later `ps` probe.
         return _FakeProcess()
 
     monkeypatch.setattr(launcher.subprocess, "Popen", fake_popen)
@@ -69,14 +71,15 @@ def _patch_headed_launch(monkeypatch, captured: dict) -> None:
 
     monkeypatch.setattr(launcher, "_move_to_launching_desktop", fake_move)
 
-    async def fake_open_first_window(*, port):  # no real browser to open it in
-        captured["first_window_port"] = port
+    async def fake_open_first_window(**kwargs):  # no real browser to open it in
+        captured["first_window_port"] = kwargs["port"]
 
     monkeypatch.setattr(launcher, "_open_first_window", fake_open_first_window)
 
-    def fake_spawn(*, port, name, registry_path, draw_border):
+    def fake_spawn(*, port, name, registry_path, draw_border, user_data_dir=None):
         captured["draw_border"] = draw_border
         captured["name"] = name
+        captured["user_data_dir"] = user_data_dir
         # The launcher records the returned process's pid on the registry
         # entry, so the double must carry one.
         return _FakeProcess()
@@ -96,6 +99,10 @@ class TestFlagThreadsThroughToSupervisor:
 
         assert rc == 0
         assert captured["draw_border"] is True
+        # The #176 identity anchor threads through: the supervisor is told the
+        # browser's user-data-dir so its reconnect loop can tell its own
+        # browser from a stranger that took the port.
+        assert captured["user_data_dir"] is not None
 
     def test_no_window_border_suppresses_the_marking(self, monkeypatch, tmp_path):
         monkeypatch.setenv("BROWSER_TOOLS_REGISTRY", str(tmp_path / "registry.json"))

@@ -10,8 +10,14 @@
 # user-data-dir instead of the throwaway session dir. A headed launch starts
 # with no window (--no-startup-window) and opens its first window in the
 # background over CDP, so the launch never takes the user's focus (see
-# _open_first_window). The spawned supervisor's PID is recorded on the registry
-# entry so `bt status` can report a supervisor that has died (#65).
+# _open_first_window); a URL among the passthrough args (#179) opens in that
+# first window instead of being swallowed by --no-startup-window. The browser
+# is spawned into its own session (#177): without start_new_session it kept
+# the launching terminal as its controlling tty, so closing that terminal
+# took the browser down. The spawned supervisor's PID is recorded on the
+# registry entry so `bt status` can report a supervisor that has died (#65),
+# and the supervisor is told the browser's user-data-dir (#176) so it can
+# verify that the port it re-attaches to still serves its own browser.
 # Intra-package imports are rewritten to
 # browser_tools.core. Otherwise unchanged from chrome-agent v0.5.7. See RFC-01,
 # section "Vendoring rules".
@@ -31,6 +37,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from pathlib import Path
+from urllib.parse import urlsplit
 
 from .connection import check_cdp_port_async
 from .registry import REGISTRY_PATH, InstanceInfo, allocate_port, register, cleanup
@@ -170,12 +178,26 @@ async def launch_browser(
         "--no-default-browser-check",
         "--password-store=basic",
     ]
+    startup_urls: list[str] = []
     if headless:
         args.append("--headless=new")
+        if extra_args:
+            # Headless Chrome opens startup URL arguments itself, natively.
+            args.extend(extra_args)
     else:
+        # A headed launch starts windowless (--no-startup-window) and opens
+        # its first window over CDP. --no-startup-window also suppresses every
+        # startup URL Chrome would have opened from the command line, so a URL
+        # passed after '--' (#179) never appeared: the browser came up on
+        # about:blank and the caller's page was gone. The URL arguments are
+        # therefore pulled out of Chrome's argv and opened by
+        # _open_first_window instead, which keeps the no-focus-steal property
+        # AND opens the caller's page. Non-argument flags pass through
+        # verbatim, as before.
         args.append("--no-startup-window")
-    if extra_args:
-        args.extend(extra_args)
+        if extra_args:
+            chrome_flags, startup_urls = _partition_startup_urls(extra_args)
+            args.extend(chrome_flags)
 
     # Apply fingerprint via Chrome command-line flags (persistent)
     env = os.environ.copy()
@@ -188,12 +210,17 @@ async def launch_browser(
         args.append(f"--lang={fp_profile.locale}")
         env["TZ"] = fp_profile.timezone
 
-    # Phase 4: Launch subprocess
+    # Phase 4: Launch subprocess. start_new_session detaches the browser from
+    # the launching terminal's controlling tty (#177): without it Chrome kept
+    # the terminal as its controlling terminal even after reparenting to
+    # launchd, and closing that terminal pane killed the browser. The same
+    # detach the supervisor gets at spawn time.
     process = subprocess.Popen(
         args,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,
         env=env,
+        start_new_session=True,
     )
     # Capture the process's start-time identity token immediately, while the
     # PID is guaranteed to still be this process (wrapper installs can exit
@@ -223,7 +250,11 @@ async def launch_browser(
 
     if not headless:
         try:
-            await _open_first_window(port=port)
+            await _open_first_window(
+                port=port,
+                url=startup_urls[0] if startup_urls else "about:blank",
+                extra_urls=startup_urls[1:],
+            )
         except BaseException as exc:
             # Nothing is registered yet, so a browser left running here would be
             # an orphan no verb can see or stop. BaseException, not Exception: a
@@ -275,6 +306,10 @@ async def launch_browser(
             name=instance_info.name,
             registry_path=resolved_registry,
             draw_border=window_border and fp_profile is None,
+            # The browser's user-data-dir is the supervisor's identity anchor
+            # (#176): the port alone cannot tell "my browser came back" from
+            # "a different browser took the port".
+            user_data_dir=session_dir,
         )
         # Record it so a supervisor that later dies reads as missing rather
         # than as an instance that never had one (#65). Same identity pair the
@@ -289,7 +324,9 @@ async def launch_browser(
     return instance_info
 
 
-async def _open_first_window(*, port: int) -> None:
+async def _open_first_window(
+    *, port: int, url: str = "about:blank", extra_urls: list[str] | None = None
+) -> None:
     """Open the browser's first window in the background.
 
     Chrome started normally opens a window and makes itself the active app,
@@ -297,6 +334,11 @@ async def _open_first_window(*, port: int) -> None:
     the user is doing (measured on macOS; ``open -g`` does not prevent it).
     A browser started with ``--no-startup-window`` opens nothing, and a window
     created over CDP with ``background`` set leaves focus where it is.
+
+    ``url`` is the first window's page: the startup URL from the passthrough
+    args (#179) when one was given, about:blank otherwise. Any further URLs
+    open as background tabs, mirroring what Chrome does with several URL
+    arguments on its command line.
     """
     from .cdp_client import CDPClient, get_ws_url_async
 
@@ -304,8 +346,45 @@ async def _open_first_window(*, port: int) -> None:
     async with CDPClient(ws_url=browser_ws) as cdp:
         await cdp.send(
             method="Target.createTarget",
-            params={"url": "about:blank", "newWindow": True, "background": True},
+            params={"url": url, "newWindow": True, "background": True},
         )
+        for extra in extra_urls or []:
+            await cdp.send(
+                method="Target.createTarget",
+                params={"url": extra, "background": True},
+            )
+
+
+#: URL schemes that mark a passthrough argument as a page to open rather than
+#: a Chrome flag. Chrome treats every non-flag argument as a URL or a file;
+#: these are the schemes a caller can reasonably pass after '--'.
+_STARTUP_URL_SCHEMES = frozenset(
+    {"http", "https", "file", "about", "chrome", "devtools", "view-source", "data"}
+)
+
+
+def _partition_startup_urls(extra_args: list[str]) -> tuple[list[str], list[str]]:
+    """Split passthrough args into ``(chrome_flags, startup_urls)``.
+
+    Chrome treats a non-flag argument as a page to open, so those are the
+    startup URLs; everything starting with ``-`` stays a Chrome flag. A URL
+    with a scheme in :data:`_STARTUP_URL_SCHEMES` is used verbatim. A bare
+    argument that names an existing file becomes a ``file://`` URL, matching
+    what Chrome would have done with it. Anything else (an unresolvable bare
+    token) stays in the flags list: it was handed to Chrome verbatim before
+    #179 and stays so now.
+    """
+    flags: list[str] = []
+    urls: list[str] = []
+    for arg in extra_args:
+        scheme = urlsplit(arg).scheme.lower()
+        if scheme in _STARTUP_URL_SCHEMES:
+            urls.append(arg)
+        elif not arg.startswith("-") and os.path.exists(arg):
+            urls.append(Path(os.path.abspath(arg)).as_uri())
+        else:
+            flags.append(arg)
+    return flags, urls
 
 
 def cleanup_sessions(registry_path: str | None = None) -> list[str]:

@@ -186,6 +186,60 @@ class TestLaunch:
         with pytest.raises(LifecycleError):
             lifecycle.launch(engine="firefox", registry_path=registry_path)
 
+    def test_explicit_name_is_passed_as_the_registration_working_dir(
+        self, registry_path, monkeypatch, tmp_path
+    ):
+        """--name pins the instance base name (#178).
+
+        The vendored register() derives the name from the basename of the
+        working_dir it is handed, and registry.py is verbatim, so the launch
+        hands the requested name over AS that value. The registry's suffixing
+        applies as for any launch (--name graybox registers graybox-01, the
+        first free suffix), so a launch from a git worktree gets the same name
+        the caller's tooling looks up, not one derived from the worktree.
+        """
+        monkeypatch.setenv(lifecycle.PROFILES_ENV_VAR, str(tmp_path / "profiles"))
+        captured = {}
+
+        async def fake_launch_browser(**kwargs):
+            captured.update(kwargs)
+            info = core_registry.register(
+                working_dir=kwargs["working_dir"],
+                pid=4321,
+                browser_version="Chrome/9",
+                user_data_dir="/tmp/session-x",
+                port_override=9250,
+                registry_path=kwargs["registry_path"],
+                pid_start="tok",
+            )
+            return core_registry.lookup(info.name, registry_path=kwargs["registry_path"])
+
+        monkeypatch.setattr(lifecycle.core_launcher, "launch_browser", fake_launch_browser)
+
+        inst = lifecycle.launch(engine="chrome", name="graybox", registry_path=registry_path)
+
+        assert captured["working_dir"] == "graybox"
+        assert inst.name == "graybox-01"
+        assert lifecycle.read_instances(registry_path)[0].name == "graybox-01"
+
+    def test_explicit_name_is_rejected_when_not_registry_safe(self, registry_path):
+        # The vendored cleaner would silently strip these characters; a launch
+        # that registers "graybox01" when "graybox_01" was asked for fails
+        # late, in every verb that looks the instance up by name.
+        for bad in ("graybox_01", "-graybox", "graybox/01", "graybox 01", ""):
+            with pytest.raises(LifecycleError, match="Invalid instance name"):
+                lifecycle.launch(engine="chrome", name=bad, registry_path=registry_path)
+
+    def test_explicit_name_applies_to_camoufox_too(self, registry_path, monkeypatch, tmp_path):
+        monkeypatch.setenv(lifecycle.PROFILES_ENV_VAR, str(tmp_path / "profiles"))
+        monkeypatch.setattr(
+            lifecycle, "_spawn_camoufox_process", lambda user_data_dir, headless: (7777, "tok")
+        )
+        inst = lifecycle.launch(
+            engine="camoufox", name="stealth", registry_path=registry_path
+        )
+        assert inst.name == "stealth-01"
+
     def test_chrome_launch_records_engine_and_profile(self, registry_path, monkeypatch, tmp_path):
         monkeypatch.setenv(lifecycle.PROFILES_ENV_VAR, str(tmp_path / "profiles"))
         captured = {}

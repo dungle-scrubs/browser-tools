@@ -48,6 +48,7 @@ import logging
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -1026,6 +1027,7 @@ def launch(
     window_border: bool = True,
     browser_args: list[str] | None = None,
     registry_path: str | None = None,
+    name: str | None = None,
 ) -> ExtendedInstance:
     """Launch a browser instance and record it with the extended schema.
 
@@ -1035,6 +1037,13 @@ def launch(
     stale singleton lock from a dead process is cleaned first, then a live holder
     of the profile fails the launch (exit 1) naming the holder -- never a second
     browser on the same dir, never a steal.
+
+    ``name`` (#178) pins the registered instance name instead of the
+    cwd-derived default. The vendored ``register`` derives the name from the
+    basename of the ``working_dir`` it is handed, and the module is verbatim,
+    so the correction lives at this call site: the requested name is validated
+    here and then handed over as that value. The registered name is the
+    sanitized form of what was asked for, and the launch result prints it.
     """
     engine = (engine or DEFAULT_ENGINE).lower()
     if engine not in VALID_ENGINES:
@@ -1047,6 +1056,18 @@ def launch(
     # create a profile no profile verb can name, or write outside the root.
     if profile is not None:
         validate_profile_name(profile)
+
+    # Explicit instance name (#178). The vendored cleaner (registry
+    # _derive_base_name) would silently strip other characters; failing fast
+    # beats a launch that registers "graybox01" when "graybox_01" was asked
+    # for. The check is a superset of what survives the cleaner, so a name
+    # accepted here registers verbatim (case aside -- the registry lowercases).
+    if name is not None and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.-]*", name):
+        raise LifecycleError(
+            f"Invalid instance name {name!r}: use letters, digits, dots and "
+            "hyphens, starting with a letter or digit. The registry lowercases "
+            "the name and appends a two-digit numeric suffix."
+        )
 
     # Hold the profile's launch lock for the WHOLE sequence: stale-lock
     # cleanup, the holder lookup, the launch, the registration and the
@@ -1091,6 +1112,7 @@ def launch(
                 headless=headless,
                 user_data_dir=user_data_dir,
                 registry_path=registry_path,
+                name=name,
             )
 
         # The environment variable wins, including over an explicit --channel.
@@ -1112,7 +1134,12 @@ def launch(
                         port_override=port,
                         fingerprint=fingerprint,
                         headless=headless,
-                        working_dir=os.getcwd(),
+                        # An explicit --name rides in as the working_dir value
+                        # (#178): the vendored register() derives the instance
+                        # name from this string's basename, and registry.py is
+                        # a verbatim vendored module that cannot grow a name
+                        # parameter (RFC-01, correction at the call site).
+                        working_dir=name if name is not None else os.getcwd(),
                         registry_path=registry_path,
                         extra_args=browser_args or None,
                         window_border=window_border,
@@ -1205,6 +1232,7 @@ def _launch_camoufox(
     headless: bool,
     user_data_dir: Path,
     registry_path: str | None,
+    name: str | None = None,
 ) -> ExtendedInstance:
     """Launch Camoufox as a detached instance and register it (engine=camoufox).
 
@@ -1212,12 +1240,14 @@ def _launch_camoufox(
     the long-lived runner (carrying ``--user-data-dir=`` on its argv), not a
     transient launcher. The vendored ``register`` allocates a name/port as for
     any instance; the port is unused by Camoufox but keeps the schema uniform.
+    An explicit ``name`` (#178) rides in as the working_dir value, the same
+    call-site correction the Chrome path makes.
     """
     pid, pid_start = _spawn_camoufox_process(user_data_dir, headless)
 
     with _safe_allocation_base():
         info = core_registry.register(
-            working_dir=os.getcwd(),
+            working_dir=name if name is not None else os.getcwd(),
             pid=pid,
             browser_version="camoufox",
             user_data_dir=str(user_data_dir),
@@ -1563,10 +1593,67 @@ def _stop_managed(
     return f"{verb} {ext.name}"
 
 
+def _stop_supervisor(
+    instance: str,
+    *,
+    registry_path: str | None,
+    term_wait: float = 5.0,
+    kill_wait: float = 2.0,
+) -> str | None:
+    """End the instance's recorded supervisor, waiting until it is gone.
+
+    ``stop`` ends the browser; the supervisor exists to notice exactly that
+    and retire the entry. Left alive it must never attach to the next browser
+    on the port (#176), so stop ends it first and confirms it exited before
+    the browser is signalled. SIGTERM first (the supervisor logs it and dies),
+    then SIGKILL. Both signals are gated on the same identity pair the status
+    verb reads, so a recycled PID is never signalled.
+
+    Returns None on success (including "none to stop"), or a short note when
+    a supervisor survived every signal -- handed back to the caller so the
+    success message does not overclaim.
+    """
+    path = core_registry._resolve_path(registry_path)  # pyright: ignore[reportPrivateUsage]
+    entry = core_registry._load_registry(path).get(instance)  # pyright: ignore[reportPrivateUsage]
+    if entry is None:
+        return None
+    pid = entry.get("supervisor_pid")
+    if not isinstance(pid, int):
+        return None
+    pid_start = entry.get("supervisor_pid_start")
+    if not process_is_ours(pid=pid, expected_start=pid_start):
+        return None
+
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return None
+    deadline = time.monotonic() + term_wait
+    while time.monotonic() < deadline:
+        if not process_is_ours(pid=pid, expected_start=pid_start):
+            return None
+        time.sleep(0.05)
+
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return None
+    deadline = time.monotonic() + kill_wait
+    while time.monotonic() < deadline:
+        if not process_is_ours(pid=pid, expected_start=pid_start):
+            return None
+        time.sleep(0.05)
+    logger.warning("Supervisor pid %d for %s survived SIGTERM and SIGKILL", pid, instance)
+    return f"supervisor pid {pid} survived SIGTERM and SIGKILL"
+
+
 def stop(
     instance: str | None = None,
     target: str | None = None,
     registry_path: str | None = None,
+    *,
+    _supervisor_term_wait: float = 5.0,
+    _supervisor_kill_wait: float = 2.0,
 ) -> str:
     """Stop a browser instance (or close one tab with ``target``).
 
@@ -1579,6 +1666,11 @@ def stop(
     character is a digit. A tab close takes one path for both engines and never
     reaches the vendored ``stop``, which reads the argument as a complete target
     ID and reports a refused close as a success.
+
+    The instance's supervisor (#176) is signalled and confirmed gone before
+    the browser is closed, so a stopped instance leaves no supervisor behind
+    to adopt the next browser on its port. A supervisor that survives every
+    signal is named in the outcome rather than silently overclaiming.
 
     Corruption: on an unparseable registry (``unknown``) this refuses to signal
     anything (RFC-01).
@@ -1613,17 +1705,32 @@ def stop(
             raise LifecycleError(f"{ext.name} is not live; cannot close a tab.")
         return _close_tab(ext, _resolve_tab_target(ext, target))
 
+    # The supervisor goes first (#176): it watches this exact browser for the
+    # close that stop is about to cause, and a supervisor left alive when the
+    # next launch reuses the port attaches to that browser under the old
+    # name. Confirmed dead (or never there) before anything else runs. A tab
+    # close returns above -- the browser stays alive, and so does its
+    # supervisor. The wait lengths are keyword-private: tests shrink them.
+    supervisor_note = _stop_supervisor(
+        instance,
+        registry_path=registry_path,
+        term_wait=_supervisor_term_wait,
+        kill_wait=_supervisor_kill_wait,
+    )
+
     if ext.engine == "camoufox" or ext.profile is not None:
-        return _stop_managed(ext, registry_path)
+        outcome = _stop_managed(ext, registry_path)
+        return outcome if supervisor_note is None else f"{outcome}; {supervisor_note}"
 
     with registry_lock(registry_path):
         try:
-            return core_registry.stop(
+            outcome = core_registry.stop(
                 instance_name=instance,
                 registry_path=registry_path,
             )
         except InstanceNotFoundError as exc:
             raise LifecycleError(instance_not_found_message(exc)) from exc
+    return outcome if supervisor_note is None else f"{outcome}; {supervisor_note}"
 
 
 def cleanup(registry_path: str | None = None) -> list[str]:

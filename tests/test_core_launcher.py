@@ -53,9 +53,15 @@ def _patch_launch_plumbing(monkeypatch, captured):
     network, spawn a real process, or walk the real /tmp/chrome-agent tree.
     """
 
-    def fake_popen(args, stdout=None, stderr=None, env=None):
-        captured["args"] = args
-        captured["env"] = env
+    def fake_popen(args, stdout=None, stderr=None, env=None, **kwargs):
+        # First call only: launch_browser's first spawn is Chrome; anything
+        # after it (utils.process_start_time's `ps` probe on platforms without
+        # /proc) must not clobber what the assertions read. On Python 3.14
+        # subprocess.run forwards text=True to Popen, so kwargs must be
+        # accepted for the probe to arrive here at all.
+        captured.setdefault("args", args)
+        captured.setdefault("env", env)
+        captured.setdefault("popen_kwargs", kwargs)
         return _FakeProcess()
 
     monkeypatch.setattr(launcher.subprocess, "Popen", fake_popen)
@@ -136,7 +142,7 @@ class TestHeadedLaunchLeavesFocusAlone:
     window created over CDP with ``background`` set leaves focus where it was.
     """
 
-    def _launch_headed(self, monkeypatch, tmp_path, captured, open_first_window):
+    def _launch_headed(self, monkeypatch, tmp_path, captured, open_first_window, extra_args=None):
         _patch_launch_plumbing(monkeypatch, captured)
         monkeypatch.setattr(launcher, "_open_first_window", open_first_window)
 
@@ -157,6 +163,7 @@ class TestHeadedLaunchLeavesFocusAlone:
                 working_dir=str(tmp_path),
                 registry_path=str(tmp_path / "registry.json"),
                 user_data_dir=str(tmp_path / "udd"),
+                extra_args=extra_args,
             )
         )
 
@@ -165,19 +172,92 @@ class TestHeadedLaunchLeavesFocusAlone:
     ):
         captured: dict = {}
 
-        async def fake_open(*, port):
-            captured["opened_on_port"] = port
+        async def fake_open(**kwargs):
+            captured["opened"] = kwargs
 
         self._launch_headed(monkeypatch, tmp_path, captured, fake_open)
 
         assert "--no-startup-window" in captured["args"]
-        assert captured["opened_on_port"] == 9335
+        assert captured["opened"]["port"] == 9335
+        assert captured["opened"]["url"] == "about:blank"
 
-    def test_headless_launch_is_unchanged(self, monkeypatch, tmp_path):
+    def test_headed_launch_passes_start_new_session(self, monkeypatch, tmp_path):
+        """The browser detaches from the launching terminal's controlling tty
+        (#177): the same session detachment the supervisor gets, so closing
+        the terminal pane does not take the browser down."""
+        captured: dict = {}
+
+        async def fake_open(**kwargs):
+            pass
+
+        self._launch_headed(monkeypatch, tmp_path, captured, fake_open)
+
+        assert captured["popen_kwargs"].get("start_new_session") is True
+
+    def test_headed_url_opens_in_the_first_window_not_chromes_argv(
+        self, monkeypatch, tmp_path
+    ):
+        """A URL after '--' opens as the first page (#179).
+
+        --no-startup-window suppresses Chrome's own startup URLs, so the URL
+        must not stay in Chrome's argv -- it reaches the browser through
+        _open_first_window, which also keeps the launch from stealing focus.
+        """
+        captured: dict = {}
+
+        async def fake_open(**kwargs):
+            captured["opened"] = kwargs
+
+        self._launch_headed(
+            monkeypatch, tmp_path, captured, fake_open,
+            extra_args=["http://127.0.0.1:17471/"],
+        )
+
+        assert "http://127.0.0.1:17471/" not in captured["args"]
+        assert captured["opened"]["url"] == "http://127.0.0.1:17471/"
+        assert captured["opened"]["extra_urls"] == []
+
+    def test_headed_flags_pass_through_and_multiple_urls_open_as_tabs(
+        self, monkeypatch, tmp_path
+    ):
+        captured: dict = {}
+
+        async def fake_open(**kwargs):
+            captured["opened"] = kwargs
+
+        self._launch_headed(
+            monkeypatch, tmp_path, captured, fake_open,
+            extra_args=["--proxy-server=host:9", "https://a.example", "https://b.example"],
+        )
+
+        assert "--proxy-server=host:9" in captured["args"]
+        assert "https://a.example" not in captured["args"]
+        assert captured["opened"]["url"] == "https://a.example"
+        assert captured["opened"]["extra_urls"] == ["https://b.example"]
+
+    def test_headed_local_file_becomes_a_file_url(self, monkeypatch, tmp_path):
+        captured: dict = {}
+
+        async def fake_open(**kwargs):
+            captured["opened"] = kwargs
+
+        page = tmp_path / "page.html"
+        page.write_text("<h1>hi</h1>")
+        self._launch_headed(
+            monkeypatch, tmp_path, captured, fake_open,
+            extra_args=[str(page)],
+        )
+
+        assert captured["opened"]["url"].startswith("file://")
+        assert captured["opened"]["url"].endswith("page.html")
+
+    def test_headless_keeps_startup_urls_in_chromes_argv(self, monkeypatch, tmp_path):
+        """Headless Chrome opens startup URL arguments natively, so the URL
+        stays on Chrome's own command line."""
         captured: dict = {}
         _patch_launch_plumbing(monkeypatch, captured)
 
-        async def must_not_run(*, port):
+        async def must_not_run(**kwargs):
             raise AssertionError("headless launch opened a window")
 
         monkeypatch.setattr(launcher, "_open_first_window", must_not_run)
@@ -188,9 +268,11 @@ class TestHeadedLaunchLeavesFocusAlone:
                 working_dir=str(tmp_path),
                 registry_path=str(tmp_path / "registry.json"),
                 user_data_dir=str(tmp_path / "udd"),
+                extra_args=["http://127.0.0.1:17471/"],
             )
         )
         assert "--no-startup-window" not in captured["args"]
+        assert "http://127.0.0.1:17471/" in captured["args"]
 
     def test_a_cancelled_launch_kills_the_unregistered_browser(self, monkeypatch, tmp_path):
         """Ctrl-C while the first window is opening cancels this task.
@@ -204,7 +286,7 @@ class TestHeadedLaunchLeavesFocusAlone:
             def kill(self):
                 killed.append(self.pid)
 
-        async def cancelled_open(*, port):
+        async def cancelled_open(**kwargs):
             raise asyncio.CancelledError()
 
         _patch_launch_plumbing(monkeypatch, captured)
@@ -233,7 +315,7 @@ class TestHeadedLaunchLeavesFocusAlone:
             def kill(self):
                 killed.append(self.pid)
 
-        async def failing_open(*, port):
+        async def failing_open(**kwargs):
             raise ConnectionError("no browser")
 
         _patch_launch_plumbing(monkeypatch, captured)
