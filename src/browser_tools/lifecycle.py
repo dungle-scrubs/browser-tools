@@ -48,6 +48,7 @@ import logging
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -1563,10 +1564,67 @@ def _stop_managed(
     return f"{verb} {ext.name}"
 
 
+def _stop_supervisor(
+    instance: str,
+    *,
+    registry_path: str | None,
+    term_wait: float = 5.0,
+    kill_wait: float = 2.0,
+) -> str | None:
+    """End the instance's recorded supervisor, waiting until it is gone.
+
+    ``stop`` ends the browser; the supervisor exists to notice exactly that
+    and retire the entry. Left alive it must never attach to the next browser
+    on the port (#176), so stop ends it first and confirms it exited before
+    the browser is signalled. SIGTERM first (the supervisor logs it and dies),
+    then SIGKILL. Both signals are gated on the same identity pair the status
+    verb reads, so a recycled PID is never signalled.
+
+    Returns None on success (including "none to stop"), or a short note when
+    a supervisor survived every signal -- handed back to the caller so the
+    success message does not overclaim.
+    """
+    path = core_registry._resolve_path(registry_path)  # pyright: ignore[reportPrivateUsage]
+    entry = core_registry._load_registry(path).get(instance)  # pyright: ignore[reportPrivateUsage]
+    if entry is None:
+        return None
+    pid = entry.get("supervisor_pid")
+    if not isinstance(pid, int):
+        return None
+    pid_start = entry.get("supervisor_pid_start")
+    if not process_is_ours(pid=pid, expected_start=pid_start):
+        return None
+
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return None
+    deadline = time.monotonic() + term_wait
+    while time.monotonic() < deadline:
+        if not process_is_ours(pid=pid, expected_start=pid_start):
+            return None
+        time.sleep(0.05)
+
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return None
+    deadline = time.monotonic() + kill_wait
+    while time.monotonic() < deadline:
+        if not process_is_ours(pid=pid, expected_start=pid_start):
+            return None
+        time.sleep(0.05)
+    logger.warning("Supervisor pid %d for %s survived SIGTERM and SIGKILL", pid, instance)
+    return f"supervisor pid {pid} survived SIGTERM and SIGKILL"
+
+
 def stop(
     instance: str | None = None,
     target: str | None = None,
     registry_path: str | None = None,
+    *,
+    _supervisor_term_wait: float = 5.0,
+    _supervisor_kill_wait: float = 2.0,
 ) -> str:
     """Stop a browser instance (or close one tab with ``target``).
 
@@ -1579,6 +1637,11 @@ def stop(
     character is a digit. A tab close takes one path for both engines and never
     reaches the vendored ``stop``, which reads the argument as a complete target
     ID and reports a refused close as a success.
+
+    The instance's supervisor (#176) is signalled and confirmed gone before
+    the browser is closed, so a stopped instance leaves no supervisor behind
+    to adopt the next browser on its port. A supervisor that survives every
+    signal is named in the outcome rather than silently overclaiming.
 
     Corruption: on an unparseable registry (``unknown``) this refuses to signal
     anything (RFC-01).
@@ -1613,17 +1676,32 @@ def stop(
             raise LifecycleError(f"{ext.name} is not live; cannot close a tab.")
         return _close_tab(ext, _resolve_tab_target(ext, target))
 
+    # The supervisor goes first (#176): it watches this exact browser for the
+    # close that stop is about to cause, and a supervisor left alive when the
+    # next launch reuses the port attaches to that browser under the old
+    # name. Confirmed dead (or never there) before anything else runs. A tab
+    # close returns above -- the browser stays alive, and so does its
+    # supervisor. The wait lengths are keyword-private: tests shrink them.
+    supervisor_note = _stop_supervisor(
+        instance,
+        registry_path=registry_path,
+        term_wait=_supervisor_term_wait,
+        kill_wait=_supervisor_kill_wait,
+    )
+
     if ext.engine == "camoufox" or ext.profile is not None:
-        return _stop_managed(ext, registry_path)
+        outcome = _stop_managed(ext, registry_path)
+        return outcome if supervisor_note is None else f"{outcome}; {supervisor_note}"
 
     with registry_lock(registry_path):
         try:
-            return core_registry.stop(
+            outcome = core_registry.stop(
                 instance_name=instance,
                 registry_path=registry_path,
             )
         except InstanceNotFoundError as exc:
             raise LifecycleError(instance_not_found_message(exc)) from exc
+    return outcome if supervisor_note is None else f"{outcome}; {supervisor_note}"
 
 
 def cleanup(registry_path: str | None = None) -> list[str]:
