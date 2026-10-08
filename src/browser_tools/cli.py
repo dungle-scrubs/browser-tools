@@ -58,6 +58,7 @@ KNOWN_VERBS = {
     "launch",
     "status",
     "stop",
+    "retain",
     "cleanup",
     "profile",
     "guide",
@@ -95,7 +96,7 @@ KNOWN_VERBS = {
 #: registry, or launch a browser, and an external browser has no entry there.
 #: Keeping them flagless is what stops ``stop`` and ``cleanup`` from ever
 #: seeing the user's real profile directory.
-REGISTRY_VERBS = frozenset({"launch", "status", "stop", "cleanup", "guide", "profile"})
+REGISTRY_VERBS = frozenset({"launch", "status", "stop", "retain", "cleanup", "guide", "profile"})
 
 ENDPOINT_HELP = (
     "Drive an external browser at URL (loopback only, e.g. http://127.0.0.1:9222) "
@@ -116,7 +117,10 @@ def _add_endpoint(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--endpoint", metavar="URL", help=ENDPOINT_HELP)
     group.add_argument(
-        "--chrome-profile", nargs="?", const="stable", metavar="DIR",
+        "--chrome-profile",
+        nargs="?",
+        const="stable",
+        metavar="DIR",
         help=CHROME_PROFILE_HELP,
     )
     return parser
@@ -199,6 +203,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     launch.add_argument("--headless", action="store_true", help="Run without a visible window")
     launch.add_argument(
+        "--owner",
+        type=int,
+        metavar="PID",
+        help="Close this browser when the explicit owner process exits",
+    )
+    launch.add_argument(
         "--port", type=int, metavar="PORT", help="CDP port (default: auto-allocate)"
     )
     launch.add_argument(
@@ -227,6 +237,12 @@ def build_parser() -> argparse.ArgumentParser:
         "instance", nargs="?", metavar="INSTANCE", help="Instance to stop (omit if only one)"
     )
     stop.add_argument("--target", metavar="SPEC", help="Close a single tab instead of the browser")
+
+    retain = sub.add_parser(
+        "retain", help="Keep a browser after its owner exits (human or agent handoff)"
+    )
+    retain.add_argument("instance", nargs="?", metavar="INSTANCE")
+    retain.add_argument("--note", metavar="TEXT", help="Optional handoff note")
 
     sub.add_parser("cleanup", help="Remove stale registry entries and session dirs")
 
@@ -543,9 +559,7 @@ def _add_curated_verbs(
         capture.add_argument(
             "instance", nargs="?", metavar="INSTANCE", help="Instance (omit if only one)"
         )
-        capture.add_argument(
-            "--out", required=True, metavar="FILE", help="Write the capture here"
-        )
+        capture.add_argument("--out", required=True, metavar="FILE", help="Write the capture here")
         capture.add_argument(
             "--target", metavar="SPEC", help="Select the page target (1-based index or id)"
         )
@@ -558,19 +572,26 @@ def _add_curated_verbs(
             # the case --steps exists to capture.
             _add_frames(capture)
             capture.add_argument(
-                "--duration", type=float, metavar="SECONDS",
+                "--duration",
+                type=float,
+                metavar="SECONDS",
                 help="Record a plain window of this many seconds",
             )
             capture.add_argument(
-                "--steps", metavar="FILE",
+                "--steps",
+                metavar="FILE",
                 help="Run a Step List inside the capture; the only shape that reaches an interaction",
             )
             capture.add_argument(
-                "--timeout", type=float, metavar="SECONDS",
+                "--timeout",
+                type=float,
+                metavar="SECONDS",
                 help="Bound the whole step run, as in `run`",
             )
             capture.add_argument(
-                "--categories", action="append", metavar="LIST",
+                "--categories",
+                action="append",
+                metavar="LIST",
                 help="Replace the default DevTools category set; use --categories=LIST when it starts with a dash",
             )
 
@@ -689,8 +710,22 @@ def _browser_args_from_remainder(remainder: list[str] | None) -> list[str]:
 
 
 #: Verbs whose ``--target`` and ``--url`` name the same thing two ways.
-_TARGET_OR_URL_VERBS = frozenset({"attach", "wait", "console-list", "network-list", "run", "screenshot",
-                                "navigate", "eval", "press", "hover", "type", "wait-text"})
+_TARGET_OR_URL_VERBS = frozenset(
+    {
+        "attach",
+        "wait",
+        "console-list",
+        "network-list",
+        "run",
+        "screenshot",
+        "navigate",
+        "eval",
+        "press",
+        "hover",
+        "type",
+        "wait-text",
+    }
+)
 
 
 def url_selects_page(command: str) -> bool:
@@ -700,7 +735,9 @@ def url_selects_page(command: str) -> bool:
 
 def _add_dialog(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
-        "--dialog", default=None, metavar="dismiss|accept[:TEXT]",
+        "--dialog",
+        default=None,
+        metavar="dismiss|accept[:TEXT]",
         help="Answer every JavaScript dialog (default: dismiss, even without this flag)",
     )
 
@@ -724,9 +761,11 @@ def _add_rfc05_verbs(
         else:
             parser.add_argument("instance", nargs="?", metavar="INSTANCE")
         parser.add_argument("--target", metavar="SPEC")
-        parser.add_argument("--url", metavar="SUB", help=(
-            "Response URL substring" if name == "network-get" else "Page URL substring"
-        ))
+        parser.add_argument(
+            "--url",
+            metavar="SUB",
+            help=("Response URL substring" if name == "network-get" else "Page URL substring"),
+        )
         _add_endpoint(parser)
         _add_frames(parser)
         _add_dialog(parser)
@@ -764,18 +803,29 @@ def _rfc05_operands(args: argparse.Namespace, known_instances: set[str] | None) 
         if args.command == "type" and args.file is not None:
             known = known_instances
             if known is None:
-                known = {item.name for item in lifecycle.read_instances(
-                    registry_path=lifecycle.registry_path_from_env()
-                )}
+                known = {
+                    item.name
+                    for item in lifecycle.read_instances(
+                        registry_path=lifecycle.registry_path_from_env()
+                    )
+                }
             if value in known:
                 inline, value = value, None
     args.instance = _one_instance(args.instance, inline)
-    field = {"navigate": "destination", "eval": "source", "press": "key", "type": "text", "wait-text": "substring"}[args.command]
+    field = {
+        "navigate": "destination",
+        "eval": "source",
+        "press": "key",
+        "type": "text",
+        "wait-text": "substring",
+    }[args.command]
     setattr(args, field, value)
     delattr(args, "operands")
 
 
-def check_preconditions(args: argparse.Namespace, *, known_instances: set[str] | None = None) -> None:
+def check_preconditions(
+    args: argparse.Namespace, *, known_instances: set[str] | None = None
+) -> None:
     """Every per-verb requirement ``argparse`` deliberately leaves optional.
 
     ``build_parser`` accepts a bare verb on purpose, so ``click`` with no
@@ -797,7 +847,12 @@ def check_preconditions(args: argparse.Namespace, *, known_instances: set[str] |
         args.dialog = validate_policy(args.dialog if args.dialog is not None else "dismiss")
 
     if command in {"navigate", "eval", "press", "wait-text"}:
-        field = {"navigate": "destination", "eval": "source", "press": "key", "wait-text": "substring"}[command]
+        field = {
+            "navigate": "destination",
+            "eval": "source",
+            "press": "key",
+            "wait-text": "substring",
+        }[command]
         if getattr(args, field) is None:
             raise UsageError(f"{command} requires {field}")
     if command == "press":
@@ -849,12 +904,15 @@ def check_preconditions(args: argparse.Namespace, *, known_instances: set[str] |
         trace_duration = args.duration
         if trace_duration is None and args.steps is None:
             raise UsageError("trace requires --duration SECONDS or --steps FILE")
-        if trace_duration is not None and (not math.isfinite(trace_duration) or trace_duration <= 0):
+        if trace_duration is not None and (
+            not math.isfinite(trace_duration) or trace_duration <= 0
+        ):
             raise UsageError("trace --duration must be finite and positive")
         if args.timeout is not None and (not math.isfinite(args.timeout) or args.timeout < 0):
             raise UsageError("trace --timeout must be finite and non-negative")
         if args.categories is not None and (
-            len(args.categories) != 1 or not all(part.strip() for part in args.categories[0].split(","))
+            len(args.categories) != 1
+            or not all(part.strip() for part in args.categories[0].split(","))
         ):
             raise UsageError("trace --categories takes one non-empty comma-separated list")
 
@@ -897,6 +955,7 @@ def _run(args: argparse.Namespace) -> int:
             browser_args=_browser_args_from_remainder(args.browser_args),
             registry_path=registry_path,
             name=args.name,
+            owner=args.owner,
         )
         _print_json(
             {
@@ -922,6 +981,12 @@ def _run(args: argparse.Namespace) -> int:
             registry_path=registry_path,
         )
         _print_json({"stopped": True, "message": message})
+        return EXIT_OK
+
+    if args.command == "retain":
+        if args.instance is None:
+            raise UsageError("retain requires an INSTANCE")
+        _print_json(lifecycle.retain(args.instance, note=args.note, registry_path=registry_path))
         return EXIT_OK
 
     if args.command == "profile":
@@ -1004,13 +1069,18 @@ def _run(args: argparse.Namespace) -> int:
 
     if args.command == "trace":
         document, succeeded = captures.trace(
-            instance=args.instance, out=args.out, duration=args.duration, source=args.steps,
-            timeout=args.timeout, target=args.target, endpoint=args.endpoint,
+            instance=args.instance,
+            out=args.out,
+            duration=args.duration,
+            source=args.steps,
+            timeout=args.timeout,
+            target=args.target,
+            endpoint=args.endpoint,
             registry_path=registry_path,
             all_frames=getattr(args, "frames", "page") == "all",
-            categories=None if args.categories is None else [
-                item.strip() for item in args.categories[0].split(",")
-            ],
+            categories=None
+            if args.categories is None
+            else [item.strip() for item in args.categories[0].split(",")],
         )
         _print_json(document)
         if not succeeded:
@@ -1150,8 +1220,12 @@ def _curated_envelope(
     """
     if args.command in {"navigate", "eval", "press", "hover", "type", "wait-text", "network-get"}:
         common: dict[str, Any] = {
-            "instance": args.instance, "target": args.target, "url": args.url,
-            "registry_path": registry_path, "endpoint": args.endpoint, "handler": handler,
+            "instance": args.instance,
+            "target": args.target,
+            "url": args.url,
+            "registry_path": registry_path,
+            "endpoint": args.endpoint,
+            "handler": handler,
             "all_frames": getattr(args, "frames", "page") == "all",
         }
         if args.command != "network-get":
@@ -1168,8 +1242,13 @@ def _curated_envelope(
             return curated.type_text(text=args.text, file=args.file, **common)
         if args.command == "wait-text":
             return curated.wait_text(substring=args.substring, timeout_ms=args.timeout_ms, **common)
-        return curated.network_get(request_id=args.request_id, response_file=args.response_file,
-                                   duration=args.duration, reload=args.reload, **common)
+        return curated.network_get(
+            request_id=args.request_id,
+            response_file=args.response_file,
+            duration=args.duration,
+            reload=args.reload,
+            **common,
+        )
 
     if args.command == "snapshot":
         return curated.snapshot(
@@ -1261,8 +1340,14 @@ def _curated_envelope(
         )
 
     if args.command == "heap":
-        return captures.heap(instance=args.instance, out=args.out, target=args.target,
-                             endpoint=args.endpoint, registry_path=registry_path, handler=handler)
+        return captures.heap(
+            instance=args.instance,
+            out=args.out,
+            target=args.target,
+            endpoint=args.endpoint,
+            registry_path=registry_path,
+            handler=handler,
+        )
 
     if args.command == "screencast":
         return curated.screencast(

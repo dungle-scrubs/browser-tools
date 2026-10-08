@@ -90,6 +90,7 @@ EXCLUDED_VERBS: dict[str, str] = {
         "instance the run has already resolved and connected to"
     ),
     "cleanup": "it does not drive the attached browser",
+    "retain": "it changes instance lifetime, not the attached browser",
     "status": "it does not drive the attached browser",
     "profile": "it does not drive the attached browser",
     "window-border": "it does not drive the attached browser",
@@ -240,8 +241,7 @@ def _check_not_an_instance(argv: list[str], line: int, known: set[str]) -> None:
 def _refuse_invocation_flag(flag: str, line: int) -> StepListError:
     return _at(
         line,
-        f"a step must not carry {flag}: "
-        "the run opens one connection to one page, before step 1",
+        f"a step must not carry {flag}: the run opens one connection to one page, before step 1",
     )
 
 
@@ -270,7 +270,13 @@ def _check_nothing_was_retargeted(args: argparse.Namespace, line: int) -> None:
 
     if getattr(args, "reload", False):
         raise _at(line, "network-get --reload is standalone only; a run preserves earlier steps")
-    for attribute, flag in (("chrome_profile", "--chrome-profile"), ("target", "--target"), ("url", "--url"), ("endpoint", "--endpoint"), ("dialog", "--dialog")):
+    for attribute, flag in (
+        ("chrome_profile", "--chrome-profile"),
+        ("target", "--target"),
+        ("url", "--url"),
+        ("endpoint", "--endpoint"),
+        ("dialog", "--dialog"),
+    ):
         if attribute == "url" and not url_selects_page(args.command):
             continue
         if getattr(args, attribute, None) is not None:

@@ -242,6 +242,10 @@ class LifecycleError(Exception):
     """An operational lifecycle failure (maps to CLI exit code 1)."""
 
 
+class RegistryLockTimeout(LifecycleError):
+    """A registry lock could not be acquired within its deadline."""
+
+
 @dataclass
 class ExtendedInstance:
     """A registry entry read through the extended (engine/profile) schema."""
@@ -412,7 +416,7 @@ def registry_lock(
                 break
             except OSError:
                 if time.monotonic() >= deadline:
-                    raise LifecycleError(
+                    raise RegistryLockTimeout(
                         f"Registry at {root} is locked by another process. Waited {timeout:g}s."
                     ) from None
                 time.sleep(0.05)
@@ -1037,6 +1041,7 @@ def launch(
     browser_args: list[str] | None = None,
     registry_path: str | None = None,
     name: str | None = None,
+    owner: int | None = None,
 ) -> ExtendedInstance:
     """Launch a browser instance and record it with the extended schema.
 
@@ -1054,6 +1059,9 @@ def launch(
     here and then handed over as that value. The registered name is the
     sanitized form of what was asked for, and the launch result prints it.
     """
+    from . import task_lease
+
+    owner_identity = task_lease.capture_owner(owner) if owner is not None else None
     engine = (engine or DEFAULT_ENGINE).lower()
     if engine not in VALID_ENGINES:
         raise LifecycleError(
@@ -1116,13 +1124,16 @@ def launch(
             # is the ephemeral tempdir). The only None-producing branch requires
             # both `profile is None` and `engine != "camoufox"`.
             assert user_data_dir is not None
-            return _launch_camoufox(
+            result = _launch_camoufox(
                 profile=profile,
                 headless=headless,
                 user_data_dir=user_data_dir,
                 registry_path=registry_path,
                 name=name,
             )
+            if owner_identity is not None:
+                task_lease.establish(result.name, owner_identity, headless, registry_path)
+            return result
 
         # The environment variable wins, including over an explicit --channel.
         # It was written as a fallback, on the reasoning that --channel is the
@@ -1168,7 +1179,7 @@ def launch(
             registry_path=registry_path,
         )
 
-        return ExtendedInstance(
+        result = ExtendedInstance(
             name=info.name,
             port=info.port,
             pid=info.pid,
@@ -1179,6 +1190,10 @@ def launch(
             engine=engine,
             profile=profile,
         )
+
+        if owner_identity is not None:
+            task_lease.establish(result.name, owner_identity, headless, registry_path)
+        return result
 
 
 #: Seconds to wait for the detached Camoufox runner to report readiness.
@@ -1343,6 +1358,13 @@ def status(
                 ],
             }
         )
+    from . import task_lease
+
+    _, registry = task_lease.load_registry(registry_path)
+    for row in out:
+        entry = registry.get(row["name"], {})
+        if "lease" in entry:
+            row["lease"] = task_lease.status(entry["lease"])
     return out
 
 
@@ -1736,6 +1758,53 @@ def _stop_supervisor(
 
 
 def stop(
+    instance: str | None = None,
+    target: str | None = None,
+    registry_path: str | None = None,
+    *,
+    _supervisor_term_wait: float = 5.0,
+    _supervisor_kill_wait: float = 2.0,
+    _lease_generation: str | None = None,
+) -> str:
+    """Stop an owned browser after verified exit, or close one tab with target.
+
+    ``target`` is a 1-based page index or a target ID prefix. Closing a tab
+    preserves the browser and profile. Browser shutdown preserves named
+    profiles and retains recovery state when exit or ownership is unknown.
+    An unparseable registry refuses all signals and deletion. A surviving
+    or unverified supervisor blocks shutdown of a live browser.
+    """
+    with registry_lock(registry_path):
+        if _lease_generation is not None:
+            from . import task_lease
+
+            _, registry = task_lease.load_registry(registry_path)
+            entry = registry.get(instance) if instance is not None else None
+            try:
+                lease = task_lease.Lease.parse(entry.get("lease") if entry else None)
+            except ValueError as exc:
+                raise LifecycleError("Automatic close generation no longer exists") from exc
+            if lease.generation != _lease_generation or lease.state != "closing":
+                raise LifecycleError("Automatic close generation or claim changed; nothing stopped")
+        return _stop_impl(
+            instance,
+            target,
+            registry_path,
+            _supervisor_term_wait=_supervisor_term_wait,
+            _supervisor_kill_wait=_supervisor_kill_wait,
+        )
+
+
+def retain(
+    instance: str, note: str | None = None, registry_path: str | None = None
+) -> dict[str, Any]:
+    """Retain an instance beyond owner exit for a human or another agent."""
+    from . import task_lease
+
+    return task_lease.retain(instance, note, registry_path)
+
+
+def _stop_impl(
     instance: str | None = None,
     target: str | None = None,
     registry_path: str | None = None,
