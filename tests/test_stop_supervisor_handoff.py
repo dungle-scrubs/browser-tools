@@ -108,6 +108,12 @@ class TestStopEndsTheSupervisor:
         # Stub the liveness read so the process always looks alive, whatever
         # stop signals: the pathological case, not the timing one.
         monkeypatch.setattr(lifecycle, "process_is_ours", lambda pid, expected_start=None: True)
+        real_state = lifecycle.process_running_state
+        monkeypatch.setattr(
+            lifecycle,
+            "process_running_state",
+            lambda pid: True if pid == proc.pid else real_state(pid),
+        )
         try:
             outcome = lifecycle.stop(
                 instance="x-01",
@@ -130,7 +136,7 @@ class TestStopEndsTheSupervisor:
             "port": _free_port(),
             "pid": 2_000_000_000,
             "browser_version": "Chrome/1",
-            "user_data_dir": "",
+            "user_data_dir": str(tmp_path / "session-x"),
             "launched": "2026-01-01T00:00:00+00:00",
             "pid_start": None,
         }
@@ -148,7 +154,7 @@ class TestStopEndsTheSupervisor:
             "port": _free_port(),
             "pid": 2_000_000_000,
             "browser_version": "Chrome/1",
-            "user_data_dir": "",
+            "user_data_dir": str(tmp_path / "session-x"),
             "launched": "2026-01-01T00:00:00+00:00",
             "pid_start": None,
             "supervisor_pid": 1,

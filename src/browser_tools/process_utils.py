@@ -36,7 +36,7 @@ logger = logging.getLogger(__name__)
 
 
 _DEBUG_PORT_PATTERN = re.compile(r"--remote-debugging-port=(\d+)")
-_USER_DATA_DIR_PATTERN = re.compile(r"--user-data-dir=(\S+)")
+_USER_DATA_DIR_PATTERN = re.compile(r"(?:^|\s)--user-data-dir=(.*?)(?=\s--|$)")
 
 # Advanced escape hatch for connecting to a non-loopback CDP endpoint.
 _ALLOW_REMOTE_ENDPOINT_ENV = "BROWSER_TOOLS_ALLOW_REMOTE_ENDPOINT"
@@ -398,6 +398,11 @@ def find_listeners_on_port(port: int) -> list[int]:
     Returns:
         Distinct PIDs listening on ``port`` (any address family).
     """
+    return read_listener_pids(port) or []
+
+
+def read_listener_pids(port: int) -> list[int] | None:
+    """Return listeners, distinguishing known absence from inspection failure."""
     try:
         result = subprocess.run(
             ["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"],
@@ -405,10 +410,12 @@ def find_listeners_on_port(port: int) -> list[int]:
             text=True,
             timeout=2,
         )
-    except (subprocess.SubprocessError, OSError, FileNotFoundError):
-        return []
-    if result.returncode not in (0, 1):
-        return []
+    except (subprocess.SubprocessError, OSError):
+        return None
+    if result.returncode not in (0, 1) or result.stderr.strip():
+        return None
+    if result.returncode == 0 and not result.stdout.strip():
+        return None
     pids: list[int] = []
     for line in result.stdout.splitlines():
         line = line.strip()
@@ -417,7 +424,9 @@ def find_listeners_on_port(port: int) -> list[int]:
         try:
             pid = int(line)
         except ValueError:
-            continue
+            return None
+        if pid <= 0:
+            return None
         if pid not in pids:
             pids.append(pid)
     return pids
@@ -526,3 +535,64 @@ def terminate_process_and_wait(pid: int | None, timeout: float = 5.0) -> bool:
             return True
         time.sleep(0.1)
     return not is_process_alive(pid)
+
+
+def find_user_data_dir_processes(user_data_dir: str) -> list[int] | None:
+    """Return directory-holding PIDs, or None when the process scan is unknown."""
+    if not user_data_dir:
+        return None
+    try:
+        result = subprocess.run(
+            ["ps", "-e", "-o", "pid=", "-o", "args="],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+        if result.returncode != 0 or not result.stdout.strip():
+            return None
+        expected = Path(user_data_dir).resolve()
+        pids = []
+        for line in result.stdout.splitlines():
+            fields = line.strip().split(maxsplit=1)
+            if len(fields) != 2 or not fields[0].isdigit():
+                return None
+            match = _USER_DATA_DIR_PATTERN.search(fields[1])
+            if match and Path(match[1]).resolve() == expected:
+                pids.append(int(fields[0]))
+        return pids
+    except (OSError, subprocess.SubprocessError, RuntimeError):
+        return None
+
+
+def process_running_state(pid: int) -> bool | None:
+    """Return False for absent or zombie PIDs and None for unreadable state.
+
+    Signal 0 succeeds for zombies, so their ps state is needed to prove exit.
+    """
+    if pid <= 0:
+        return None
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return None
+    try:
+        result = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "stat="],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+        state = result.stdout.strip()
+        if result.returncode == 0 and state:
+            return not state.startswith("Z")
+    except (OSError, subprocess.SubprocessError):
+        pass
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        pass
+    return None

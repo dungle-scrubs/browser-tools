@@ -54,7 +54,7 @@ import sys
 import tempfile
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from importlib import resources
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -69,8 +69,13 @@ from .core.utils import process_is_ours, process_start_time
 from .endpoint import ResolvedEndpoint
 from .process_utils import (
     clean_stale_singleton_lock,
+    find_chrome_debug_port,
+    find_listeners_on_port,
+    find_user_data_dir_processes,
     pid_holds_user_data_dir,
-    terminate_process_and_wait,
+    process_running_state,
+    read_listener_pids,
+    read_process_command,
 )
 from .usage import UsageError
 
@@ -965,7 +970,11 @@ def resolve_cdp_port(
         LifecycleError: The named instance is not registered (CLI exit 1).
     """
     if endpoint is not None:
-        return endpoint if isinstance(endpoint, ResolvedEndpoint) else endpoint_module.resolve_endpoint_port(endpoint)
+        return (
+            endpoint
+            if isinstance(endpoint, ResolvedEndpoint)
+            else endpoint_module.resolve_endpoint_port(endpoint)
+        )
     if instance is None:
         instance = resolve_single_instance(registry_path=registry_path)
     try:
@@ -1481,7 +1490,7 @@ def retire_instance(
         return _retire_locked(instance_name=instance_name, registry_path=registry_path)
 
 
-def _terminate_verified(ext: ExtendedInstance) -> None:
+def _terminate_verified(ext: ExtendedInstance) -> bool:
     """Terminate an instance's process only after verifying we own it.
 
     Chrome: a best-effort CDP ``Browser.close`` when the recorded port is ours,
@@ -1490,13 +1499,41 @@ def _terminate_verified(ext: ExtendedInstance) -> None:
     (recycled, or a namespace alias) is never signalled.
     """
     if ext.engine == "chrome":
-        claimants = core_registry._cdp_port_claimants(  # pyright: ignore[reportPrivateUsage]
-            port=ext.port
-        )
-        if (not claimants) or (ext.user_data_dir in claimants):
+        listeners = find_listeners_on_port(ext.port)
+        if listeners and all(
+            pid_holds_user_data_dir(pid, Path(ext.user_data_dir))
+            and find_chrome_debug_port(pid) == ext.port
+            for pid in listeners
+        ):
             _try_cdp_browser_close(ext.port)
-    if process_is_ours(pid=ext.pid, expected_start=ext.pid_start):
-        terminate_process_and_wait(ext.pid, timeout=5.0)
+    for sig, timeout in ((signal.SIGTERM, 5.0), (signal.SIGKILL, 2.0)):
+        running = process_running_state(ext.pid)
+        if running is False:
+            return True
+        if (
+            running is None
+            or ext.pid_start is None
+            or process_start_time(ext.pid) != ext.pid_start
+            or not pid_holds_user_data_dir(ext.pid, Path(ext.user_data_dir))
+        ):
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                if process_running_state(ext.pid) is False:
+                    return True
+                time.sleep(0.05)
+            return process_running_state(ext.pid) is False
+        try:
+            os.kill(ext.pid, sig)
+        except ProcessLookupError:
+            return True
+        except OSError:
+            return False
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if process_running_state(ext.pid) is False:
+                return True
+            time.sleep(0.1)
+    return process_running_state(ext.pid) is False
 
 
 def _try_cdp_browser_close(port: int) -> None:
@@ -1564,22 +1601,45 @@ def _close_tab(ext: ExtendedInstance, target_id: str) -> str:
     return f"Closed tab {target_id[:8]} in {ext.name}"
 
 
+def _browser_exit_verified(ext: ExtendedInstance) -> bool:
+    remaining = find_user_data_dir_processes(ext.user_data_dir)
+    if remaining is None or any(process_running_state(pid) is not False for pid in remaining):
+        return False
+    if ext.engine == "chrome":
+        listeners = read_listener_pids(ext.port)
+        if listeners is None or any(
+            read_process_command(pid) is None
+            or pid_holds_user_data_dir(pid, Path(ext.user_data_dir))
+            for pid in listeners
+        ):
+            return False
+    recorded = process_running_state(ext.pid)
+    if recorded is None:
+        return False
+    if recorded:
+        actual_start = process_start_time(ext.pid)
+        return (
+            ext.pid_start is not None and actual_start is not None and actual_start != ext.pid_start
+        )
+    return True
+
+
 def _stop_managed(
     ext: ExtendedInstance,
     registry_path: str | None,
 ) -> str:
-    """Stop a Camoufox or profile-bound instance, preserving profile dirs.
+    pids = find_user_data_dir_processes(ext.user_data_dir)
+    if pids is None:
+        raise LifecycleError(f"Browser exit unknown for {ext.name}; recovery state preserved")
+    alive = bool(pids)
+    for pid in pids:
+        replacement = replace(ext, pid=pid, pid_start=process_start_time(pid))
+        if not _terminate_verified(replacement):
+            raise LifecycleError(f"Browser exit unknown for {ext.name}; recovery state preserved")
+    if not _browser_exit_verified(ext):
+        raise LifecycleError(f"Browser exit unknown for {ext.name}; recovery state preserved")
 
-    Profile-bound instances keep their user-data-dir across stop; unbound
-    Camoufox instances have theirs reaped, mirroring the ephemeral-Chrome path.
-    Closing a single tab is not this function's job; ``stop`` handles that for
-    both engines before it reaches here.
-    """
-    alive = instance_is_live(ext)
-    if alive:
-        _terminate_verified(ext)
-
-    preserve = ext.profile is not None
+    preserve = ext.profile is not None or _is_under_profiles_root(ext.user_data_dir)
     _remove_entry(
         ext.name,
         registry_path,
@@ -1591,6 +1651,16 @@ def _stop_managed(
     if ext.profile is not None:
         return f"{verb} {ext.name} (profile '{ext.profile}' preserved at {ext.user_data_dir})"
     return f"{verb} {ext.name}"
+
+
+def _supervisor_identity_state(pid: int, expected_start: str | None) -> bool | None:
+    running = process_running_state(pid)
+    if running is not True:
+        return running
+    actual_start = process_start_time(pid)
+    if expected_start is None or actual_start is None:
+        return None
+    return actual_start == expected_start
 
 
 def _stop_supervisor(
@@ -1621,27 +1691,45 @@ def _stop_supervisor(
     if not isinstance(pid, int):
         return None
     pid_start = entry.get("supervisor_pid_start")
-    if not process_is_ours(pid=pid, expected_start=pid_start):
+    state = _supervisor_identity_state(pid, pid_start)
+    if state is False:
         return None
+    if state is None:
+        return f"supervisor pid {pid} identity unknown before termination"
 
     try:
         os.kill(pid, signal.SIGTERM)
     except ProcessLookupError:
         return None
+    except OSError as exc:
+        return f"supervisor pid {pid} could not be stopped: {exc}"
     deadline = time.monotonic() + term_wait
     while time.monotonic() < deadline:
-        if not process_is_ours(pid=pid, expected_start=pid_start):
+        state = _supervisor_identity_state(pid, pid_start)
+        if state is False:
             return None
+        if state is None:
+            return f"supervisor pid {pid} exit unknown"
         time.sleep(0.05)
 
+    state = _supervisor_identity_state(pid, pid_start)
+    if state is False:
+        return None
+    if state is None:
+        return f"supervisor pid {pid} identity unknown before escalation"
     try:
         os.kill(pid, signal.SIGKILL)
     except ProcessLookupError:
         return None
+    except OSError as exc:
+        return f"supervisor pid {pid} could not be stopped: {exc}"
     deadline = time.monotonic() + kill_wait
     while time.monotonic() < deadline:
-        if not process_is_ours(pid=pid, expected_start=pid_start):
+        state = _supervisor_identity_state(pid, pid_start)
+        if state is False:
             return None
+        if state is None:
+            return f"supervisor pid {pid} exit unknown"
         time.sleep(0.05)
     logger.warning("Supervisor pid %d for %s survived SIGTERM and SIGKILL", pid, instance)
     return f"supervisor pid {pid} survived SIGTERM and SIGKILL"
@@ -1657,9 +1745,8 @@ def stop(
 ) -> str:
     """Stop a browser instance (or close one tab with ``target``).
 
-    Ephemeral Chrome delegates to the vendored registry ``stop`` (Browser.close
-    with verified ownership, session-dir cleanup). Camoufox and profile-bound
-    instances take an engine-aware path that preserves a profile's user-data-dir.
+    All engines use the owned shutdown path. Retirement follows verified exit;
+    unknown ownership or a surviving browser preserves recovery state.
 
     ``target`` is a ``--target SPEC``: a 1-based index into the page targets
     sorted by target ID, or a target ID prefix, read as an index only when every
@@ -1667,10 +1754,9 @@ def stop(
     reaches the vendored ``stop``, which reads the argument as a complete target
     ID and reports a refused close as a success.
 
-    The instance's supervisor (#176) is signalled and confirmed gone before
-    the browser is closed, so a stopped instance leaves no supervisor behind
-    to adopt the next browser on its port. A supervisor that survives every
-    signal is named in the outcome rather than silently overclaiming.
+    The supervisor is stopped first. If it survives or its exit is unknown,
+    only a demonstrably exited browser may be retired, with the supervisor
+    warning in the outcome. Otherwise recovery state is preserved.
 
     Corruption: on an unparseable registry (``unknown``) this refuses to signal
     anything (RFC-01).
@@ -1705,12 +1791,6 @@ def stop(
             raise LifecycleError(f"{ext.name} is not live; cannot close a tab.")
         return _close_tab(ext, _resolve_tab_target(ext, target))
 
-    # The supervisor goes first (#176): it watches this exact browser for the
-    # close that stop is about to cause, and a supervisor left alive when the
-    # next launch reuses the port attaches to that browser under the old
-    # name. Confirmed dead (or never there) before anything else runs. A tab
-    # close returns above -- the browser stays alive, and so does its
-    # supervisor. The wait lengths are keyword-private: tests shrink them.
     supervisor_note = _stop_supervisor(
         instance,
         registry_path=registry_path,
@@ -1718,18 +1798,9 @@ def stop(
         kill_wait=_supervisor_kill_wait,
     )
 
-    if ext.engine == "camoufox" or ext.profile is not None:
-        outcome = _stop_managed(ext, registry_path)
-        return outcome if supervisor_note is None else f"{outcome}; {supervisor_note}"
-
-    with registry_lock(registry_path):
-        try:
-            outcome = core_registry.stop(
-                instance_name=instance,
-                registry_path=registry_path,
-            )
-        except InstanceNotFoundError as exc:
-            raise LifecycleError(instance_not_found_message(exc)) from exc
+    if supervisor_note is not None and not _browser_exit_verified(ext):
+        raise LifecycleError(f"Cannot stop {instance}: {supervisor_note}; recovery state preserved")
+    outcome = _stop_managed(ext, registry_path)
     return outcome if supervisor_note is None else f"{outcome}; {supervisor_note}"
 
 

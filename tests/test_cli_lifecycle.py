@@ -235,9 +235,7 @@ class TestLaunch:
         monkeypatch.setattr(
             lifecycle, "_spawn_camoufox_process", lambda user_data_dir, headless: (7777, "tok")
         )
-        inst = lifecycle.launch(
-            engine="camoufox", name="stealth", registry_path=registry_path
-        )
+        inst = lifecycle.launch(engine="camoufox", name="stealth", registry_path=registry_path)
         assert inst.name == "stealth-01"
 
     def test_chrome_launch_records_engine_and_profile(self, registry_path, monkeypatch, tmp_path):
@@ -315,7 +313,10 @@ class TestStatusStopCleanup:
             lifecycle.status(instance="ghost", registry_path=registry_path)
 
     def test_stop_dead_instance_cleans_up(self, registry_path):
-        _seed(registry_path, {"site-01": _dead_entry()})
+        _seed(
+            registry_path,
+            {"site-01": _dead_entry(user_data_dir=str(Path(registry_path).parent / "session"))},
+        )
         msg = lifecycle.stop(instance="site-01", registry_path=registry_path)
         assert "site-01" in msg
         assert _read(registry_path) == {}
