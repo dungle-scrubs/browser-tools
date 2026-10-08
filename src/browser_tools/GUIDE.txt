@@ -85,7 +85,7 @@ LIFECYCLE VERBS
 
   launch [--engine chrome|camoufox] [--profile NAME] [--name NAME]
          [--channel NAME] [--headless] [--port PORT] [--fingerprint FILE]
-         [--no-window-border] [-- BROWSER_ARGS]
+         [--no-window-border] [--owner PID] [-- BROWSER_ARGS]
       Launch a browser and register it. Prints the new instance as JSON.
       Chrome's debugging port is allocated from 9422 upward, never 9222:
       that is the DevTools default port, so whatever answers there on a
@@ -102,6 +102,25 @@ LIFECYCLE VERBS
       comes up on that page, not about:blank. Several URLs open as tabs.
       Under --headless the URLs are passed to Chrome verbatim, which opens
       them itself.
+      --owner PID opts this instance into automatic owner-exit cleanup. The
+      owner must be alive with a readable process-start identity before launch
+      (exit 1 otherwise). A detached per-instance keeper watches that identity,
+      including owner exit by SIGKILL. Plain launch has no automatic lifetime.
+      Choose a process that spans the task, not a one-off tool shell. A longer
+      agent-session process can span several tasks: its exit catches crashes,
+      but successful task completion while it stays alive still needs bt stop.
+      No environment owner default, idle timeout or age expiry applies.
+      Keeper setup failure is a launch failure (exit 1). Cleanup is truthful:
+      any surviving or unverified browser keeps recoverable registry state.
+
+  retain INSTANCE [--note TEXT]
+      Keep an instance beyond owner exit for handoff to a human or another
+      agent. Headless retain is allowed and reports mode "headless"; it does
+      not open a visible window. Headed instances report mode "headed". Plain
+      instances are already manual. Repeated retain is harmless. Once automatic
+      close is claimed, retain refuses (exit 1); it cannot rescue a closing
+      browser. Failed automatic close reports close_failed and close_error;
+      use ordinary bt stop INSTANCE to recover. --endpoint is refused (exit 2).
 
   status [INSTANCE]
       Every registered instance with liveness, engine, profile and page
@@ -113,6 +132,13 @@ LIFECYCLE VERBS
       verified loopback endpoint, use --endpoint URL; see EXTERNAL BROWSERS.
       This does not restore registry management. If identity cannot be
       established, stop and report the mismatch.
+      Owned instances also report lease state (auto, closing, retained or
+      close_failed, or unverified for malformed lease data), owner observation
+      (alive, gone or unverified), keeper
+      running/missing, keeper observation and headed/headless mode. Unreadable
+      identity is unverified, never proof of owner exit. A missing keeper means
+      automatic cleanup is not enforced; retain or stop explicitly as needed.
+      Plain instance output has no lease metadata.
 
   stop [INSTANCE] [--target SPEC]
       Stop a browser and retire its registry entry, or close one tab with
@@ -457,7 +483,7 @@ RUNNING MANY STEPS IN ONE INVOCATION
       A step may NOT name an instance, --endpoint, --target, --dialog or a
       page-selecting --url: those belong to the run, which resolves them once.
       attach is not a step (it runs until stdin ends, so nothing could follow
-      it), and neither are launch, status, stop, cleanup, profile,
+      it), and neither are launch, status, stop, retain, cleanup, profile,
       window-border, guide, help, navigate, trace, insights or run itself. Any of these
       in a step list is a usage error (exit 2).
 
@@ -989,7 +1015,7 @@ EXTERNAL BROWSERS
   - --endpoint with --profile is refused: a profile is a launch-time identity
     and --endpoint launches nothing. Use `bt launch --profile NAME` instead.
 
-  launch, status, stop, cleanup, guide and profile reject --endpoint (exit 2).
+  launch, status, stop, retain, cleanup, guide and profile reject --endpoint (exit 2).
   Everything under NEVER TAKE THE SCREEN applies unchanged. A browser that
   dies mid-session shows up as a connection error on the next invocation,
   which names the port, any process holding it, and the user-data-dir that
