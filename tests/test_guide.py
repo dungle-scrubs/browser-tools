@@ -760,39 +760,50 @@ class TestTheReadmeClaimsOnlyWhatChromePermits:
     """
 
     @pytest.fixture
-    def readme(self):
+    def front_page_docs(self):
         from pathlib import Path
 
-        return flatten(
-            (Path(__file__).resolve().parent.parent / "README.md").read_text()
-        )
+        root = Path(__file__).resolve().parent.parent
+        readme = (root / "README.md").read_text()
+        assert "](docs/reference.md)" in readme
+        return flatten(readme + "\n" + (root / "docs/reference.md").read_text())
 
-    def test_it_says_what_an_external_browser_has_to_be(self, readme):
-        assert "started for debugging on a data directory of its own" in readme
-        assert "refuses remote debugging on its default data directory" in readme
+    def test_it_says_what_an_external_browser_has_to_be(self, front_page_docs):
+        assert "started for debugging on a data directory of its own" in front_page_docs
+        assert "refuses remote debugging on its default data directory" in front_page_docs
 
-    def test_it_gives_the_command_that_starts_one(self, readme):
-        assert "--user-data-dir=\"$HOME/.local/share/bt-debug-profile\"" in readme
-        assert "--remote-debugging-port=0" in readme
+    def test_it_gives_the_command_that_starts_one(self, front_page_docs):
+        assert '--user-data-dir="$HOME/.local/share/bt-debug-profile"' in front_page_docs
+        assert "--remote-debugging-port=0" in front_page_docs
 
-    def test_it_names_both_ways_in_and_does_not_type_the_default_port(self, readme):
-        assert "--chrome-profile ~/.local/share/bt-debug-profile" in readme
-        assert "ws://127.0.0.1:PORT/devtools/browser/ID" in readme
-        assert "--endpoint http://127.0.0.1:9222" not in readme
+    def test_it_names_both_ways_in_and_does_not_type_the_default_port(self, front_page_docs):
+        assert '--chrome-profile "$HOME/.local/share/bt-debug-profile"' in front_page_docs
+        assert "ws://127.0.0.1:PORT/devtools/browser/ID" in front_page_docs
+        assert "--endpoint http://127.0.0.1:9222" not in front_page_docs
 
-    def test_the_one_dependency_claim_survives_and_the_extra_is_named(self, readme):
-        assert "The default install depends on `websockets` only" in readme
-        assert "brings no Node.js with it" in readme
-        assert "`bt insights --setup` installs the pinned trace engine" in readme
+    def test_the_one_dependency_claim_survives_and_the_extra_is_named(self, front_page_docs):
+        assert "The default install depends on `websockets` only" in front_page_docs
+        assert "brings no Node.js with it" in front_page_docs
+        assert "`bt insights --setup` installs the pinned trace engine" in front_page_docs
 
-    def test_the_capability_list_covers_the_rfc_05_surface(self, readme):
+    def test_the_capability_list_covers_the_rfc_05_surface(self, front_page_docs):
         for claim in (
-            "`eval`, `press`, `hover`, `type`,",
-            "`wait-text` and `network-get`",
-            "`--dialog` fixes the reply to every",
+            "`eval`", "`press`", "`hover`", "`type`", "`wait-text`", "`network-get`",
+            "`--dialog` actively dismiss JavaScript dialogs by default",
             "`trace` writes Chrome trace JSON",
             "`heap` writes a `.heapsnapshot`",
             "`insights` reads a trace back as English",
             "`--endpoint` and `--chrome-profile` drive a Chrome",
         ):
-            assert claim in readme
+            assert claim in front_page_docs
+
+    def test_the_tagline_matches_package_metadata_and_chrome_stable_is_default(self):
+        import tomllib
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parent.parent
+        readme = (root / "README.md").read_text()
+        metadata = tomllib.loads((root / "pyproject.toml").read_text())
+        assert metadata["project"]["description"] == readme.splitlines()[2]
+        assert "Regular Google Chrome stable is the default" in readme
+        assert "Canary is not required" in readme
