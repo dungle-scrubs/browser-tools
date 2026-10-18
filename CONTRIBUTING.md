@@ -66,8 +66,8 @@ for backward compatibility.
 
 ## Architecture
 
-See `README.md` for the five layers and the module dependency graph, and
-`CONTEXT.md` for the canonical name of each concept. Key principles:
+See [the architecture reference](docs/reference.md#architecture) for the five
+layers and module layout, and `CONTEXT.md` for the canonical name of each concept. Key principles:
 
 1. `cli.py` is the only surface. It parses arguments, dispatches verbs and
    owns exit codes; every verb reaches the browser through `lifecycle`,

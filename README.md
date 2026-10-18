@@ -1,288 +1,179 @@
 # Browser Tools
 
-[![CI](https://github.com/dungle-scrubs/browser-tools/actions/workflows/ci.yml/badge.svg)](https://github.com/dungle-scrubs/browser-tools/actions/workflows/ci.yml)
-[![Python 3.13+](https://img.shields.io/badge/python-3.13+-blue.svg)](https://www.python.org/downloads/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Code style: ruff](https://img.shields.io/badge/code%20style-ruff-000000.svg)](https://docs.astral.sh/ruff/)
+Automate and debug Chrome from the command line.
 
-Browser automation, debugging, and anti-detect browsing CLI. Provides:
+Use `bt` to launch named browser instances, inspect rendered pages, click and fill elements, and read console or network activity. Commands reuse the running browser's page and cookies. Regular Google Chrome stable is the default. Optional Camoufox support covers browser launch and lifecycle, not CDP page commands.
 
-- **Raw CDP passthrough** - Any `Domain.method` goes straight to the running
-  browser, with protocol help read live from it
-- **Snapshot-based page automation** - Accessibility-tree snapshots and UID
-  interaction (`snapshot`, `click --uid`, `fill --uid`), in Python over CDP
-- **Curated verbs for the common path** - `eval`, `press`, `hover`, `type`,
-  `wait-text` and `network-get` beside those three: the interactions whose
-  raw CDP form is JavaScript or prose quoted inside JSON inside a shell line
-- **One answer for every dialog** - `--dialog` fixes the reply to every
-  JavaScript dialog before the invocation starts, and every dialog it
-  answered is reported back under `dialogs`
-- **Named browser instances** - Long-lived Chrome with a registry and named
-  profiles that keep a login across restarts
-- **External browsers** - `--endpoint` and `--chrome-profile` drive a Chrome
-  you started for debugging on a data directory of its own, writing nothing
-  to the registry
-- **Frame-aware tools** - Iframe/CDP frame tree management, execution context
-  resolution, and storage inspection
-- **Interstitial detection** - Multi-signal heuristic detection for Cloudflare,
-  DataDome, Akamai, PerimeterX, Imperva, AWS WAF, and other challenge pages
-- **Camoufox anti-detect browsing** - Fingerprint-injected Firefox-based
-  browsing for bot-protected sites
-- **Anything else CDP can do** - File upload, viewport emulation, cookies,
-  PDF export and page management have no curated verb and need none; `bt
-  guide` has a worked example of each
-- **Performance captures** - `trace` writes Chrome trace JSON and can drive
-  the interaction it is capturing; `heap` writes a `.heapsnapshot`; `insights`
-  reads a trace back as English, behind the optional runtime below
-- **CPU profiling** - `browser-tools-profiler`, a second command installed
-  alongside `bt`, with timed capture and threshold-triggered capture
+```console
+$ bt launch --headless -- https://example.com
+...
+$ bt wait-idle
+...
+$ bt eval 'document.title'
+{
+  "value": "Example Domain",
+  "type": "string",
+  ...
+}
+$ bt stop
+...
+```
 
-## Quick Start
+## Install
 
-### Installation
+Requires **Python 3.13+** and a local Chrome or Chromium installation. Regular **Google Chrome stable** is the default; Canary is not required.
 
 ```bash
-# Using uv (recommended)
 uv tool install browser-tools
-
-# Or with pip
-pip install browser-tools
+bt --version
 ```
 
-### Usage
+Alternatively, install with `pip install browser-tools` in a Python environment. The install provides `bt`, its alias `browser-tools`, and `browser-tools-profiler`.
+
+The default install depends on `websockets` only and brings no Node.js with it. After installation, run the example above to confirm browser access. Use `bt launch` without `--headless` for a visible browser.
+
+## Usage
+
+Unless a block includes `launch`, use a browser you already launched. Run `bt stop` when finished. Commands below omit the instance name; with several browsers, put the name from launch output before the command, as in `bt web-01 snapshot`.
+
+### Read a page and save a screenshot
 
 ```bash
-# Run the CLI (`bt` is an alias for `browser-tools`)
-bt --help
-
-# Launch a browser. It is registered by name and outlives this command, so
-# later verbs drive the same Chrome and share its page and login state.
-bt launch
-
-# Navigate through the raw CDP passthrough, then read the page.
-bt Page.navigate '{"url": "https://example.com"}'
+bt navigate https://example.com
+bt wait-idle
 bt snapshot
-
-# Interact by UID from that snapshot.
-bt click --uid 1-13
-
-# When the page is blocking, ask directly.
-bt detect
-
-bt status          # registered instances and their page targets
-bt stop            # close the browser and retire its registry entry
+bt screenshot --path example.png
 ```
 
-Omit `INSTANCE` while exactly one instance is running; with several, every verb
-names the candidates rather than guessing. `bt help Domain.method` reads the
-protocol schema from the running browser.
+`navigate` does not wait for loading. A snapshot returns the accessibility tree with element UIDs; use those with `bt click --uid UID` or `bt fill --uid UID --text 'hello'`. Take a new snapshot after navigation.
 
-`bt launch` derives an instance name from the current directory and prints the
-chosen name in its JSON result. Repeated unnamed launches from one directory
-succeed with the first free two-digit suffix, such as `browser-tools-01`,
-`browser-tools-02`, then `browser-tools-03`. `--name NAME` derives the name
-from what you pass instead (lowercased, the same two-digit suffix applies), so
-`bt launch --name graybox` registers `graybox-01` from any directory.
-
-**`bt guide` is the manual.** It is the complete CLI surface -- every verb,
-every refusal with its exit code, the login walkthrough, the UID rule, the
-performance captures and the `--endpoint` rules -- and reading it is enough to
-drive a browser with this tool. A test fails the build when a verb has no entry
-in it.
-
-To drive a Chrome you started yourself, pass its endpoint or its data directory
-instead of an instance name. It has to be a Chrome started for debugging on a
-directory of its own. The browser you already have open will not do: measured
-on Chrome 153, it refuses remote debugging on its default data directory,
-writes no port file, and starts no endpoint.
-
-```
-DevTools remote debugging requires a non-default data directory. Specify this
-using --user-data-dir.
-```
-
-So start one:
+### Keep a login across restarts
 
 ```bash
-"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
-  --user-data-dir="$HOME/.local/share/bt-debug-profile" \
-  --remote-debugging-port=0
+bt launch --profile demo
+# Log in by hand in this window.
+bt stop
+bt launch --profile demo
+bt snapshot
 ```
 
-`--remote-debugging-port=0` asks Chrome for a free port and records it in that
-directory's `DevToolsActivePort` file. Log in by hand in that window, then
-reach it by the directory or by the endpoint:
+A named profile keeps cookies and login state across restarts. Without `--profile`, each launch starts with a fresh temporary profile; one live instance can hold a named profile at a time.
+
+### Run dependent steps in one connection
 
 ```bash
-bt snapshot --chrome-profile ~/.local/share/bt-debug-profile
-bt click --uid 0BDAEF756714-14 --chrome-profile ~/.local/share/bt-debug-profile
-bt snapshot --endpoint http://127.0.0.1:PORT
-bt snapshot --endpoint ws://127.0.0.1:PORT/devtools/browser/ID
+bt run - <<'STEPS'
+Page.navigate '{"url":"https://example.com"}'
+wait-idle
+eval 'document.title'
+snapshot
+STEPS
 ```
 
-Nothing is written to the registry, so `status` does not list it and `stop` and
-`cleanup` cannot reach it -- which is what keeps them away from your own Chrome
-profile directory. Only `127.0.0.1` and `::1` are accepted; forward a remote
-browser with `ssh -L 9787:127.0.0.1:9787 <host>`. Do not use 9222 for any of
-this: it is the DevTools default port, so on a machine someone is working on,
-whatever answers there is most likely their own browser. `Browser.close` and
-`Browser.crash` are refused over `--endpoint`.
+Each line is a command without `bt`; use raw `Page.navigate` inside a run. The run shares a CDP session and stops at the first failure, reporting completed steps without undoing them.
 
-Measured on this machine's Chrome 153 with the person at the keyboard: a Chrome
-started on its own data directory with --remote-debugging-port needs no Allow
-click and shows no automation banner, so no person needs to be present for the
-working shape. The per-connection Allow flow belongs to the chrome://inspect
-remote-debugging toggle, which Chrome 153 refuses on the default data
-directory - the everyday browser cannot be attached to at all. The manual's
-EXTERNAL BROWSERS section carries the refusals, the timeouts, and what a
-timeout does and does not prove.
-
-### Development setup
+### Inspect console messages and network traffic
 
 ```bash
-# Clone and install in editable mode
-git clone https://github.com/dungle-scrubs/browser-tools.git
-cd browser-tools
-uv sync
+bt console-list --duration 2
+bt network-get --url example.com --reload
+bt network-list --duration 2
 ```
 
-Runtime requirements:
+`network-get --reload` reloads the page and returns a matching response body. Network observation covers traffic during that command, not earlier commands; `console-list` also receives Chrome's buffered console messages.
 
-- **Chrome Canary** by default (the default channel is `canary`). Use another
-  installed channel with `--channel stable|beta|dev`, e.g. `--channel stable`
-  for regular Google Chrome.
-- **Camoufox** (`camoufox fetch`) for anti-detect Firefox workflows, with the
-  `camoufox` extra
-
-The default install depends on `websockets` only, and `pip install
-browser-tools` brings no Node.js with it.
-
-One opt-in adds a Node runtime, and nothing else does. `bt insights --setup`
-installs the pinned trace engine from a committed lockfile into the installed
-package, so `bt insights` can read a trace back as English. It needs Node.js
-22+ and npm on PATH, runs only `npm ci --omit=dev --ignore-scripts`, and is
-never run for you. Skip it and the rest of the tool is unaffected; `bt
-insights` is then exit 2 and names the command.
-
-## Architecture
-
-Five layers. Each upper layer consumes only the layer below it, and every
-curated tool calls the same CDP `send` path the raw passthrough uses -- so any
-method the installed browser supports works through `bt Domain.method` whether
-or not a verb exists for it.
-
-| Layer | Name | Contents |
-|---|---|---|
-| 4 | Front | CLI verbs (the only surface), `bt guide`, the agent skill that points at it |
-| 3 | Policy | Named profiles and the profile root, fingerprint profiles, engine routing |
-| 2 | Native toolset | Curated tools as plain CDP consumers; profiling; window marking |
-| 1 | Core (vendored) | Registry, liveness, launcher, supervisor, attach, passthrough, live-schema help |
-| 0 | Browser | Chrome/Chromium over CDP; Camoufox for anti-detect paths |
-
-```
-cli.py                       CLI entry point (argparse, verb dispatch, exit codes)
-        |
-        +-- lifecycle.py             launch / status / stop / cleanup over the registry
-        |       +-- camoufox_runner.py   Camoufox host process (`launch --engine camoufox`)
-        |       +-- process_utils.py     Chrome process and port utilities
-        |
-        +-- endpoint.py              `--endpoint URL`: loopback check, refusals
-        |       +-- chrome_discovery.py  `--chrome-profile DIR`: read DevToolsActivePort
-        |       +-- external_connection.py Bounded external connections, approval handshake
-        |       +-- devtools_http.py     DevTools HTTP reads, to the validated address only
-        |
-        +-- passthrough.py           Raw `Domain.method` send + the focus guard
-        +-- curated.py               The curated verbs over one short-lived CDP handler
-        |       +-- curated_runtime.py   eval / press / hover / type / wait-text / network-get
-        |       +-- dialog_policy.py     The invocation's fixed answer to every dialog
-        |
-        +-- captures.py              Bounded captures: `trace` and `heap`
-        +-- insights.py              `insights --setup` and offline trace analysis
-        +-- extras.py                Optional-dependency gating
-        +-- step_run.py              A Step Run: one invocation, one session, many steps
-        |       +-- step_list.py         Read a Step List; refuse a bad one before step 1
-        |
-        +-- one_shot.py              Connect, resolve a page target, attach, detach
-        |       +-- attached_session.py  The handler's client over an attached session
-        |
-        +-- events.py                attach / wait / console-list / network-list
-        +-- list_verbs.py            frames / storage
-        +-- usage.py                 The one exception that means exit 2
-        +-- user_settings.py         The persistent settings file (window border)
-        |
-        +-- core/                    Vendored chrome-agent core (RFC-01; see NOTICE)
-        |       +-- registry.py          Named instances, liveness, retirement
-        |       +-- launcher.py          Chrome launch (windowless, background first window)
-        |       +-- supervisor.py        Per-instance window marking and retirement
-        |       +-- cdp_client.py        CDP WebSocket client and target discovery
-        |       +-- attach.py            Isolated event subscriptions
-        |       +-- protocol.py          Live protocol schema for `help`
-        |       +-- fingerprint.py       Launch-flag fingerprint profiles
-        |
-        +-- cdp_handler.py           CDP tool implementations (snapshot, click, fill, ...)
-        |       +-- native_snapshot.py   Accessibility-tree snapshot and UID scheme
-        |       +-- native_interaction.py UID click / fill
-        |       +-- frame_manager.py     Frame tree management
-        |       +-- frame_sessions.py    One session per out-of-process frame
-        |       +-- interstitial.py      Challenge detection and the retry policy
-        |       +-- screencast.py        Screencast capture state machine
-        |       +-- screenshot_utils.py  Blank-frame detection
-        |       +-- tool_registry.py     Single source of truth for CDP tool routing
-        |       +-- mcp_response.py      Response envelope builders
-        |
-        +-- profiler.py              Standalone CPU profiler (`browser-tools-profiler`)
-```
-
-The CLI is the only surface. The optional MCP front and the persistent-session
-stack behind it were deleted in RFC-01 Phase 5; there is no daemon, no broker,
-and no listening socket.
-
-## Keeping login state across calls
-
-Login state lives in a browser profile directory and survives only while the
-same directory is reused. To keep a session logged in:
-
-- **Use a named profile**: `bt launch --profile <name>`. Named profiles persist
-  across restarts and are unaffected by headed/headless switches, viewport, or
-  which directory you invoke from.
-- A profile is held by at most one live instance. Launching into a profile
-  another instance holds fails naming the holder rather than opening a second
-  browser on the same profile directory. This is profile exclusivity, not a
-  limit on launches from one working directory: repeated unnamed launches from
-  one working directory succeed with numbered instance-name suffixes.
-- Without `--profile`, a launch gets a fresh ephemeral directory and starts
-  logged out.
-- `bt profile list` shows every profile with its path and its live holder, and
-  `bt profile delete NAME` removes one. Deleting a profile deletes its login
-  state; `cleanup` never removes a profile on age.
-
-Profiles live in durable storage: `$BROWSER_TOOLS_PROFILES_DIR`, else
-`$XDG_DATA_HOME/browser-tools/profiles`, else
-`~/.local/share/browser-tools/profiles`. They used to live under `/tmp`, where
-the operating system deleted every signed-in session at boot, silently. A
-profile still there is listed with `"legacy": true`; `bt profile migrate`
-moves them all across (`--dry-run` first, `--back` to reverse it), and
-`launch --profile NAME` brings that one forward by itself.
-- **Camoufox** persists login state only when you pass `--profile`; without it,
-  every launch starts logged out.
-
-## Development
+### Capture a page load or memory snapshot
 
 ```bash
-uv sync
-uv run ruff check src/ tests/
-uv run pytest
+cat > load.steps <<'STEPS'
+Page.navigate '{"url":"https://example.com"}'
+wait-idle
+STEPS
+bt trace --steps load.steps --out load.json
+bt heap --out page.heapsnapshot
 ```
 
-## License
+Open the trace in Chrome DevTools' Performance panel and the heap snapshot in its Memory panel. Optional `bt insights` analyzes traces locally, but needs [explicit setup and a compatible trace version](docs/reference.md#captures-and-optional-dependencies).
 
-MIT - see [LICENSE](LICENSE).
+### Launch Camoufox
+
+```bash
+uv tool install --with-executables-from camoufox 'browser-tools[camoufox]'
+camoufox fetch
+bt launch --engine camoufox --profile camoufox-demo
+bt status
+bt stop
+```
+
+Camoufox is an optional anti-detect Firefox browser; `camoufox fetch` downloads it. Browser Tools manages its launch, profiles, status, and stop, but page-interaction and CDP commands require Chrome or Chromium.
+
+## Reference
+
+```text
+bt launch [--headless] [--profile NAME] [--name NAME] [--channel stable|beta|dev|canary]
+bt [INSTANCE] COMMAND [OPTIONS]
+bt [INSTANCE] Domain.method '{"key":"value"}'
+bt status [INSTANCE]
+bt stop [INSTANCE]
+bt guide
+```
+
+`launch` appends the first free two-digit suffix to its base name, such as `web-01`. Without `--name`, the base comes from the current directory. Repeated unnamed launches from one directory succeed with successive suffixes. Each launch prints the chosen name in its JSON result.
+
+A plain launch outlives the command until stopped. `--owner PID` opts into closing it when that process exits, and `bt retain INSTANCE` keeps it for a handoff.
+
+| Task | Commands |
+| --- | --- |
+| Inspect and interact | `snapshot`, `click`, `fill`, `eval`, `press`, `hover`, `type`, `detect` |
+| Wait for page changes | `wait-text`, `wait-idle`, `wait-stable` |
+| Observe browser activity | `attach`, `wait`, `console-list`, `network-list`, `network-get` |
+| Inspect frames and storage | `frames`, `storage get` |
+| Capture and profile | `screenshot`, `screencast`, `trace`, `heap`, `insights`, `browser-tools-profiler` |
+| Manage saved state | `profile list`, `profile delete`, `profile migrate`, `cleanup` |
+
+`bt guide` is the full installed manual, including raw CDP recipes, dialog policy, frame selection, and command output. `bt COMMAND --help` lists flags; `bt help Domain.method` reads the protocol signature from a running browser.
+
+See [the reference](docs/reference.md) for the full command inventory, configuration, external-browser setup, compatibility limits, and architecture. To drive a Chrome you started for debugging on its own user-data directory, use `--chrome-profile DIR` or `--endpoint URL`; your everyday Chrome profile is not attachable through this path.
+
+### Configuration
+
+Named profiles use `$BROWSER_TOOLS_PROFILES_DIR`, then `$XDG_DATA_HOME/browser-tools/profiles`, then `~/.local/share/browser-tools/profiles`. For example:
+
+```bash
+BROWSER_TOOLS_PROFILES_DIR="$HOME/.local/share/bt-profiles" bt launch --profile demo
+```
+
+`BROWSER_TOOLS_CHROME_BINARY` selects an explicit executable. Without an override, regular Chrome stable is auto-detected; `--channel` selects another installed channel. [Other settings](docs/reference.md#profiles-and-configuration) include the registry path and window border.
+
+### Output and exit codes
+
+Most commands print JSON to stdout. Help and the guide print text; `attach` streams JSON Lines. Diagnostics go to stderr. Check the exit code before parsing results, because a failed run or capture can still print partial output.
+
+| Code | Meaning |
+| --- | --- |
+| `0` | Success |
+| `1` | Operational failure, such as a closed browser, timeout, or stale UID |
+| `2` | Invalid or refused usage |
+
+### Security
+
+A debugging endpoint grants control of the browser and its cookies. Connect only to browsers you started or were authorized to use. External endpoints accept only `127.0.0.1` and `::1`; do not assume port 9222 belongs to your instance.
+
+`stop` and `cleanup` do not manage external browsers. `Browser.close` and `Browser.crash` are refused over external endpoints. `profile delete NAME` deletes that profile's saved login state. Report vulnerabilities through [SECURITY.md](SECURITY.md).
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and guidelines.
-All contributors are expected to follow the [Code of Conduct](CODE_OF_CONDUCT.md).
+```bash
+git clone https://github.com/dungle-scrubs/browser-tools.git
+cd browser-tools
+uv sync
+uv run ruff check src/ tests/
+uv run pyright src/
+uv run pytest tests/ -q
+```
 
-## Security
+Run the checkout's CLI with `uv run bt`, since a separately installed `bt` can be older. See [CONTRIBUTING.md](CONTRIBUTING.md) for development guidelines and the [Code of Conduct](CODE_OF_CONDUCT.md).
 
-Found a vulnerability? See [SECURITY.md](SECURITY.md) for responsible disclosure.
+## License
+
+MIT. See [LICENSE](LICENSE) and third-party attribution in [NOTICE](NOTICE).
