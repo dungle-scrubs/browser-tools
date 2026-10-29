@@ -15,9 +15,11 @@ from login_fixtures.py, imported explicitly; everything here is synthetic.
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import json
 import os
+import re
 from pathlib import Path
 
 import pytest
@@ -634,21 +636,86 @@ class TestFormSemantics:
             site.page = original
 
 
+def _helper_entry_calls(source: str) -> set[str]:
+    """Entry points the Python caller actually calls, derived from the AST.
+
+    Only evaluation-call string arguments count: entry points are called
+    as ``__btLogin.<name>(`` inside string literals (plain or the literal
+    parts of f-strings) passed as call arguments. Comments never parse and
+    docstrings are not call arguments, so a seeded mention of a dead
+    export in either cannot keep it alive (round-three B6).
+    """
+
+    def literal_strings(node: object) -> list[str]:
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return [node.value]
+        if isinstance(node, ast.JoinedStr):
+            return [
+                part.value
+                for part in node.values
+                if isinstance(part, ast.Constant) and isinstance(part.value, str)
+            ]
+        return []
+
+    uses: set[str] = set()
+    for node in ast.walk(ast.parse(source)):
+        if not (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "_eval_login_script"
+        ):
+            continue
+        arguments = [*node.args, *(keyword.value for keyword in node.keywords)]
+        for argument in arguments:
+            for text in literal_strings(argument):
+                uses.update(
+                    name for name in re.findall(r"__btLogin\.(\w+)\s*\(", text)
+                )
+    return uses
+
+
 class TestBridgeContract:
+    def test_a_seeded_comment_or_docstring_mention_is_not_a_use(self):
+        """The repeat guard reads actual call strings, never prose.
+
+        Seeding both a comment and a docstring mention of a dead entry
+        point into the caller's source must not count it as a use, nor
+        may a diagnostic string; only the evaluated ``begin`` call does.
+        """
+        from browser_tools import login as login_module
+
+        caller = Path(login_module.__file__).read_text(encoding="utf-8")
+        assert _helper_entry_calls(caller) == {"begin"}, (
+            "the caller's real entry-point calls changed; update this proof "
+            "and the rule table together"
+        )
+        seeded = caller.replace(
+            '"""',
+            '"""Seeded mention: __btLogin.probe(policy) is not a use.',
+            1,
+        ).replace(
+            "def _policy_json_for_page(",
+            "# __btLogin.probe(\ndef _policy_json_for_page(",
+            1,
+        )
+        seeded += '\nlogger.debug("__btLogin.probe(")\n'
+        assert _helper_entry_calls(seeded) == {"begin"}, (
+            "a seeded prose or diagnostic mention passed as a helper use"
+        )
+
     def test_helper_exports_match_the_python_caller(self, disposable):
         """One enforcing check for the repeat dead-export mistake.
 
         The helper's exported entry points must be exactly the entry points
-        the Python caller still uses (derived from login.py itself), so an
-        export left behind by a rewrite - like the obsolete success probe -
-        fails here, named, with the instruction to remove it.
+        the Python caller still uses (derived from login.py's own AST, so
+        only actual ``__btLogin.<name>(`` call strings count), so an export
+        left behind by a rewrite - like the obsolete success probe - fails
+        here, named, with the instruction to remove it.
         """
-        import re
-
         from browser_tools import login as login_module
 
         caller = Path(login_module.__file__).read_text(encoding="utf-8")
-        used = sorted(set(re.findall(r"__btLogin\.(\w+)", caller)))
+        used = sorted(_helper_entry_calls(caller))
         assert "begin" in used, "the Python caller must use the form entry point"
 
         async def exports_of_helper() -> list[str]:

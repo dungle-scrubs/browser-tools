@@ -296,11 +296,14 @@ def clean_stale_singleton_lock(user_data_dir: Path) -> None:
             continue
 
 
-def read_process_command(pid: int) -> str | None:
+def read_process_command(pid: int, timeout: float = 2.0) -> str | None:
     """Read the full command line of a running process via ``ps``.
 
     Args:
         pid: PID to inspect.
+        timeout: Bound on the ``ps`` call; callers inside an operation
+            deadline pass their remaining budget so the inspection cannot
+            outlive it.
 
     Returns:
         Command-line string, or None when the process is gone or unreadable.
@@ -310,7 +313,7 @@ def read_process_command(pid: int) -> str | None:
             ["ps", "-p", str(pid), "-o", "command="],
             capture_output=True,
             text=True,
-            timeout=2,
+            timeout=timeout,
         )
     except (subprocess.SubprocessError, OSError):
         return None
@@ -340,16 +343,17 @@ def find_chrome_debug_port(pid: int) -> int | None:
         return None
 
 
-def find_chrome_user_data_dir(pid: int) -> Path | None:
+def find_chrome_user_data_dir(pid: int, timeout: float = 2.0) -> Path | None:
     """Extract a Chrome process's --user-data-dir flag from its command line.
 
     Args:
         pid: PID of the Chrome process.
+        timeout: Bound passed through to the ``ps`` read.
 
     Returns:
         The configured user-data directory, or None when not present.
     """
-    cmd = read_process_command(pid)
+    cmd = read_process_command(pid, timeout=timeout)
     if cmd is None:
         return None
     match = _USER_DATA_DIR_PATTERN.search(cmd)
@@ -361,7 +365,9 @@ def find_chrome_user_data_dir(pid: int) -> Path | None:
         return None
 
 
-def pid_holds_user_data_dir(pid: int, user_data_dir: Path) -> bool:
+def pid_holds_user_data_dir(
+    pid: int, user_data_dir: Path, timeout: float = 2.0
+) -> bool:
     """Check whether a live PID is a Chrome holding the given profile dir.
 
     Guards against a recycled SingletonLock PID (now an unrelated process) or a
@@ -373,11 +379,12 @@ def pid_holds_user_data_dir(pid: int, user_data_dir: Path) -> bool:
     Args:
         pid: Process ID recorded in the profile's SingletonLock.
         user_data_dir: Profile directory the caller expects that PID to hold.
+        timeout: Bound passed through to the ``ps`` read.
 
     Returns:
         True only when ``pid``'s command line resolves to ``user_data_dir``.
     """
-    actual = find_chrome_user_data_dir(pid)
+    actual = find_chrome_user_data_dir(pid, timeout=timeout)
     if actual is None:
         return False
     try:
@@ -432,7 +439,7 @@ def read_listener_pids(port: int) -> list[int] | None:
     return pids
 
 
-def read_process_start_time(pid: int) -> str | None:
+def read_process_start_time(pid: int, timeout: float = 2.0) -> str | None:
     """Read a process's start time, used as an identity token across signals.
 
     A PID alone is not an identity: the kernel recycles it, so a PID that was
@@ -442,6 +449,8 @@ def read_process_start_time(pid: int) -> str | None:
 
     Args:
         pid: PID to inspect.
+        timeout: Bound on the ``ps`` call; callers inside an operation
+            deadline pass their remaining budget.
 
     Returns:
         The ``ps`` start-time string, or None when the process is gone or
@@ -452,7 +461,7 @@ def read_process_start_time(pid: int) -> str | None:
             ["ps", "-p", str(pid), "-o", "lstart="],
             capture_output=True,
             text=True,
-            timeout=2,
+            timeout=timeout,
         )
     except (subprocess.SubprocessError, OSError):
         return None
@@ -460,6 +469,35 @@ def read_process_start_time(pid: int) -> str | None:
         return None
     token = result.stdout.strip()
     return token or None
+
+
+def process_start_token(pid: int, timeout: float = 5.0) -> str | None:
+    """The core-style start-time identity token, on the caller's budget.
+
+    The registry records ``core.utils.process_start_time`` tokens (Linux:
+    field 22 of ``/proc/<pid>/stat``, the clock-tick count; elsewhere: the
+    ``ps -o lstart=`` string), and a recorded token must be compared against
+    the same kind - never a Linux tick count against a ``ps`` date. That
+    vendored reader fixes its own timeouts and cannot be edited, so this
+    narrow adapter reproduces its token exactly while bounding the ``ps``
+    fallback with the caller's timeout (the ``/proc`` read needs none).
+
+    Args:
+        pid: PID to inspect.
+        timeout: Bound on the ``ps`` fallback, defaulting to core's 5s.
+
+    Returns:
+        The start-time token, or None when undeterminable.
+    """
+    try:
+        with open(f"/proc/{pid}/stat") as f:
+            stat = f.read()
+        # Same parse as core: fields after the (comm) start at field 3;
+        # starttime is field 22, i.e. index 19 of the tail.
+        return stat.rsplit(")", 1)[1].split()[19]
+    except (OSError, IndexError):
+        pass
+    return read_process_start_time(pid, timeout=timeout)
 
 
 def is_process_alive(pid: int) -> bool:

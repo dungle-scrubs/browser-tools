@@ -1,8 +1,8 @@
 """Shared login contracts: fixed diagnostics, reason mapping, value types.
 
-The cohesive, behavior-free contracts both sides of the login operation
-agree on, extracted from :mod:`browser_tools.login` (repository module-size
-rule). Everything here is vocabulary and shape, not transaction behavior:
+Shared vocabulary, deadline rules and finalization policy for the login
+operation, extracted from :mod:`browser_tools.login` (repository module-size
+rule). Browser and provider calls remain in the transaction module:
 
 - :class:`LoginError` and the fixed diagnostic sentences (the JS helper's
   reason vocabulary and the session-acquisition mapping) - no browser- or
@@ -13,6 +13,12 @@ rule). Everything here is vocabulary and shape, not transaction behavior:
   :class:`Frame` (main-frame document identity), the value types the
   transaction passes around.
 - The per-command timeout cap and the default overall timeout.
+- The progress phases, stop causes and :class:`Progress` record the
+  transaction's body keeps, and :func:`diagnosis`, the one mapping from
+  (phase, cause, clear result) to the fixed diagnosis - the vocabulary
+  both the body and the finalization owner agree on, extracted from
+  login.py (module-size rule) without moving any browser-side behavior
+  here.
 
 The operation walkthrough this contract serves is The Manual's ``bt login``
 section (``bt guide``); the transaction itself lives in login.py.
@@ -123,6 +129,17 @@ class LoginError(LifecycleError):
         self.fields_may_remain = fields_may_remain
 
 
+class DeadlineExpiredError(LoginError):
+    """The one operation deadline expired (a cooperative phase check).
+
+    Internal to the login operation: the controller distinguishes "the
+    clock ran out" from a call that failed with its own fixed error, so a
+    timeout after a dispatched submission maps to the uncertain-submission
+    diagnostic instead of a confirmed failure. Not part of the module's
+    public vocabulary (``__all__``).
+    """
+
+
 def validate_timeout_ms(timeout_ms: object) -> None:
     """Refuse a timeout that is not a usable positive integer (exit 2).
 
@@ -170,7 +187,14 @@ def acquisition_message(exc: BaseException) -> str:
 
 
 class Deadline:
-    """The one overall deadline every phase draws from."""
+    """The one overall deadline every phase draws from.
+
+    The end time is immutable: a phase reads the remaining budget when it
+    starts and may never refresh the absolute end. ``command_timeout`` is
+    that read for one CDP command - each sequential call in a phase draws
+    its own allowance, so two chained calls can never jointly outlive the
+    operation.
+    """
 
     def __init__(self, timeout_ms: int) -> None:
         self._ends_at = time.monotonic() + timeout_ms / 1000.0
@@ -178,10 +202,11 @@ class Deadline:
     def remaining(self) -> float:
         return self._ends_at - time.monotonic()
 
-    def command_timeout(self, phase: str) -> float:
+    def command_timeout(self) -> float:
+        """One command's allowance: remaining time, capped per command."""
         remaining = self.remaining()
         if remaining <= 0:
-            raise LoginError(f"the login timed out during {phase}")
+            raise DeadlineExpiredError(TIMED_OUT)
         return min(PER_COMMAND_TIMEOUT_SECONDS, remaining)
 
 
@@ -199,6 +224,190 @@ class Frame:
         self.frame_id = frame_id
         self.loader_id = loader_id
 
+
+
+# --------------------------------------------------------------------------- #
+# Progress phases, stop causes, and the one finalization mapping
+# --------------------------------------------------------------------------- #
+
+
+class Phase:
+    """The mutually exclusive progress phases the body records.
+
+    In order: nothing inserted yet, the fill call dispatched, the fill
+    call returned, the submit call dispatched, the submit call returned,
+    and positive success observed. A dispatched phase means that call's
+    outcome is unknown (it never returned); a response phase means the
+    call returned, so its refusals are known facts rather than
+    uncertainties.
+    """
+
+    UNTOUCHED = "untouched"
+    FILL_DISPATCHED = "fill-dispatched"
+    FILL_RESPONSE = "fill-response"
+    SUBMIT_DISPATCHED = "submit-dispatched"
+    SUBMIT_RESPONSE = "submit-response"
+    OBSERVED_SUCCESS = "observed-success"
+
+
+class KnownFailure:
+    """The work learned its own fixed answer (a form or page refusal)."""
+
+    def __init__(self, error: LoginError) -> None:
+        self.error = error
+
+
+class UnknownFailure:
+    """A call failed while its outcome stayed unknown (transport/session)."""
+
+    def __init__(self, error: LoginError) -> None:
+        self.error = error
+
+
+class ExpiredCause:
+    """The one operation deadline ran out during normal work."""
+
+    def __init__(self, error: LoginError) -> None:
+        self.error = error
+
+
+class UnmetSuccess:
+    """The submission returned, but success was not met within the clock."""
+
+    def __init__(self, error: LoginError | None) -> None:
+        self.error = error
+
+
+class CancelledCause:
+    """External cancellation: propagates after confirmed clearing."""
+
+
+class SucceededCause:
+    """Positive success observed and accepted within the clock."""
+
+
+CANCELLED = CancelledCause()
+SUCCEEDED = SucceededCause()
+
+
+class Progress:
+    """What the transaction has done that finalization must answer for.
+
+    The body records the phase immediately before the calls that make
+    insertion possible (and back to untouched on a known pre-insert
+    refusal), so an exception -- including cancellation -- never loses the
+    insertion state. The document-bound form/frame is carried only from
+    fill-dispatched onward: the only phases where field values may exist.
+    The controller owns this object, appends the stop cause when normal
+    work ends, and reads both, on every exit, to run the one owed final
+    clear and select the fixed diagnosis its result picks.
+    """
+
+    def __init__(self) -> None:
+        self.phase = Phase.UNTOUCHED
+        self.stop: KnownFailure | UnknownFailure | ExpiredCause | UnmetSuccess | CancelledCause | SucceededCause | None = None
+        self.session_object: str | None = None
+        self.frame: Frame | None = None
+
+    def mark_fill_dispatched(self, session_object: str, frame: Frame) -> None:
+        self.phase = Phase.FILL_DISPATCHED
+        self.session_object = session_object
+        self.frame = frame
+
+    def mark_fill_response(self) -> None:
+        self.phase = Phase.FILL_RESPONSE
+
+    def mark_submit_dispatched(self) -> None:
+        self.phase = Phase.SUBMIT_DISPATCHED
+
+    def mark_submit_response(self) -> None:
+        self.phase = Phase.SUBMIT_RESPONSE
+
+    def mark_observed_success(self) -> None:
+        self.phase = Phase.OBSERVED_SUCCESS
+
+    def mark_untouched(self) -> None:
+        """A known pre-insert refusal: the document owes no clear."""
+        self.phase = Phase.UNTOUCHED
+        self.session_object = None
+        self.frame = None
+
+    def binding(self) -> tuple[str, Frame]:
+        """The bound form/frame, from fill-dispatched onward."""
+        assert self.session_object is not None and self.frame is not None
+        return self.session_object, self.frame
+
+    def stop_with(self, cause: KnownFailure | UnknownFailure | ExpiredCause
+                  | UnmetSuccess | CancelledCause | SucceededCause) -> None:
+        self.stop = cause
+
+
+def may_remain() -> LoginError:
+    """The sensitive-field warning, which outranks every other outcome."""
+    return LoginError(FIELDS_MAY_REMAIN, fields_may_remain=True)
+
+
+def diagnosis(progress: Progress, cleared: bool | None) -> LoginError | None:
+    """The one phase/cause-to-diagnosis mapping.
+
+    ``cleared`` is the final clear's result: True confirmed, False
+    uncertain on a live document (the may-remain warning outranks
+    everything), None replaced document (a clean clear: the values went
+    with the document). Returns None when there is nothing to report - an
+    authenticated success, or a cancellation that must propagate.
+    """
+    phase = progress.phase
+    cause = progress.stop
+    if phase == Phase.UNTOUCHED:
+        # Nothing was inserted: no clear is owed and each cause keeps its
+        # own fixed error; a cancellation propagates unchanged.
+        if cause is CANCELLED or not isinstance(
+            cause, (KnownFailure, UnknownFailure, ExpiredCause, UnmetSuccess)
+        ):
+            return None
+        return cause.error
+    if cause is CANCELLED:
+        if cleared is False:
+            return may_remain()
+        if cleared is None and phase == Phase.FILL_DISPATCHED:
+            return LoginError(PAGE_CHANGED_DURING_FILL)
+        if cleared is None and phase == Phase.SUBMIT_DISPATCHED:
+            return LoginError(PAGE_CHANGED_BEFORE_SUBMIT)
+        return None
+    if isinstance(cause, (UnknownFailure, ExpiredCause)) and phase in (
+        Phase.FILL_DISPATCHED, Phase.SUBMIT_DISPATCHED,
+    ):
+        # The call never returned (or the clock ran out mid-flight): the
+        # insertion/submission outcome is unknown, so the fixed
+        # uncertain-outcome sentences speak, never a confirmed failure.
+        if cleared is False:
+            return may_remain()
+        uncertain_fill = phase == Phase.FILL_DISPATCHED
+        if cleared is None:
+            return LoginError(
+                PAGE_CHANGED_DURING_FILL if uncertain_fill
+                else PAGE_CHANGED_BEFORE_SUBMIT
+            )
+        return LoginError(
+            FILL_UNCERTAIN_CLEARED if uncertain_fill
+            else SUBMIT_UNCERTAIN_CLEARED
+        )
+    if isinstance(cause, (KnownFailure, UnknownFailure, ExpiredCause)):
+        # A known refusal keeps its reason once the clear is confirmed; an
+        # unconfirmed clear adds the warning to it rather than replacing
+        # it. Elsewhere the fixed error itself is the diagnosis.
+        if cleared is False:
+            return LoginError(
+                f"{cause.error}. {FIELDS_MAY_REMAIN}", fields_may_remain=True
+            )
+        return cause.error
+    if isinstance(cause, UnmetSuccess):
+        if cleared is False:
+            return may_remain()
+        return cause.error if cause.error is not None else LoginError(SUCCESS_UNMET)
+    if cause is SUCCEEDED:
+        return may_remain() if cleared is False else None
+    return None
 
 __all__ = [
     "DEFAULT_LOGIN_TIMEOUT_MS",

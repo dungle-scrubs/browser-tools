@@ -907,26 +907,29 @@ APPROVED LOGINS (1PASSWORD)
       is omitted). The four selectors are CSS. Identity and alias names
       use letters, digits, underscores and hyphens, with no leading hyphen.
 
-      WHAT IT DOES, IN ORDER: it checks the policy, the instance (Chrome
-      only; a Camoufox instance is refused), positive ownership of that
-      instance, and opchain's relay support. Ownership is positive and
-      physical, not a label: the instance's registry row must record a
-      user-data directory and a process start-time identity, the recorded
-      process must still be running and hold that directory, and the
-      browser actually answering the debug port must report itself as that
-      process; anything missing, unknown or stale refuses before opchain
-      or the page is touched. A named profile is not required - any
-      existing bt Chrome instance qualifies. Then it opens
-      one session to the tab, requires the exact configured
-      origin and a visible tab, exactly one usable text/email username
-      input and one password input in one connected form, exactly one
-      enabled submit button in that form, and a same-origin POST action
-      (including the button's formaction/formmethod overrides); the
-      configured success selector must not already match. Only then are
-      the two values read through opchain's --value-fd relay into a private
-      pipe, typed with the page's own input events, submitted with the
-      form's own requestSubmit on the validated button, and cleared from
-      the fields. It then waits (within the same timeout) for the success
+      WHAT IT DOES, IN ORDER: it checks the policy and the instance
+      (Chrome only; a Camoufox instance is refused). Recorded ownership
+      comes first and is positive and physical, not a label: the
+      instance's registry row must record a usable debug port, a
+      user-data directory and a process start-time identity, and the
+      recorded process must still be running and hold that directory;
+      anything missing, unknown or stale refuses before opchain is asked
+      for anything. A named profile is not required - any existing bt
+      Chrome instance qualifies. Then opchain's relay support is probed
+      without reading any value, one session is opened to the tab on that
+      recorded port, and the browser actually answering the debug port
+      must report itself as the recorded process before any credential
+      field is read. Only then is the document itself validated: the
+      exact configured origin and a visible tab, exactly one usable
+      text/email username input and one password input in one connected
+      form, exactly one enabled submit button in that form, and a
+      same-origin POST action (including the button's
+      formaction/formmethod overrides); the configured success selector
+      must not already match. Only then are the two values read through
+      opchain's --value-fd relay into a private pipe, typed with the
+      page's own input events, submitted with the form's own
+      requestSubmit on the validated button, and cleared from the
+      fields. It then waits (within the same timeout) for the success
       selector at the configured origin: submitting alone never reports
       authenticated. Browser form validation can refuse submission.
 

@@ -75,6 +75,7 @@ def owner_snapshot() -> login_ownership.OwnershipSnapshot:
     """The explicitly verified owner every fake-CDP run stands on."""
     return login_ownership.OwnershipSnapshot(
         pid=OWNER_PID, pid_start=OWNER_START, user_data_dir=OWNER_DIR,
+        port=9500,
     )
 
 
@@ -232,12 +233,16 @@ def harness(monkeypatch, tmp_path, registry):
     # live module exercise the real checks.
     seen_entries: list[ExtendedInstance] = []
 
-    def verified_owner(entry: ExtendedInstance) -> login_ownership.OwnershipSnapshot:
+    def verified_owner(
+        entry: ExtendedInstance, deadline: object
+    ) -> login_ownership.OwnershipSnapshot:
         seen_entries.append(entry)
         return owner_snapshot()
 
     monkeypatch.setattr(login_ownership, "verify_recorded_owner", verified_owner)
-    monkeypatch.setattr(login_ownership, "_identity_holds", lambda snapshot: None)
+    monkeypatch.setattr(
+        login_ownership, "_identity_holds", lambda snapshot, deadline: None
+    )
 
     def fake_read(*, field, **kwargs):
         relay_reads.append(field)

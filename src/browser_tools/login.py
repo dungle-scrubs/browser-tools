@@ -33,7 +33,23 @@ from . import credential_relay, curated, lifecycle, login_ownership, login_polic
 from . import login_contract as contract
 from .core.errors import CDPError
 from .lifecycle import LifecycleError
-from .login_contract import DEFAULT_LOGIN_TIMEOUT_MS, LoginError, validate_timeout_ms
+from .login_contract import (
+    CANCELLED,
+    DEFAULT_LOGIN_TIMEOUT_MS,
+    SUCCEEDED,
+    CancelledCause,
+    ExpiredCause,
+    KnownFailure,
+    LoginError,
+    Phase,
+    Progress,
+    SucceededCause,
+    UnknownFailure,
+    UnmetSuccess,
+    diagnosis,
+    may_remain,
+    validate_timeout_ms,
+)
 from .login_guards import DialogGuard, quiet_websocket_logs
 from .one_shot import one_shot_page_session
 
@@ -96,8 +112,13 @@ def _login_script_source() -> str:
 
 async def _send(cdp: Any, session_id: str, method: str, params: dict[str, Any],
                 phase: str, deadline: contract.Deadline) -> Any:
-    """One bounded CDP send whose failures become fixed diagnostics."""
-    timeout = deadline.command_timeout(phase)
+    """One bounded CDP send whose failures become fixed diagnostics.
+
+    The allowance is drawn when the call starts - remaining time, capped
+    per command - so sequential calls each get their own budget and can
+    never jointly outlive the one operation deadline.
+    """
+    timeout = deadline.command_timeout()
     try:
         result = await cdp.send(method=method, params=params, session_id=session_id, timeout=timeout)
     except Exception:
@@ -240,7 +261,9 @@ async def _read_credentials(binary: str, policy: login_policy.LoginPolicy,
     def read(field: str) -> str:
         remaining = deadline.remaining()
         if remaining <= 0:
-            raise LoginError("the login timed out waiting for the credential relay")
+            raise contract.DeadlineExpiredError(
+                "the login timed out waiting for the credential relay"
+            )
         return credential_relay.read_reference(
             binary=binary,
             identity=policy.identity,
@@ -270,85 +293,6 @@ async def _read_credentials(binary: str, policy: login_policy.LoginPolicy,
     return username, password
 
 
-class _LoginMarker(LoginError):
-    """A body failure whose final diagnosis the controller must complete.
-
-    The body raises these where the outcome depends on the bounded cleanup
-    that runs outside the work wall; the controller replaces them with the
-    precise fixed diagnostic once the clear's own result is known.
-    """
-
-
-class _FillFailed(_LoginMarker):
-    """The fill call failed; whether it inserted anything is unknown."""
-
-    def __init__(self) -> None:
-        # A placeholder that never surfaces: the controller replaces it with
-        # the precise diagnosis once the final clear's result is known.
-        super().__init__("the form fill could not be confirmed")
-
-
-class _SubmitFailed(_LoginMarker):
-    """The submit call failed; whether it submitted anything is unknown."""
-
-    def __init__(self) -> None:
-        super().__init__("the form submission could not be confirmed")
-
-
-class _State:
-    """Base of the mutually exclusive progress variants."""
-
-
-class _Untouched(_State):
-    """Nothing was inserted: no clear is owed on any exit.
-
-    This is also the state the body returns to when the page refuses the
-    fill before insertion began, so a known pre-insert refusal owes no
-    cleanup either.
-    """
-
-
-class _MayHoldValues(_State):
-    """Base of the variants where field values may exist."""
-
-    def __init__(self, session_object: str, frame: contract.Frame) -> None:
-        self.session_object = session_object
-        self.frame = frame
-
-
-class _FillDispatched(_MayHoldValues):
-    """The fill call was dispatched; insertion may have started."""
-
-
-class _Filled(_MayHoldValues):
-    """Both values were inserted and revalidated."""
-
-
-class _SubmitDispatched(_MayHoldValues):
-    """The submit call was dispatched; its outcome is unknown."""
-
-
-class _Submitted(_MayHoldValues):
-    """The submission request returned successfully."""
-
-
-class _Progress:
-    """What the transaction has done that finalization must answer for.
-
-    The body marks this object immediately before the field and submit
-    calls (and back to untouched on a known pre-insert refusal), so that an
-    exception -- including cancellation -- never loses the insertion state.
-    The controller owns the object and reads it after the work wall, on
-    every exit, to decide whether a bounded final clear is owed.
-    """
-
-    def __init__(self) -> None:
-        self.state: _State = _Untouched()
-
-    def mark(self, state: _State) -> None:
-        self.state = state
-
-
 async def _login_transaction(port: int | ResolvedEndpoint, target_spec: str | None, target_by: str | None,
                              policy: login_policy.LoginPolicy,
                              account: login_policy.AccountSpec,
@@ -358,15 +302,15 @@ async def _login_transaction(port: int | ResolvedEndpoint, target_spec: str | No
 
     The deadline was created before the capability probe and is never reset,
     so the documented timeout covers session attach too (a registry session
-    has no per-command open bound of its own). The operation wall covers
-    session acquisition only; everything after attach owns its own budget:
-    :func:`_transaction_on_session` wraps its active work in a wall of the
-    remaining budget, runs all field finalization and dialog shutdown
-    outside that wall, and the session teardown below runs in its own
-    bounded grace, so a stalled detach cannot replace the body's diagnosis:
-    a fields-may-remain warning outranks a timeout. The inner wall cancels
-    at the deadline only after the cooperative phase checks have already
-    reported their precise fixed messages.
+    has no per-command open bound of its own). The acquisition wall covers
+    session acquisition only; everything after attach draws from the same
+    immutable clock: :func:`_transaction_on_session` wraps its normal work
+    in walls ending at that one absolute deadline, runs all field
+    finalization and dialog shutdown outside them, and the session teardown
+    below runs in its own bounded grace, so a stalled detach cannot replace
+    the body's diagnosis: a fields-may-remain warning outranks a timeout.
+    The inner walls cancel at the deadline only after the cooperative phase
+    checks have already reported their precise fixed messages.
     """
     if deadline.remaining() <= 0:
         raise LoginError(contract.TIMED_OUT)
@@ -419,86 +363,80 @@ async def _transaction_on_session(cdp: Any, session_id: str, ownership: Ownershi
                                   policy: login_policy.LoginPolicy,
                                   account: login_policy.AccountSpec, binary: str,
                                   deadline: contract.Deadline) -> None:
-    """Own the active work, then every field finalization, outside its wall.
+    """Own normal work and finalization under the one clock.
 
-    The work wall bounds the active phase only (dialog enable, validation,
-    credential reads, fill, submission request) and fires just past the
-    cooperative deadline. Field finalization and dialog shutdown run
-    outside that wall on budgets separate from it and from each other: the
+    Normal work -- owner verification, validation, credential reads,
+    fill, submission, the complete success wait and acceptance of a
+    positive result -- all draws from the one immutable deadline: every
+    call takes its allowance when it starts, both walls end at that same
+    absolute end (plus the cushion), and no positive result is accepted
+    after it. Field finalization and dialog shutdown run outside the
+    walls on budgets separate from the clock and from each other: the
     2-second field-clear bound, the guard's own settle bound, and the
     session-close grace owned by the transaction below. A page that
-    restores values after a confirmed clear is why the final clear runs on
-    every exit where insertion was possible.
+    restores values after a confirmed clear is why the final clear runs
+    on every exit where insertion was possible.
     """
-    await login_ownership.verify_connected_browser(
-        cdp, ownership, deadline.command_timeout("owner verification")
-    )
+    await login_ownership.verify_connected_browser(cdp, ownership, deadline)
     frame = await _read_frame(cdp, session_id, deadline)
     dialogs = DialogGuard(cdp, session_id)
     dialogs.start()
     failure: LoginError | None = None
     try:
-        progress = _Progress()
-        submitted = False
+        progress = Progress()
         try:
             async with asyncio.timeout(deadline.remaining() + _WALL_CUSHION_SECONDS):
                 await _send(cdp, session_id, "Page.enable", {}, "dialog handling", deadline)
                 await _transaction_body(
                     cdp, session_id, frame, policy, account, binary, deadline, progress
                 )
-            submitted = True
+            # The submit call returned ok: confirm the helper's synchronous
+            # clear on the finalization budget, then wait for success under
+            # the same immutable clock.
+            session_object, bound_frame = progress.binding()
+            cleared = await _try_clear(cdp, session_id, session_object, bound_frame)
+            if cleared is False:
+                failure = may_remain()
+            else:
+                unmet = await _await_success(
+                    cdp, session_id, frame, account, deadline, progress
+                )
+                failure = await _finalize(
+                    cdp, session_id, progress,
+                    SUCCEEDED if unmet is None else UnmetSuccess(unmet),
+                )
         except asyncio.CancelledError:
-            # Ordinary external cancellation: cleanup first, then propagate,
-            # unless the clear could not be confirmed - the sensitive-field
-            # warning outranks the cancellation.
-            final = await _finalize_after_cancellation(cdp, session_id, progress)
+            # Ordinary external cancellation: cleanup first, then
+            # propagate, unless the clear could not be confirmed - the
+            # sensitive-field warning outranks the cancellation.
+            final = await _finalize(cdp, session_id, progress, CANCELLED)
             if final is not None:
                 failure = final
             else:
                 raise
+        except contract.DeadlineExpiredError as expired:
+            failure = await _finalize(cdp, session_id, progress, ExpiredCause(expired))
         except LoginError as error:
-            failure = await _finalize_failure(cdp, session_id, progress, error)
+            if progress.stop is None:
+                progress.stop_with(UnknownFailure(error))
+            failure = await _finalize(cdp, session_id, progress)
         except TimeoutError:
-            failure = await _finalize_failure(
-                cdp, session_id, progress, LoginError(contract.TIMED_OUT)
-            )
+            # A wall fired while normal work was in flight. The body wall
+            # means the operation clock ran out; if the body had already
+            # returned (phase at submit-response), it was the wait's wall,
+            # and the success condition was simply not met in time.
+            if progress.phase == Phase.SUBMIT_RESPONSE and progress.stop is None:
+                failure = await _finalize(cdp, session_id, progress, UnmetSuccess(None))
+            else:
+                failure = await _finalize(
+                    cdp, session_id, progress, ExpiredCause(LoginError(contract.TIMED_OUT))
+                )
         except BaseException:
             # Relay and transport failures keep their own fixed text; only
             # the owed clear runs here, and its outcome cannot replace what
             # already has a diagnosis of its own.
-            await _finalize_failure(cdp, session_id, progress, None)
+            await _finalize(cdp, session_id, progress, clear_only=True)
             raise
-        if submitted:
-            state = progress.state
-            if isinstance(state, _MayHoldValues):
-                cleared = await _try_clear(cdp, session_id, state.session_object, state.frame)
-                if cleared is False:
-                    failure = LoginError(contract.FIELDS_MAY_REMAIN, fields_may_remain=True)
-                else:
-                    try:
-                        await _wait_for_success(cdp, session_id, frame, account, deadline)
-                    except LoginError as unmet:
-                        cleared = await _try_clear(
-                            cdp, session_id, state.session_object, state.frame
-                        )
-                        failure = (
-                            LoginError(contract.FIELDS_MAY_REMAIN, fields_may_remain=True)
-                            if cleared is False else unmet
-                        )
-                    except asyncio.CancelledError:
-                        cleared = await _try_clear(
-                            cdp, session_id, state.session_object, state.frame
-                        )
-                        if cleared is False:
-                            failure = LoginError(contract.FIELDS_MAY_REMAIN, fields_may_remain=True)
-                        else:
-                            raise
-                    else:
-                        cleared = await _try_clear(
-                            cdp, session_id, state.session_object, state.frame
-                        )
-                        if cleared is False:
-                            failure = LoginError(contract.FIELDS_MAY_REMAIN, fields_may_remain=True)
     finally:
         try:
             await dialogs.close()
@@ -512,12 +450,13 @@ async def _transaction_on_session(cdp: Any, session_id: str, ownership: Ownershi
 async def _transaction_body(cdp: Any, session_id: str, frame: contract.Frame,
                             policy: login_policy.LoginPolicy,
                             account: login_policy.AccountSpec, binary: str,
-                            deadline: contract.Deadline, progress: _Progress) -> None:
-    """Validate, read, fill and request submission, marking ``progress``.
+                            deadline: contract.Deadline, progress: Progress) -> None:
+    """Validate, read, fill and request submission, recording ``progress``.
 
     Cleanup and success polling are the controller's: this body only marks
-    what it has done, immediately before the calls that make insertion
-    possible, so the controller can answer for the fields on every exit.
+    the phase, immediately before the calls that make insertion possible,
+    and the stop cause where the work learns its own fixed answer, so the
+    controller can answer for the fields on every exit.
     """
     policy_json = _policy_json_for_page(account)
 
@@ -538,104 +477,96 @@ async def _transaction_body(cdp: Any, session_id: str, frame: contract.Frame,
         "function () { return this.outcome; }", "form validation", deadline,
     )
     if outcome.get("ok") is not True:
-        raise LoginError(contract.reason_message(str(outcome.get("reason", ""))))
+        error = LoginError(contract.reason_message(str(outcome.get("reason", ""))))
+        progress.stop_with(KnownFailure(error))
+        raise error
 
     # -- Credential reads, between validation and any insertion. -----------
     username, password = await _read_credentials(binary, policy, account, deadline)
 
     # -- Revalidation in the bound world, then insertion. -------------------
     if await _loader_changed(cdp, session_id, frame, deadline):
-        raise LoginError(contract.PAGE_CHANGED_BEFORE_FILL)
-    progress.mark(_FillDispatched(session_object, frame))
-    try:
-        fill = await _call_on_session(
-            cdp, session_id, session_object,
-            "function (u, p) { return this.fill(u, p); }", "form fill", deadline,
-            arguments=[{"value": username}, {"value": password}],
-        )
-    except asyncio.CancelledError:
-        raise
-    except LoginError as failure:
-        raise _FillFailed() from failure
+        error = LoginError(contract.PAGE_CHANGED_BEFORE_FILL)
+        progress.stop_with(KnownFailure(error))
+        raise error
+    progress.mark_fill_dispatched(session_object, frame)
+    fill = await _call_on_session(
+        cdp, session_id, session_object,
+        "function (u, p) { return this.fill(u, p); }", "form fill", deadline,
+        arguments=[{"value": username}, {"value": password}],
+    )
+    progress.mark_fill_response()
     if fill.get("ok") is not True:
         message = contract.reason_message(str(fill.get("reason", "")))
         if fill.get("insertionStarted") is False:
             # The page refused before insertion began; the document is still
             # untouched and owes no clear.
-            progress.mark(_Untouched())
-            raise LoginError(message)
-        raise LoginError(message)
-    progress.mark(_Filled(session_object, frame))
+            progress.mark_untouched()
+        error = LoginError(message)
+        progress.stop_with(KnownFailure(error))
+        raise error
 
     # -- Submission on the validated form. The JS helper clears the fields
     # -- synchronously before returning; the controller confirms that clear
     # -- and polls for success, both outside the work wall.
-    progress.mark(_SubmitDispatched(session_object, frame))
-    try:
-        submitted = await _call_on_session(
-            cdp, session_id, session_object,
-            "function () { return this.submit(); }", "form submission", deadline,
-        )
-    except asyncio.CancelledError:
-        raise
-    except LoginError as failure:
-        raise _SubmitFailed() from failure
+    progress.mark_submit_dispatched()
+    submitted = await _call_on_session(
+        cdp, session_id, session_object,
+        "function () { return this.submit(); }", "form submission", deadline,
+    )
+    progress.mark_submit_response()
     if submitted.get("ok") is not True:
-        raise LoginError(contract.reason_message(str(submitted.get("reason", ""))))
-    progress.mark(_Submitted(session_object, frame))
+        error = LoginError(contract.reason_message(str(submitted.get("reason", ""))))
+        progress.stop_with(KnownFailure(error))
+        raise error
 
 
-async def _finalize_failure(cdp: Any, session_id: str, progress: _Progress,
-                            failure: LoginError | None) -> LoginError | None:
-    """Run the owed final clear; return the diagnosis to report.
+async def _finalize(cdp: Any, session_id: str, progress: Progress,
+                    cause: KnownFailure | UnknownFailure | ExpiredCause | UnmetSuccess
+                    | CancelledCause | SucceededCause | None = None, *,
+                    clear_only: bool = False) -> LoginError | None:
+    """Run the one owed final clear; return the diagnosis to report.
 
-    Nothing was inserted (validation refusal, pre-insert refusal, a relay
-    or loader failure before the fill) owes no clear and keeps its own
-    diagnosis. Every other failure runs one bounded clear and maps to the
-    precise fixed diagnostic its result selects, preserving the distinctions
-    between a replaced document, a confirmed clear, and uncertainty.
+    The single owner of final clearing. Nothing inserted (validation
+    refusal, pre-insert refusal, a relay or loader failure before the
+    fill) owes no clear and keeps its own diagnosis; every other exit
+    runs exactly one bounded clear - on the 2-second finalization budget
+    inside :func:`_try_clear`, never the work deadline - and the one
+    mapping above selects the resulting fixed diagnosis.
+    ``clear_only`` is the path for exceptions with their own diagnosis
+    (relay and transport failures whose text is already fixed): the owed
+    clear still runs, and nothing here replaces what is propagating.
     """
-    state = progress.state
-    if not isinstance(state, _MayHoldValues):
-        return failure
-    cleared = await _try_clear(cdp, session_id, state.session_object, state.frame)
-    if failure is None:
+    if cause is not None:
+        progress.stop_with(cause)
+    if progress.phase == Phase.UNTOUCHED:
+        return None if clear_only else diagnosis(progress, None)
+    session_object, frame = progress.binding()
+    cleared = await _try_clear(cdp, session_id, session_object, frame)
+    if clear_only:
         return None
-    if isinstance(failure, _FillFailed):
-        if cleared is None:
-            return LoginError(contract.PAGE_CHANGED_DURING_FILL)
-        if cleared:
-            return LoginError(contract.FILL_UNCERTAIN_CLEARED)
-        return LoginError(contract.FIELDS_MAY_REMAIN, fields_may_remain=True)
-    if isinstance(failure, _SubmitFailed):
-        if cleared is None:
-            return LoginError(contract.PAGE_CHANGED_BEFORE_SUBMIT)
-        if cleared:
-            return LoginError(contract.SUBMIT_UNCERTAIN_CLEARED)
-        return LoginError(contract.FIELDS_MAY_REMAIN, fields_may_remain=True)
-    if cleared is False:
-        return LoginError(f"{failure}. {contract.FIELDS_MAY_REMAIN}", fields_may_remain=True)
-    return failure
+    return diagnosis(progress, cleared)
 
 
-async def _finalize_after_cancellation(cdp: Any, session_id: str,
-                                       progress: _Progress) -> LoginError | None:
-    """The same finalization for an external cancellation.
+async def _await_success(cdp: Any, session_id: str, frame: contract.Frame,
+                         account: login_policy.AccountSpec,
+                         deadline: contract.Deadline,
+                         progress: Progress) -> LoginError | None:
+    """Wait for success under the clock; None when observed and accepted.
 
-    Returns None when the cancellation should propagate after cleanup; a
-    returned failure (an unconfirmed clear, or a document change whose
-    fixed diagnosis outranks the cancellation) replaces it.
+    The wall ends at the same immutable deadline as the body wall, so a
+    hung transport cannot extend the wait. Expiry inside the wait -
+    cooperative or wall - is the unmet success condition, never a
+    timeout of the operation and never an accepted late success.
     """
-    state = progress.state
-    if not isinstance(state, _MayHoldValues):
-        return None
-    cleared = await _try_clear(cdp, session_id, state.session_object, state.frame)
-    if cleared is False:
-        return LoginError(contract.FIELDS_MAY_REMAIN, fields_may_remain=True)
-    if isinstance(state, _FillDispatched) and cleared is None:
-        return LoginError(contract.PAGE_CHANGED_DURING_FILL)
-    if isinstance(state, _SubmitDispatched) and cleared is None:
-        return LoginError(contract.PAGE_CHANGED_BEFORE_SUBMIT)
+    try:
+        async with asyncio.timeout(deadline.remaining() + _WALL_CUSHION_SECONDS):
+            await _wait_for_success(cdp, session_id, frame, account, deadline)
+    except (contract.DeadlineExpiredError, TimeoutError):
+        return LoginError(contract.SUCCESS_UNMET)
+    except LoginError as wait_failure:
+        return wait_failure
+    progress.mark_observed_success()
     return None
 
 
@@ -691,17 +622,20 @@ async def _wait_for_success(cdp: Any, session_id: str, frame: contract.Frame,
     """Poll the configured success selector at the configured origin.
 
     Each poll creates one isolated world and evaluates the small probe in
-    it. The POST response can commit between those two calls, destroying
-    the fresh context; that is a transient not-yet (a connection loss is
-    not - it exits fixed immediately). The deadline still governs: a
-    probe that never lands reports the unmet success condition.
+    it, and each of those two calls draws its own allowance when it
+    starts - the evaluate's is recalculated after the world exists - so
+    chained calls that individually fit an old allowance can never
+    jointly outlive the deadline. After the evaluation returns, the
+    clock is checked before any positive result is accepted, so a
+    transport that ignores its supplied timeout cannot authenticate
+    late. The POST response can commit between those two calls,
+    destroying the fresh context; that is a transient not-yet (a
+    connection loss is not - it exits fixed immediately).
     """
     expression = _probe_expression(account)
     while True:
-        remaining = deadline.remaining()
-        if remaining <= 0:
+        if deadline.remaining() <= 0:
             raise LoginError(contract.SUCCESS_UNMET)
-        timeout = deadline.command_timeout("success check")
         try:
             world = await cdp.send(
                 method="Page.createIsolatedWorld",
@@ -710,7 +644,7 @@ async def _wait_for_success(cdp: Any, session_id: str, frame: contract.Frame,
                     "worldName": _LOGIN_WORLD,
                     "grantUniveralAccess": False,
                 },
-                session_id=session_id, timeout=timeout,
+                session_id=session_id, timeout=deadline.command_timeout(),
             )
             context_id = world.get("executionContextId")
             if not isinstance(context_id, int):
@@ -723,8 +657,10 @@ async def _wait_for_success(cdp: Any, session_id: str, frame: contract.Frame,
                     "returnByValue": True,
                     "awaitPromise": False,
                 },
-                session_id=session_id, timeout=timeout,
+                session_id=session_id, timeout=deadline.command_timeout(),
             )
+        except LoginError:
+            raise
         except CDPError as error:
             if error.code != -32000 or not error.message.startswith((
                 "Execution context was destroyed", "Cannot find context with specified id",
@@ -736,6 +672,11 @@ async def _wait_for_success(cdp: Any, session_id: str, frame: contract.Frame,
         except Exception:
             raise LoginError(contract.SESSION_FAILED.format(phase="success check")) from None
         else:
+            if deadline.remaining() <= 0:
+                # The clock ran out while the probe call was in flight (a
+                # transport may ignore its supplied timeout): no positive
+                # result is accepted after the deadline.
+                raise LoginError(contract.SUCCESS_UNMET)
             value = _outcome_of(result, "success check")
             if value.get("authenticated") is True and value.get("originOk") is True:
                 return
@@ -775,9 +716,13 @@ def login(*, instance: str | None, account: str, target: str | None = None,
         raise LifecycleError(contract.ENGINE_MESSAGE)
     # Positive ownership before anything else runs: the relay probe, the
     # session, and the reads all come after this. A registry row alone (or
-    # a live-looking port) is never enough to hand a credential to.
-    ownership = login_ownership.verify_recorded_owner(entry)
-    port = lifecycle.resolve_cdp_port(name, registry_path=registry_path)
+    # a live-looking port) is never enough to hand a credential to. The
+    # check validates and carries the row's recorded debug port: the login
+    # connects to exactly that port instead of re-running the generic
+    # liveness lookup, which can spend process time the deadline does not
+    # have and treats an unattributable listener as alive.
+    ownership = login_ownership.verify_recorded_owner(entry, deadline)
+    port = ownership.port
     binary = _ensure_relay_ready(policy, deadline)
 
     # One derivation of the --target grammar, shared with every other verb.

@@ -525,7 +525,10 @@ class TestRelayFailuresSurfaceFixed:
             harness.run()
 
     def test_relay_unsupported_fails_before_the_browser_opens(self, monkeypatch, tmp_path, registry):
-        monkeypatch.setattr(login_ownership, "verify_recorded_owner", lambda entry: owner_snapshot())
+        monkeypatch.setattr(
+            login_ownership, "verify_recorded_owner",
+            lambda entry, deadline: owner_snapshot(),
+        )
         monkeypatch.setattr(credential_relay, "find_opchain", lambda: "/fake/bin/opchain")
 
         def unsupported(*args, **kwargs):
@@ -657,7 +660,7 @@ class TestConnectedOwnerVerification:
     def test_identity_lost_between_reply_and_recheck_refuses(self, harness, monkeypatch):
         """The recorded process identity is re-proven after the reply lands."""
 
-        def lost(snapshot):
+        def lost(snapshot, deadline):
             raise login_ownership.OwnershipError(
                 "the recorded browser process is not running as the process "
                 "this tool launched; the registry row is stale"

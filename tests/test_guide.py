@@ -112,6 +112,58 @@ class TestApprovedLoginContract:
         assert f"default {DEFAULT_LOGIN_TIMEOUT_MS}" in flatten(login_section)
         assert "login" in verb_phrases(cli.build_parser())
 
+    def test_the_recorded_owner_contract_is_documented(self, login_section):
+        """The physical-ownership paragraph is load-bearing (round-three T9:
+        deleting it used to leave the guide proof green).
+
+        Scoped contract assertions, not a whole-file snapshot: the manual
+        must state the recorded evidence, the physical checks, that any
+        gap refuses before opchain is asked for anything, and that unnamed
+        instances qualify.
+        """
+        flat = flatten(login_section)
+        for phrase in (
+            "registry row must record a usable debug port",
+            "a user-data directory and a process start-time identity",
+            "must still be running and hold that directory",
+            "refuses before opchain is asked for anything",
+            "A named profile is not required",
+        ):
+            assert phrase in flat, (
+                "the approved-login manual must state the recorded-owner "
+                f"contract; missing: {phrase!r}"
+            )
+
+    def test_the_documented_order_matches_the_operation(self, login_section):
+        """The manual may not say the connected-browser check precedes the
+        capability probe or the page session (round-three T10).
+
+        Recorded ownership, then the no-value probe, then the page session,
+        then the connected-browser identity before any credential field is
+        read, then document validation, then the reads themselves.
+        """
+        flat = flatten(login_section)
+        steps = [
+            ("recorded ownership", "Recorded ownership comes first"),
+            ("capability probe", "relay support is probed"),
+            ("session attach", "one session is opened to the tab"),
+            ("connected identity", "report itself as the recorded process"),
+            ("document validation", "the exact configured origin"),
+            ("credential reads", "Only then are the two values read"),
+        ]
+        positions: dict[str, int] = {}
+        for name, marker in steps:
+            assert marker in flat, (
+                f"the approved-login order is missing its {name} step "
+                f"({marker!r})"
+            )
+            positions[name] = flat.index(marker)
+        in_order = [positions[name] for name, _ in steps]
+        assert in_order == sorted(in_order), (
+            "the documented order contradicts the operation: "
+            f"{positions}"
+        )
+
 
 class TestEveryVerbIsDocumented:
     def test_the_enumeration_comes_from_the_parser(self, phrases):

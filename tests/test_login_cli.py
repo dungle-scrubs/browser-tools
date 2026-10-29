@@ -86,9 +86,9 @@ def owned_instance(monkeypatch):
     """
     monkeypatch.setattr(
         login_module.login_ownership, "verify_recorded_owner",
-        lambda entry: login_ownership.OwnershipSnapshot(
+        lambda entry, deadline: login_ownership.OwnershipSnapshot(
             pid=2_000_000_000, pid_start="START",
-            user_data_dir="/recorded/session-dir",
+            user_data_dir="/recorded/session-dir", port=9500,
         ),
     )
 

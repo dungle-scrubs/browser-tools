@@ -301,11 +301,11 @@ def ensure_relay_supported(
             stderr=subprocess.PIPE,
             process_group=0,
         )
-    except FileNotFoundError as exc:
+    except FileNotFoundError:
         raise RelayMissingError(
             "opchain is not installed or not on PATH. bt login reads credentials "
             "only through opchain's --value-fd relay; install opchain and retry"
-        ) from exc
+        ) from None
     except OSError:
         # An executable-format-invalid binary (ENOEXEC), a permission failure,
         # a missing interpreter: every other spawn OSError is one operational
@@ -398,12 +398,12 @@ def read_reference(
                     pass_fds=(write_fd,),
                     process_group=0,
                 )
-            except FileNotFoundError as exc:
+            except FileNotFoundError:
                 raise RelayMissingError(
                     "opchain is not installed or not on PATH. bt login reads "
                     "credentials only through opchain's --value-fd relay; install "
                     "opchain and retry"
-                ) from exc
+                ) from None
             except OSError:
                 # Same normalization as the probe: a spawn failure other than
                 # a missing binary is one fixed operational fact, its OSError
