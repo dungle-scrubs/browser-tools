@@ -307,15 +307,10 @@ class TestOverallDeadlineWall:
         monkeypatch.setattr(login, "one_shot_page_session", hung)
         deadline = login._Deadline(300)
 
-        async def scenario() -> float:
-            started = time.monotonic()
-            await login._login_transaction(
-                9222, None, None, POLICY, ACCOUNT, "/fake/opchain", deadline
-            )
-            return time.monotonic() - started
-
         with pytest.raises(login.LoginError, match="timeout"):
-            asyncio.run(scenario())
+            asyncio.run(login._login_transaction(
+                9222, None, None, POLICY, ACCOUNT, "/fake/opchain", deadline
+            ))
 
     def test_the_probe_consumes_the_shared_deadline(self, monkeypatch, tmp_path):
         """Probe time counts against the total; the deadline never resets.

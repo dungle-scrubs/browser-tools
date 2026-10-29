@@ -878,7 +878,7 @@ APPROVED LOGINS (1PASSWORD)
       to the automation vault. Vault permissions enforce the credential
       set; aliases in this editable file do not enforce access control.
 
-      THE POLICY FILE names what may be logged in. It is JSON the operator
+      THE POLICY FILE lists the approved accounts. It is JSON the operator
       edits by hand at $XDG_CONFIG_HOME/browser-tools/logins.json
       (~/.config/browser-tools/logins.json by default); --config FILE
       overrides. Every field is required, unknown fields are refused, and a
