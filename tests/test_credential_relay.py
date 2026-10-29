@@ -14,7 +14,9 @@ byte-for-byte preservation including newlines.
 
 from __future__ import annotations
 
+import contextlib
 import os
+import signal
 import subprocess
 import sys
 import textwrap
@@ -52,13 +54,6 @@ def write_fake(bin_dir: Path, name: str, body: str) -> Path:
     return path
 
 
-def read_field_from_argv() -> str:
-    """The field of the op:// reference the caller passed, for fakes."""
-    argv = sys.argv
-    ref = argv[argv.index("op") + 2]  # "op", "read", "<ref>"
-    return ref.rsplit("/", 1)[-1]
-
-
 def good_relay_body(values: dict[str, str] | None = None) -> str:
     """A relay-capable fake: answers the probe, writes the field's value."""
     values = values or {
@@ -78,6 +73,8 @@ def good_relay_body(values: dict[str, str] | None = None) -> str:
         field = ref.rsplit("/", 1)[-1]
         values = {values!r}
         data = values.get(field, "SENTINEL-default").encode("utf-8")
+        os.write(1, data)
+        os.write(2, data)
         os.write(int(fd_text), data)
         sys.exit(0)
         """
@@ -89,6 +86,17 @@ def bin_dir(tmp_path) -> Path:
     path = tmp_path / "bin"
     path.mkdir()
     return path
+
+
+class TestReferenceBoundary:
+    @pytest.mark.parametrize("field", ["otp", "password/other", "SYNTHETIC-field"])
+    def test_only_username_and_password_are_read(self, bin_dir, field):
+        binary = write_fake(bin_dir, "opchain", good_relay_body())
+        with pytest.raises(RelayError, match="username and password") as error:
+            read_reference(
+                binary=str(binary), identity=IDENTITY, vault=VAULT, item=ITEM, field=field,
+            )
+        assert field not in str(error.value)
 
 
 class TestSuccessfulReads:
@@ -151,7 +159,7 @@ class TestSuccessfulReads:
 
 
 class TestFailedReads:
-    def test_nonzero_exit_discards_the_partial_value(self, bin_dir, capsys):
+    def test_nonzero_exit_discards_the_partial_value(self, bin_dir, capfd):
         binary = write_fake(
             bin_dir,
             "opchain",
@@ -172,10 +180,10 @@ class TestFailedReads:
             read_reference(
                 binary=binary, identity=IDENTITY, vault=VAULT, item=ITEM, field="username"
             )
-        captured = capsys.readouterr()
+        captured = capfd.readouterr()
         assert "SENTINEL" not in captured.out + captured.err
 
-    def test_a_nonzero_child_that_prints_the_value_cannot_leak_it(self, bin_dir, capsys):
+    def test_a_nonzero_child_that_prints_the_value_cannot_leak_it(self, bin_dir, capfd):
         """The child's own diagnostics never reach bt's output."""
         binary = write_fake(
             bin_dir,
@@ -199,7 +207,7 @@ class TestFailedReads:
                 binary=binary, identity=IDENTITY, vault=VAULT, item=ITEM, field="username"
             )
         assert "SENTINEL" not in str(excinfo.value)
-        captured = capsys.readouterr()
+        captured = capfd.readouterr()
         assert "SENTINEL" not in captured.out + captured.err
 
     def test_a_silent_nonzero_child_gets_the_plain_fixed_message(self, bin_dir):
@@ -221,7 +229,7 @@ class TestFailedReads:
                 binary=binary, identity=IDENTITY, vault=VAULT, item=ITEM, field="username"
             )
 
-    def test_overflow_discards_the_value(self, bin_dir, capsys):
+    def test_overflow_discards_the_value(self, bin_dir, capfd):
         # The child blocks writing more than the bound; the concurrent
         # bounded reader observes the overflow and the group is killed.
         binary = write_fake(
@@ -254,7 +262,7 @@ class TestFailedReads:
                 command_timeout=10.0,
             )
         assert time.monotonic() - start < 9
-        assert "SSSS" not in capsys.readouterr().out
+        assert "SSSS" not in capfd.readouterr().out
 
     def test_timeout_kills_the_child(self, bin_dir):
         binary = write_fake(
@@ -410,8 +418,10 @@ class TestFailedReads:
         secret = read_reference(
             binary=binary, identity=IDENTITY, vault=VAULT, item=ITEM, field="username"
         )
-        with pytest.raises(RelayError, match="UTF-8"):
+        with pytest.raises(RelayError, match="UTF-8") as error:
             secret.text()
+        assert error.value.__cause__ is None
+        assert error.value.__suppress_context__ is True
 
     def test_secret_repr_is_fixed_text(self, bin_dir):
         binary = write_fake(bin_dir, "opchain", good_relay_body())
@@ -505,6 +515,59 @@ class TestMissingAndUnsupportedBinaries:
         )
         with pytest.raises(RelayUnsupportedError):
             ensure_relay_supported(str(binary), IDENTITY, timeout=10.0)
+
+    def test_interrupting_a_live_probe_reaps_its_group(self, bin_dir, monkeypatch):
+        marker = bin_dir / "probe-pids"
+        binary = write_fake(
+            bin_dir, "opchain",
+            f"""
+            #!/usr/bin/env python3
+            import os, time
+            from pathlib import Path
+            child = os.fork()
+            if child == 0:
+                time.sleep(30)
+                os._exit(0)
+            Path({str(marker)!r}).write_text(f"{{os.getpid()}} {{child}}")
+            time.sleep(30)
+            """,
+        )
+        original_wait = subprocess.Popen.wait
+        processes = []
+
+        def interrupt_once(proc, timeout=None):
+            if not processes:
+                processes.append(proc)
+                ready_by = time.monotonic() + 5
+                while time.monotonic() < ready_by:
+                    if marker.exists() and len(marker.read_text().split()) == 2:
+                        break
+                    time.sleep(0.01)
+                else:
+                    pytest.fail("synthetic probe did not start its descendant")
+                assert proc.poll() is None
+                raise KeyboardInterrupt
+            return original_wait(proc, timeout=timeout)
+
+        monkeypatch.setattr(subprocess.Popen, "wait", interrupt_once)
+        try:
+            with pytest.raises(KeyboardInterrupt):
+                ensure_relay_supported(str(binary), IDENTITY, timeout=10.0)
+            assert processes[0].poll() is not None, "interrupted probe was not reaped"
+            gone_by = time.monotonic() + 5
+            while time.monotonic() < gone_by:
+                try:
+                    os.killpg(processes[0].pid, 0)
+                except ProcessLookupError:
+                    break
+                time.sleep(0.01)
+            else:
+                pytest.fail("interrupted probe left its process group alive")
+        finally:
+            for proc in processes:
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(proc.pid, signal.SIGKILL)
+                original_wait(proc, timeout=5)
 
     def test_a_hung_probe_is_bounded_and_its_group_torn_down(self, bin_dir):
         marker = bin_dir / "probe-pid"

@@ -128,11 +128,11 @@ class Secret:
         """The value as strict UTF-8 text; byte-for-byte, no trimming."""
         try:
             return self.data.decode("utf-8")
-        except UnicodeDecodeError as exc:
+        except UnicodeDecodeError:
             raise RelayError(
                 "the credential relay returned a value that is not valid UTF-8; "
                 "it was discarded"
-            ) from exc
+            ) from None
 
 
 def find_opchain() -> str | None:
@@ -308,22 +308,24 @@ def ensure_relay_supported(
         ) from exc
     try:
         deadline = time.monotonic() + timeout
-        while True:
-            try:
-                returncode = proc.wait(timeout=0.25)
-                break
-            except subprocess.TimeoutExpired:
-                if time.monotonic() >= deadline:
-                    _kill_group(proc)
-                    _reap(proc)
-                    raise RelayError(
-                        "the opchain relay probe did not answer in time"
-                    ) from None
-        # Group teardown even after an answer: the probe child may have
-        # descendants, and its stderr is read bounded afterwards.
-        _kill_group(proc)
-        _reap(proc)
-        stderr_text = _read_stderr_bounded(proc, timeout)
+        try:
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise RelayError("the opchain relay probe did not answer in time")
+                try:
+                    returncode = proc.wait(timeout=min(0.25, remaining))
+                    break
+                except subprocess.TimeoutExpired:
+                    continue
+        finally:
+            # Interrupts must kill descendants too, before reading stderr.
+            _kill_group(proc)
+            _reap(proc)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RelayError("the opchain relay probe did not answer in time")
+        stderr_text = _read_stderr_bounded(proc, remaining)
     finally:
         if proc.stderr is not None:
             with contextlib.suppress(OSError):
@@ -358,6 +360,8 @@ def read_reference(
     :class:`RelayError` with a fixed diagnostic. The child's own stderr is
     never read: it is untrusted text, and the failure message is fixed.
     """
+    if field not in ("username", "password"):
+        raise RelayError("the credential relay only reads username and password")
     reference = f"op://{vault}/{item}/{field}"
     if cancel is not None and cancel.is_set():
         raise RelayError(_CANCELLED_MESSAGE)

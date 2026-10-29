@@ -43,9 +43,11 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from . import credential_relay, lifecycle, login_policy
-from .core.errors import CDPError
+from . import credential_relay, curated, lifecycle, login_policy
+from .core.attach import AmbiguousTargetError, TargetNotFoundError
+from .core.errors import CDPError, NoPageError
 from .lifecycle import LifecycleError
+from .login_guards import DialogGuard, quiet_websocket_logs
 from .one_shot import one_shot_page_session
 
 if TYPE_CHECKING:
@@ -81,6 +83,7 @@ _LOGIN_WORLD = "browser-tools-login"
 
 _LOGIN_SCRIPT_PATH = Path(__file__).parent / "login_form.js"
 _login_script: str | None = None
+_relay_tasks: set[asyncio.Task[str]] = set()
 
 #: Fixed diagnostics. None of these interpolate browser or provider text.
 _ENGINE_MESSAGE = (
@@ -94,7 +97,7 @@ _FIELDS_MAY_REMAIN = (
 )
 _SESSION_FAILED = "the browser session failed during login ({phase})"
 _SUCCESS_UNMET = (
-    "the form was submitted but the configured success condition was not met "
+    "the form submission was requested but the configured success condition was not met "
     "within the timeout"
 )
 _PAGE_CHANGED_BEFORE_SUBMIT = (
@@ -104,6 +107,11 @@ _PAGE_CHANGED_BEFORE_SUBMIT = (
 _PAGE_CHANGED_BEFORE_FILL = (
     "the page changed after validation and before any value was inserted; "
     "nothing was sent to a replacement document"
+)
+_PAGE_CHANGED_DURING_FILL = (
+    "the page changed while the form was being filled; whether the values "
+    "were inserted could not be confirmed, but nothing was sent to a "
+    "replacement document and the form was not submitted"
 )
 _FILL_UNCERTAIN_CLEARED = (
     "the fill could not be confirmed; the configured fields were cleared and "
@@ -150,6 +158,7 @@ _REASONS: dict[str, str] = {
     ),
     "fill-failed": "the configured fields could not be filled",
     "submit-failed": "the form could not be submitted",
+    "form-invalid": "the form's validation rules prevented submission",
 }
 
 logger = logging.getLogger(__name__)
@@ -163,30 +172,50 @@ class LoginError(LifecycleError):
         self.fields_may_remain = fields_may_remain
 
 
-@contextlib.contextmanager
-def _quiet_websocket_logs():
-    """Keep websockets' frame logging from echoing value-bearing CDP messages.
+def validate_timeout_ms(timeout_ms: object) -> None:
+    """Refuse a timeout that is not a usable positive integer (exit 2).
 
-    websockets' sans-io protocol layer logs every frame at DEBUG (``"> %s"``),
-    and ``Runtime.callFunctionOn`` frames carry credential values as JSON
-    arguments. A process configured for DEBUG logging must not be able to
-    echo them mid-login, so every logger under ``websockets`` is forced above
-    DEBUG for the transaction and restored after.
+    One check, shared by the CLI preconditions and the direct entry point
+    so the two cannot drift. An ``int`` too large for its seconds
+    conversion to represent is refused here rather than crashing
+    ``math.isfinite``, which would convert it to float first and raise
+    OverflowError; no arbitrary maximum is imposed on ordinary values.
     """
-    root = logging.getLogger("websockets")
-    saved: list[tuple[logging.Logger, int]] = [(root, root.level)]
-    root.setLevel(logging.WARNING)
-    for name, obj in list(logging.root.manager.loggerDict.items()):
-        if name == "websockets" or not name.startswith("websockets."):
-            continue
-        if isinstance(obj, logging.Logger):
-            saved.append((obj, obj.level))
-            obj.setLevel(logging.WARNING)
+    if isinstance(timeout_ms, bool) or not isinstance(timeout_ms, int) or timeout_ms <= 0:
+        raise login_policy.LoginPolicyError(
+            "login --timeout-ms must be a finite positive integer"
+        )
     try:
-        yield
-    finally:
-        for saved_logger, level in saved:
-            saved_logger.setLevel(level)
+        seconds = timeout_ms / 1000.0
+    except OverflowError:
+        raise login_policy.LoginPolicyError(
+            "login --timeout-ms is too large to represent"
+        ) from None
+    if not math.isfinite(seconds):
+        raise login_policy.LoginPolicyError(
+            "login --timeout-ms is too large to represent"
+        ) from None
+
+
+def _acquisition_message(exc: BaseException) -> str:
+    """A fixed diagnostic for one session-entry failure.
+
+    The underlying errors carry every tab's URL and title, or arbitrary
+    protocol text - page-provided data the output channels never see. The
+    generic :func:`cli_cdp_errors` mapping is deliberately not used: it
+    forwards ``str(exc)`` verbatim.
+    """
+    if isinstance(exc, AmbiguousTargetError):
+        return "several tabs are open; choose one with --target"
+    if isinstance(exc, TargetNotFoundError):
+        return "the --target value matches no open tab; no page was selected"
+    if isinstance(exc, NoPageError):
+        return "the browser has no open page; open the login page and retry"
+    if isinstance(exc, ConnectionError):
+        return "could not connect to the browser; check that the instance is still running"
+    if isinstance(exc, CDPError):
+        return "the browser session could not be opened"
+    return "the browser session failed during login"
 
 
 class _Deadline:
@@ -237,21 +266,23 @@ async def _send(cdp: Any, session_id: str, method: str, params: dict[str, Any],
     """One bounded CDP send whose failures become fixed diagnostics."""
     timeout = deadline.command_timeout(phase)
     try:
-        return await cdp.send(method=method, params=params, session_id=session_id, timeout=timeout)
-    except (CDPError, ConnectionError, TimeoutError):
+        result = await cdp.send(method=method, params=params, session_id=session_id, timeout=timeout)
+    except Exception:
         logger.debug("login CDP send failed at %s", phase)
         raise LoginError(_SESSION_FAILED.format(phase=phase)) from None
+    if not isinstance(result, dict):
+        raise LoginError(_SESSION_FAILED.format(phase=phase))
+    return result
 
 
-def _outcome_of(result: dict[str, Any], phase: str) -> dict[str, Any]:
-    """Read a by-value Runtime result, refusing untrusted exception text."""
-    if result.get("exceptionDetails"):
-        logger.debug("login JS exception at %s (details suppressed)", phase)
+def _outcome_of(result: object, phase: str) -> dict[str, Any]:
+    """Parse a by-value Runtime result without exposing protocol contents."""
+    if not isinstance(result, dict) or result.get("exceptionDetails"):
         raise LoginError(_SESSION_FAILED.format(phase=phase))
-    value = result.get("result", {}).get("value")
-    if not isinstance(value, dict):
+    remote = result.get("result")
+    if not isinstance(remote, dict) or not isinstance(remote.get("value"), dict):
         raise LoginError(_SESSION_FAILED.format(phase=phase))
-    return value
+    return remote["value"]
 
 
 async def _eval_login_script(cdp: Any, session_id: str, frame_id: str, expression_tail: str,
@@ -315,10 +346,16 @@ class _Frame:
 
 async def _read_frame(cdp: Any, session_id: str, deadline: _Deadline) -> _Frame:
     tree = await _send(cdp, session_id, "Page.getFrameTree", {}, "frame lookup", deadline)
-    frame = ((tree or {}).get("frameTree") or {}).get("frame") or {}
+    frame_tree = tree.get("frameTree")
+    frame = frame_tree.get("frame") if isinstance(frame_tree, dict) else None
+    if not isinstance(frame, dict):
+        raise LoginError(_SESSION_FAILED.format(phase="frame lookup"))
     frame_id = frame.get("id")
-    loader_id = frame.get("loaderId", "")
-    if not isinstance(frame_id, str) or not frame_id:
+    loader_id = frame.get("loaderId")
+    if (
+        not isinstance(frame_id, str) or not frame_id
+        or not isinstance(loader_id, str) or not loader_id
+    ):
         raise LoginError(_SESSION_FAILED.format(phase="frame lookup"))
     return _Frame(frame_id, loader_id)
 
@@ -363,16 +400,17 @@ async def _read_credentials(binary: str, policy: login_policy.LoginPolicy,
                             deadline: _Deadline) -> tuple[str, str]:
     """Both fields through the private relay, inside the remaining budget.
 
-    Each blocking read runs in a worker thread this coroutine owns. The
-    ``asyncio.to_thread`` task is shielded, so cancelling this coroutine
-    cannot detach its handle; the cancellation crosses into the thread as a
-    :class:`threading.Event` that makes the provider kill and reap the
-    opchain group for real. Before letting ``CancelledError`` propagate,
-    the coroutine waits - bounded, and tolerant of a second cancellation -
-    for that cleanup to finish, and a value that arrived despite the
-    cancellation is never used.
+    An owned task runs each blocking read. asyncio.wait leaves that task
+    running when its caller is cancelled; a threading.Event asks the
+    provider to kill and reap its process group. Cleanup waits are bounded,
+    tolerate a second cancellation, and discard every late outcome.
     """
     cancel = threading.Event()
+
+    def discard_outcome(task: asyncio.Task[str]) -> None:
+        _relay_tasks.discard(task)
+        if not task.cancelled():
+            task.exception()
 
     def read(field: str) -> str:
         remaining = deadline.remaining()
@@ -390,18 +428,17 @@ async def _read_credentials(binary: str, policy: login_policy.LoginPolicy,
         ).text()
 
     async def read_field(field: str) -> str:
-        task = asyncio.ensure_future(asyncio.to_thread(read, field))
+        task = asyncio.create_task(asyncio.to_thread(read, field))
+        _relay_tasks.add(task)
+        task.add_done_callback(discard_outcome)
         try:
-            return await asyncio.shield(task)
+            await asyncio.wait({task})
         except asyncio.CancelledError:
             cancel.set()
-            # The worker thread finishes the group kill, reap, and reader
-            # teardown on its own bounds; a second cancellation cannot detach
-            # this wait, and the thread's outcome - value or error - is
-            # discarded, never used, because CancelledError is re-raised.
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await asyncio.wait_for(asyncio.shield(task), _RELAY_CANCEL_SETTLE_SECONDS)
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.wait({task}, timeout=_RELAY_CANCEL_SETTLE_SECONDS)
             raise
+        return task.result()
 
     username = await read_field(login_policy.USERNAME_FIELD)
     password = await read_field(login_policy.PASSWORD_FIELD)
@@ -416,27 +453,85 @@ async def _login_transaction(port: int | ResolvedEndpoint, target_spec: str | No
 
     The deadline was created before the capability probe and is never reset,
     so the documented timeout covers session attach too (a registry session
-    has no per-command open bound of its own). The inner scope cancels at
-    the deadline, after the cooperative phase checks have already reported
-    their precise fixed messages; the grace between the two scopes is the
-    bounded budget cancellation cleanup gets before the hard wall.
+    has no per-command open bound of its own). The body runs inside one
+    wall that fires just past the deadline; session teardown then runs in
+    its own bounded grace, outside that wall, so a stalled detach cannot
+    replace the body's diagnosis: a fields-may-remain warning outranks a
+    timeout. The inner scope cancels at the deadline only after the
+    cooperative phase checks have already reported their precise fixed
+    messages.
     """
     if deadline.remaining() <= 0:
         raise LoginError(_TIMED_OUT)
+    cm = one_shot_page_session(port, target_spec, target_by)
+    entered = False
+    body_failure: LoginError | None = None
+    propagating: BaseException | None = None
     try:
-        async with asyncio.timeout(deadline.remaining() + _CLEANUP_GRACE_SECONDS):
+        try:
             async with asyncio.timeout(deadline.remaining() + _WALL_CUSHION_SECONDS):
-                async with one_shot_page_session(port, target_spec, target_by) as (cdp, session_id):
-                    with _quiet_websocket_logs():
-                        await _transaction_on_session(cdp, session_id, policy, account, binary, deadline)
-    except TimeoutError:
-        raise LoginError(_TIMED_OUT) from None
+                cdp, session_id = await cm.__aenter__()  # pyright: ignore[reportAbstractUsage]
+                entered = True
+                await _transaction_on_session(
+                    cdp, session_id, policy, account, binary, deadline
+                )
+        except LoginError as failure:
+            body_failure = failure
+        except TimeoutError:
+            body_failure = LoginError(_TIMED_OUT)
+        except BaseException as exc:
+            propagating = exc
+            raise
+    finally:
+        # Teardown is bounded by the cleanup grace. An exception raised here
+        # would replace one already propagating, so teardown failures are
+        # contained: with a body failure or an in-flight exception they are
+        # dropped; with nothing else to report, a stalled teardown is
+        # itself the timeout it caused.
+        if entered:
+            try:
+                async with asyncio.timeout(_CLEANUP_GRACE_SECONDS):
+                    await cm.__aexit__(None, None, None)  # pyright: ignore[reportAbstractUsage]
+            except BaseException as failure:
+                if propagating is not None:
+                    pass
+                elif isinstance(failure, (asyncio.CancelledError, KeyboardInterrupt, SystemExit)):
+                    if body_failure is None or not body_failure.fields_may_remain:
+                        raise
+                elif body_failure is None:
+                    body_failure = LoginError(
+                        _TIMED_OUT if isinstance(failure, TimeoutError)
+                        else _SESSION_FAILED.format(phase="session cleanup")
+                    )
+    if body_failure is not None:
+        raise body_failure
 
 
 async def _transaction_on_session(cdp: Any, session_id: str, policy: login_policy.LoginPolicy,
                                   account: login_policy.AccountSpec, binary: str,
                                   deadline: _Deadline) -> None:
     frame = await _read_frame(cdp, session_id, deadline)
+    dialogs = DialogGuard(cdp, session_id)
+    dialogs.start()
+    body_failure: LoginError | None = None
+    try:
+        await _send(cdp, session_id, "Page.enable", {}, "dialog handling", deadline)
+        await _transaction_body(cdp, session_id, frame, policy, account, binary, deadline)
+    except LoginError as failure:
+        body_failure = failure
+        raise
+    finally:
+        try:
+            await dialogs.close()
+        except (Exception, asyncio.CancelledError):
+            if body_failure is None or not body_failure.fields_may_remain:
+                raise
+
+
+async def _transaction_body(cdp: Any, session_id: str, frame: _Frame,
+                            policy: login_policy.LoginPolicy,
+                            account: login_policy.AccountSpec, binary: str,
+                            deadline: _Deadline) -> None:
     policy_json = _policy_json_for_page(account)
 
     # -- Validation, in the document, before any credential is read. -------
@@ -469,7 +564,7 @@ async def _transaction_on_session(cdp: Any, session_id: str, policy: login_polic
     except (LoginError, asyncio.CancelledError) as failure:
         cleared = await _try_clear(cdp, session_id, session_object, frame)
         if cleared is None:
-            raise LoginError(_PAGE_CHANGED_BEFORE_FILL) from None
+            raise LoginError(_PAGE_CHANGED_DURING_FILL) from None
         if cleared:
             if isinstance(failure, asyncio.CancelledError):
                 raise
@@ -477,6 +572,8 @@ async def _transaction_on_session(cdp: Any, session_id: str, policy: login_polic
         raise LoginError(_FIELDS_MAY_REMAIN, fields_may_remain=True) from None
     if fill.get("ok") is not True:
         message = _reason_message(str(fill.get("reason", "")))
+        if fill.get("insertionStarted") is False:
+            raise LoginError(message)
         if fill.get("cleared") is not True:
             raise LoginError(message + ". " + _FIELDS_MAY_REMAIN, fields_may_remain=True)
         raise LoginError(message)
@@ -507,8 +604,14 @@ async def _transaction_on_session(cdp: Any, session_id: str, policy: login_polic
     if cleared is False:
         raise LoginError(_FIELDS_MAY_REMAIN, fields_may_remain=True)
 
-    # -- Wait for the configured success condition, same origin. -----------
-    await _wait_for_success(cdp, session_id, frame, policy_json, deadline)
+    # Framework state can restore fields after either a successful response
+    # or a failed one. Cleanup is owed on every exit, not only authentication.
+    try:
+        await _wait_for_success(cdp, session_id, frame, account, deadline)
+    finally:
+        cleared = await _try_clear(cdp, session_id, session_object, frame)
+        if cleared is False:
+            raise LoginError(_FIELDS_MAY_REMAIN, fields_may_remain=True)
 
 
 async def _try_clear(cdp: Any, session_id: str, session_object: str, frame: _Frame) -> bool | None:
@@ -536,21 +639,79 @@ async def _try_clear(cdp: Any, session_id: str, session_object: str, frame: _Fra
     return result.get("cleared") is True
 
 
+def _probe_expression(account: login_policy.AccountSpec) -> str:
+    """The tiny success probe: presence semantics, origin first.
+
+    A standalone expression, not the whole form helper: the poll runs often,
+    and only the configured origin and success selector are needed. Both
+    arrive from the validated policy, so no credential and no page text is
+    ever part of evaluated source.
+    """
+    return (
+        "(function(){try{"
+        "if(document.location.origin!=" + json.dumps(account.origin) + ")"
+        "return{authenticated:false,originOk:false};"
+        "return{authenticated:document.querySelector("
+        + json.dumps(account.success_selector) + ")!==null,originOk:true};"
+        "}catch(e){return{authenticated:false,originOk:false};}})()"
+    )
+
+
 async def _wait_for_success(cdp: Any, session_id: str, frame: _Frame,
-                            policy_json: str, deadline: _Deadline) -> None:
-    """Poll the configured success selector at the configured origin."""
+                            account: login_policy.AccountSpec,
+                            deadline: _Deadline) -> None:
+    """Poll the configured success selector at the configured origin.
+
+    Each poll creates one isolated world and evaluates the small probe in
+    it. The POST response can commit between those two calls, destroying
+    the fresh context; that is a transient not-yet (a connection loss is
+    not - it exits fixed immediately). The deadline still governs: a
+    probe that never lands reports the unmet success condition.
+    """
+    expression = _probe_expression(account)
     while True:
         remaining = deadline.remaining()
         if remaining <= 0:
             raise LoginError(_SUCCESS_UNMET)
-        probe = await _eval_login_script(
-            cdp, session_id, frame.frame_id, f"__btLogin.probe({policy_json})",
-            return_by_value=True, phase="success check", deadline=deadline,
-        )
-        value = _outcome_of(probe, "success check")
-        if value.get("authenticated") is True and value.get("originOk") is True:
-            return
-        await asyncio.sleep(min(SUCCESS_POLL_SECONDS, max(remaining, 0.0)))
+        timeout = deadline.command_timeout("success check")
+        try:
+            world = await cdp.send(
+                method="Page.createIsolatedWorld",
+                params={
+                    "frameId": frame.frame_id,
+                    "worldName": _LOGIN_WORLD,
+                    "grantUniveralAccess": False,
+                },
+                session_id=session_id, timeout=timeout,
+            )
+            context_id = world.get("executionContextId")
+            if not isinstance(context_id, int):
+                raise LoginError(_SESSION_FAILED.format(phase="success check"))
+            result = await cdp.send(
+                method="Runtime.evaluate",
+                params={
+                    "expression": expression,
+                    "contextId": context_id,
+                    "returnByValue": True,
+                    "awaitPromise": False,
+                },
+                session_id=session_id, timeout=timeout,
+            )
+        except CDPError as error:
+            if error.code != -32000 or not error.message.startswith((
+                "Execution context was destroyed", "Cannot find context with specified id",
+            )):
+                raise LoginError(_SESSION_FAILED.format(phase="success check")) from None
+            logger.debug("login success probe lost its context (continuing)")
+        except TimeoutError:
+            logger.debug("login success probe timed out (continuing)")
+        except Exception:
+            raise LoginError(_SESSION_FAILED.format(phase="success check")) from None
+        else:
+            value = _outcome_of(result, "success check")
+            if value.get("authenticated") is True and value.get("originOk") is True:
+                return
+        await asyncio.sleep(min(SUCCESS_POLL_SECONDS, max(deadline.remaining(), 0.0)))
 
 
 def login(*, instance: str | None, account: str, target: str | None = None,
@@ -561,17 +722,18 @@ def login(*, instance: str | None, account: str, target: str | None = None,
     Raises:
         login_policy.LoginPolicyError: Policy or invocation shape (exit 2).
         LifecycleError: Every operational failure, with a fixed diagnostic
-            (exit 1), including :class:`credential_relay.RelayError`.
+            (exit 1), including :class:`credential_relay.RelayError` and
+            every failure to open the page session (tab choice, target,
+            connection): their own messages carry browser text and are
+            replaced here, never forwarded.
     """
-    if not math.isfinite(timeout_ms) or timeout_ms <= 0:
-        raise login_policy.LoginPolicyError("login --timeout-ms must be a finite positive integer")
+    validate_timeout_ms(timeout_ms)
 
     # One overall deadline for the whole operation: capability probe, session
     # acquisition, credential reads, and the browser transaction all draw
     # from it, and it is never reset along the way.
     deadline = _Deadline(timeout_ms)
     policy, account_spec = login_policy.load_account(config, account)
-    binary = _ensure_relay_ready(policy, deadline)
 
     name = instance if instance is not None else lifecycle.resolve_single_instance(registry_path)
     entry = next(
@@ -584,13 +746,23 @@ def login(*, instance: str | None, account: str, target: str | None = None,
     if entry.engine != lifecycle.DEFAULT_ENGINE:
         raise LifecycleError(_ENGINE_MESSAGE)
     port = lifecycle.resolve_cdp_port(name, registry_path=registry_path)
+    binary = _ensure_relay_ready(policy, deadline)
 
-    target_by = ("index" if target.isdigit() else "id") if target is not None else None
+    # One derivation of the --target grammar, shared with every other verb.
+    target_spec, target_by = curated.target_selector(target, None)
 
-    asyncio.run(
-        _login_transaction(port, target, target_by, policy, account_spec, binary, deadline)
-    )
+    try:
+        with quiet_websocket_logs():
+            asyncio.run(
+                _login_transaction(port, target_spec, target_by, policy, account_spec, binary, deadline)
+            )
+    except LifecycleError:
+        raise
+    except Exception as exc:
+        # Transport libraries can include tab URLs, titles and protocol
+        # contents in errors; only fixed diagnostics cross this boundary.
+        raise LoginError(_acquisition_message(exc)) from None
     return {"account": account_spec.alias, "status": "authenticated"}
 
 
-__all__ = ["DEFAULT_LOGIN_TIMEOUT_MS", "LoginError", "login"]
+__all__ = ["DEFAULT_LOGIN_TIMEOUT_MS", "LoginError", "login", "validate_timeout_ms"]

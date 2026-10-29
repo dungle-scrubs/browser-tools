@@ -18,6 +18,7 @@ import contextlib
 import json
 import os
 import textwrap
+import threading
 import time
 from typing import TYPE_CHECKING
 
@@ -195,27 +196,103 @@ class TestLiveCancellation:
         _assert_groups_dead(pids)
 
     def test_a_second_cancellation_during_cleanup_cannot_break_it(
-        self, fake_relay, tmp_path
+        self, fake_relay, tmp_path, monkeypatch
     ):
         marker = tmp_path / "pids.log"
+        release_kill = threading.Event()
+        original_kill = login.credential_relay._kill_group
+
+        async def scenario() -> None:
+            loop = asyncio.get_running_loop()
+            cleanup_started = asyncio.Event()
+
+            def controlled_kill(proc):
+                loop.call_soon_threadsafe(cleanup_started.set)
+                assert release_kill.wait(5), "test did not release relay cleanup"
+                original_kill(proc)
+
+            monkeypatch.setattr(login.credential_relay, "_kill_group", controlled_kill)
+            task = asyncio.create_task(
+                login._read_credentials(str(fake_relay), POLICY, ACCOUNT, login._Deadline(30_000))
+            )
+            try:
+                pids = await _wait_for_pids(marker, count=1)
+                assert task.cancel()
+                await asyncio.wait_for(cleanup_started.wait(), 5)
+                for pid in pids:
+                    os.kill(pid, 0)  # Still alive when the second cancellation lands.
+                assert task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+            finally:
+                release_kill.set()
+            _assert_groups_dead(pids)
+            await asyncio.sleep(0)
+
+        asyncio.run(scenario())
+
+    def test_an_abandoned_settle_wait_consumes_the_late_outcome(
+        self, tmp_path, monkeypatch, capsys, caplog
+    ):
+        """A settle wait that gives up must not leave a stranded outcome.
+
+        The worker thread can finish after the bounded settle wait abandoned
+        it (a slow group kill, a busy machine). Whatever arrives then - here
+        a RelayError carrying the cancelled-read diagnostic - must be
+        consumed, never surfaced as an unretrieved-exception traceback by
+        the still-live event loop, and never used as a value.
+        """
+        import gc
+        import logging
+
+        marker = tmp_path / "pids.log"
+        binary = write_fake(
+            tmp_path,
+            "opchain",
+            sleeping_relay_body(marker=str(marker), hang_fields={"username"}),
+        )
+        # Abandon the settle wait almost immediately, so the thread's
+        # outcome lands after the await gave up on it.
+        monkeypatch.setattr(login, "_RELAY_CANCEL_SETTLE_SECONDS", 0.01)
+        release_kill = threading.Event()
+        original_kill = login.credential_relay._kill_group
+
+        def controlled_kill(proc):
+            assert release_kill.wait(5), "test did not release relay cleanup"
+            original_kill(proc)
+
+        monkeypatch.setattr(login.credential_relay, "_kill_group", controlled_kill)
 
         async def scenario() -> None:
             deadline = login._Deadline(30_000)
             task = asyncio.ensure_future(
-                login._read_credentials(str(fake_relay), POLICY, ACCOUNT, deadline)
+                login._read_credentials(str(binary), POLICY, ACCOUNT, deadline)
             )
             pids = await _wait_for_pids(marker, count=1)
-            task.cancel()
-            # Let the cleanup handler start, then hit it again mid-cleanup.
-            await asyncio.sleep(0.05)
-            task.cancel()
-            with pytest.raises(asyncio.CancelledError):
-                await task
+            try:
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+                for pid in pids:
+                    os.kill(pid, 0)  # The relay outcome cannot have arrived yet.
+            finally:
+                release_kill.set()
+            # The worker thread finishes after the abandon; let its outcome
+            # land inside the live loop, then force the futures through
+            # finalization while the loop can still report them.
+            await asyncio.sleep(0.5)
+            gc.collect()
+            await asyncio.sleep(0.1)
 
-        asyncio.run(scenario())
+        with caplog.at_level(logging.DEBUG, logger="asyncio"):
+            asyncio.run(scenario())
         pids = [int(line) for line in marker.read_text().splitlines()]
-        assert pids
         _assert_groups_dead(pids)
+        captured = capsys.readouterr()
+        noise = caplog.text + captured.out + captured.err
+        assert "never retrieved" not in noise
+        assert "RelayError" not in noise
+        assert "SENTINEL" not in noise
 
 
 class TestOverallDeadlineWall:

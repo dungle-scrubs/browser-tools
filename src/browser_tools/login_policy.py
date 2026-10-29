@@ -21,8 +21,7 @@ unrestricted agents.
 
 Error messages name the field that failed, never the value it held: a
 mis-typed selector or vault UUID is not printed into a terminal or log.
-Aliases are the one exception, because an alias is what the operator types on
-the command line and is the only way to say *which* account entry is broken.
+Untrusted keys and aliases are omitted from diagnostics as well.
 """
 
 from __future__ import annotations
@@ -50,7 +49,7 @@ _UUID_RE = re.compile(r"^[a-z2-7]{26}$")
 
 #: Identity and account aliases: ASCII letters, digits, underscores and
 #: hyphens, no leading hyphen, non-empty, bounded.
-_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
+_NAME_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_-]*$")
 
 #: The two field names this operation is allowed to read from the item.
 USERNAME_FIELD = "username"
@@ -106,17 +105,6 @@ class LoginPolicy:
         """The configured account for ``alias``, or None when not configured."""
         return self.accounts.get(alias)
 
-    def field_reference(self, account: AccountSpec, field: str) -> str:
-        """The exact ``op://VAULT/ITEM/FIELD`` reference for one credential.
-
-        The policy cannot choose another field, vault or item per invocation:
-        the reference is constructed here from the validated policy, never
-        assembled from caller input.
-        """
-        if field not in (USERNAME_FIELD, PASSWORD_FIELD):
-            raise LoginPolicyError("internal: unknown credential field")
-        return f"op://{self.vault}/{account.item}/{field}"
-
 
 def policy_path(config: str | None = None) -> Path:
     """The policy file path: ``--config`` override, else the XDG config dir.
@@ -146,7 +134,7 @@ def _no_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     seen: dict[str, Any] = {}
     for key, value in pairs:
         if key in seen:
-            _refuse(f"login config has a duplicate key: '{key}'")
+            _refuse("login config has a duplicate key")
         seen[key] = value
     return seen
 
@@ -175,82 +163,61 @@ def _require_selector(value: Any, field: str) -> str:
 
 
 def _canonical_origin(value: Any) -> str:
-    """Validate and canonicalize one configured origin.
-
-    Accepted: ``https://host`` or ``https://host:port`` with an explicit port,
-    where host is already lowercase ASCII (letters, digits, dots, hyphens).
-    Rejected: userinfo, any path except empty or ``/``, a query, a fragment,
-    wildcard hosts, opaque URLs, and every scheme other than https.
-
-    Canonical form keeps an explicit non-default port and drops ``:443``,
-    matching what ``location.origin`` reports in the browser, so the two sides
-    compare for exact equality with no per-invocation normalization.
-    """
+    """Parse an exact HTTPS origin, including bracketed IPv6 addresses."""
+    from ipaddress import IPv6Address
     from urllib.parse import urlsplit
 
     if not isinstance(value, str) or not value or len(value) > MAX_ORIGIN_CHARS:
         _refuse("login config field 'origin' must be an HTTPS origin string")
+    if any(ord(char) <= 32 for char in value) or "?" in value or "#" in value:
+        _refuse("login config field 'origin' must have no whitespace, query or fragment")
     try:
         parts = urlsplit(value)
+        host = parts.hostname
+        port = parts.port
     except ValueError:
         _refuse("login config field 'origin' is not a valid HTTPS origin")
-    if parts.scheme != "https" or not parts.netloc:
+    if parts.scheme != "https" or not host:
         _refuse("login config field 'origin' must be an https:// origin")
-    if parts.query or parts.fragment or parts.path not in ("", "/"):
-        _refuse(
-            "login config field 'origin' must be a bare origin: no path, query "
-            "or fragment"
-        )
-    netloc = parts.netloc
-    if "@" in netloc:
+    if parts.username is not None or parts.password is not None:
         _refuse("login config field 'origin' must not carry user info")
-    host, sep, port_text = netloc.rpartition(":")
-    if not sep:
-        host, port_text = netloc, ""
-    # An IPv6 literal contains ':' inside brackets; reject rather than guess a
-    # canonical text form for it.
-    if host.startswith("[") or ":" in host:
-        _refuse(
-            "login config field 'origin' must be a plain hostname or address, "
-            "not an IPv6 literal"
-        )
-    if not host or host != host.lower() or not re.match(r"^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$", host):
-        _refuse(
-            "login config field 'origin' host must be lowercase ASCII letters, "
-            "digits, dots and hyphens"
-        )
-    if ".." in host or ".-" in host or "-." in host:
-        _refuse("login config field 'origin' host has an empty or invalid label")
-    port: int | None = None
-    if port_text:
-        if not port_text.isdigit():
-            _refuse("login config field 'origin' port must be numeric")
-        port = int(port_text)
-        if not 1 <= port <= 65535:
-            _refuse("login config field 'origin' port is out of range")
-    if port is None or port == 443:
-        return f"https://{host}"
-    return f"https://{host}:{port}"
+    if parts.path not in ("", "/"):
+        _refuse("login config field 'origin' must have no path")
+    if ":" in host:
+        if "%" in host:
+            _refuse("login config field 'origin' must not contain an IPv6 zone")
+        try:
+            host = f"[{IPv6Address(host).compressed}]"
+        except ValueError:
+            _refuse("login config field 'origin' has an invalid IPv6 address")
+    else:
+        raw_host = parts.netloc.split(":", 1)[0]
+        if raw_host != host or not re.fullmatch(r"[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?", host):
+            _refuse("login config field 'origin' host must be lowercase ASCII")
+        if ".." in host or ".-" in host or "-." in host:
+            _refuse("login config field 'origin' host has an invalid label")
+    if port is not None and not 1 <= port <= 65535:
+        _refuse("login config field 'origin' port is out of range")
+    return f"https://{host}" if port is None or port == 443 else f"https://{host}:{port}"
 
 
 def _validate_account(alias: str, raw: Any) -> AccountSpec:
     if not isinstance(raw, dict):
-        _refuse(f"login config account '{alias}' must be an object")
+        _refuse("login config account must be an object")
     unknown = sorted(set(raw) - _ACCOUNT_FIELDS)
     if unknown:
         _refuse(
-            f"login config account '{alias}' has unknown field(s): {', '.join(unknown)}. "
-            "Unknown fields are refused to catch misspellings"
+            "login config account has an unknown field. Check the documented schema"
         )
     missing = sorted(_ACCOUNT_FIELDS - set(raw))
     if missing:
         _refuse(
-            f"login config account '{alias}' is missing field(s): {', '.join(missing)}"
+            f"login config account is missing field(s): {', '.join(missing)}"
         )
     item = raw["item"]
     if not isinstance(item, str) or not _UUID_RE.fullmatch(item):
         _refuse(
-            f"login config account '{alias}' field 'item' must be a 1Password item ID "
+            "login config account field 'item' must be a 1Password item ID "
             "(26 lowercase base32 characters)"
         )
     return AccountSpec(
@@ -292,15 +259,16 @@ def load_policy(path: Path) -> LoginPolicy:
         _refuse(f"login config at {path} is not valid UTF-8")
     try:
         document = json.loads(text, object_pairs_hook=_no_duplicate_keys)
-    except json.JSONDecodeError:
-        _refuse(f"login config at {path} is not valid JSON")
+    except LoginPolicyError:
+        raise
+    except (ValueError, RecursionError):
+        _refuse("login config is not valid JSON")
     if not isinstance(document, dict):
         _refuse(f"login config at {path} must be a JSON object")
     unknown = sorted(set(document) - _TOP_LEVEL_FIELDS)
     if unknown:
         _refuse(
-            f"login config has unknown field(s): {', '.join(unknown)}. "
-            "Unknown fields are refused to catch misspellings"
+            "login config has an unknown field. Check the documented schema"
         )
     missing = sorted(_TOP_LEVEL_FIELDS - set(document))
     if missing:
@@ -340,10 +308,7 @@ def load_account(config: str | None, alias: str) -> tuple[LoginPolicy, AccountSp
     policy = load_policy(policy_path(config))
     account = policy.account(alias)
     if account is None:
-        known = ", ".join(sorted(policy.accounts)) or "(none)"
-        raise LoginPolicyError(
-            f"no login account named '{alias}' is configured. Configured: {known}"
-        )
+        raise LoginPolicyError("no login account is configured for the requested alias")
     return policy, account
 
 

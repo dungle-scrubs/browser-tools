@@ -979,15 +979,10 @@ def check_preconditions(
             raise PassthroughUsageError(
                 "login requires --account ALIAS (an alias from the login config)"
             )
-        import math
-
-        timeout_ms = args.timeout_ms
-        if (
-            not isinstance(timeout_ms, int)
-            or not math.isfinite(timeout_ms)
-            or timeout_ms <= 0
-        ):
-            raise PassthroughUsageError("login --timeout-ms must be a finite positive integer")
+        # The same check the direct entry point runs, so the CLI and the
+        # library cannot drift (a huge int would otherwise overflow the
+        # float conversion inside math.isfinite).
+        login.validate_timeout_ms(args.timeout_ms)
 
     if command == "detect":
         curated.check_detect_wait(None if args.no_wait else args.wait)

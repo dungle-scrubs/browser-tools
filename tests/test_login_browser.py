@@ -26,7 +26,8 @@ import pytest
 from browser_tools import credential_relay
 from browser_tools import login as login_module
 from browser_tools.core import registry as core_registry
-from browser_tools.core.errors import CDPError
+from browser_tools.core.attach import AmbiguousTargetError, TargetNotFoundError
+from browser_tools.core.errors import CDPError, NoPageError
 from browser_tools.credential_relay import RelayError, Secret
 from browser_tools.lifecycle import LifecycleError
 
@@ -97,11 +98,25 @@ class FakeCDP:
         self.probe: dict = AUTHENTICATED_PROBE
         self.raise_on: dict[str, Exception] = {}
         self.exception_details_on: set[str] = set()
+        self._handlers: dict[str, list[Any]] = {}
+
+    def on(self, event, callback, session_id=None) -> None:
+        self._handlers.setdefault(event, []).append(callback)
+
+    def off(self, event, callback) -> None:
+        self._handlers[event] = [
+            cb for cb in self._handlers.get(event, []) if cb is not callback
+        ]
 
     def navigate(self) -> None:
         """Replace the document: new loader, dead world."""
         self.loader_id = "L2"
         self.world_dead = True
+
+    def emit(self, event: str, payload: dict) -> None:
+        """Deliver one event to registered handlers, as the client would."""
+        for callback in list(self._handlers.get(event, [])):
+            callback(payload)
 
     async def send(self, method, params=None, session_id=None, timeout=None):
         self.log.append((method, params))
@@ -109,33 +124,33 @@ class FakeCDP:
             raise self.raise_on[method]
         if method == "Page.getFrameTree":
             return {"frameTree": {"frame": {"id": "F1", "loaderId": self.loader_id}}}
+        if method == "Page.enable":
+            return {}
+        if method == "Page.handleJavaScriptDialog":
+            return {}
         if method == "Page.createIsolatedWorld":
             return {"executionContextId": 7}
         if method == "Runtime.evaluate":
-            # The Python side evaluates in a freshly created isolated world
-            # every time, so a replaced document never reaches this branch;
-            # only the *bound session object* (callFunctionOn) dies with it.
+            # The Python side evaluates the form helper's begin call, plus
+            # one tail call, in a freshly created isolated world; the small
+            # standalone success probe evaluates without the helper at all.
+            # A replaced document never reaches this branch; only the bound
+            # session object (callFunctionOn) dies with it.
             expression = params.get("expression", "")
-            # The whole login_form.js source prefixes the call; dispatch on
-            # the tail call, not a substring (the source's own docstring
-            # names __btLogin.begin too).
             tail = expression.rsplit(";", 1)[-1].strip()
             if tail.startswith("__btLogin.begin"):
                 return {"result": {"objectId": "SESSION1"}}
-            if tail.startswith("__btLogin.probe"):
-                if "probe" in self.exception_details_on:
-                    return {
-                        "result": {"type": "object"},
-                        "exceptionDetails": {"text": SENTINEL_USER, "exception": {}},
-                    }
-                return self.probe
-            raise CDPError(-32000, "unexpected expression")
+            # Everything else evaluated in a fresh world is the probe.
+            if "probe" in self.exception_details_on:
+                return {
+                    "result": {"type": "object"},
+                    "exceptionDetails": {"text": SENTINEL_USER, "exception": {}},
+                }
+            return self.probe
         if method == "Runtime.callFunctionOn":
             if self.world_dead:
                 raise CDPError(-32000, "Could not find object with given id")
             declaration = params.get("functionDeclaration", "")
-            if "probe" in self.exception_details_on:
-                pass
             if "this.outcome" in declaration:
                 if "outcome" in self.exception_details_on:
                     return {
@@ -229,9 +244,24 @@ class TestTheHappyPath:
         harness.run()
         evaluates = [p for m, p in harness.log if m == "Runtime.evaluate"]
         assert any(
-            p and p.get("expression", "").rsplit(";", 1)[-1].strip().startswith("__btLogin.probe")
+            p and "globalThis.__btLogin" not in p.get("expression", "")
             for p in evaluates
-        )
+        ), "the success poll must not re-evaluate the whole form helper"
+
+    def test_success_probe_is_small_and_credential_free(self, harness):
+        harness.run()
+        probes = [
+            p for m, p in harness.log
+            if m == "Runtime.evaluate"
+            and p and "globalThis.__btLogin" not in p.get("expression", "")
+        ]
+        assert probes
+        for probe in probes:
+            expression = probe["expression"]
+            assert "SENTINEL" not in expression
+            # Small: the whole helper is ~10 KB; the probe is a fragment.
+            assert len(expression) < 1000, len(expression)
+            assert "querySelector" in expression
 
     def test_values_travel_as_call_arguments_never_source(self, harness):
         harness.run()
@@ -280,6 +310,52 @@ class TestValidationRefusals:
             harness.run()
 
 
+class TestFillTransportFailures:
+    def test_missing_loader_cannot_confirm_that_unclearable_values_disappeared(self, harness):
+        original_send = harness.fake.send
+        dispatched = {"fill": False}
+
+        async def broken_cleanup(method, params=None, session_id=None, timeout=None):
+            declaration = (params or {}).get("functionDeclaration", "")
+            if "this.fill" in declaration:
+                dispatched["fill"] = True
+                await original_send(method, params, session_id, timeout)
+                raise CDPError(-32000, "SENTINEL-uncertain-fill")
+            if "this.clear" in declaration:
+                raise CDPError(-32000, "SENTINEL-uncertain-cleanup")
+            if method == "Page.getFrameTree" and dispatched["fill"]:
+                return {"frameTree": {"frame": {"id": "F1", "loaderId": None}}}
+            return await original_send(method, params, session_id, timeout)
+
+        harness.fake.send = broken_cleanup
+        with pytest.raises(login_module.LoginError, match="may still hold") as error:
+            harness.run()
+        assert error.value.fields_may_remain
+
+    @pytest.mark.parametrize("response", [
+        RuntimeError("SENTINEL-transport"), None, {"result": None}, {"result": {"value": []}},
+    ])
+    def test_unknown_failure_after_dispatched_fill_still_clears(self, harness, response):
+        original_send = harness.fake.send
+
+        async def broken_reply(method, params=None, session_id=None, timeout=None):
+            result = await original_send(method, params, session_id, timeout)
+            if params and "this.fill" in params.get("functionDeclaration", ""):
+                if isinstance(response, Exception):
+                    raise response
+                return response
+            return result
+
+        harness.fake.send = broken_reply
+        with pytest.raises(LifecycleError) as error:
+            harness.run()
+        assert "cleared" in str(error.value) and "not submitted" in str(error.value)
+        assert "SENTINEL" not in str(error.value)
+        assert any(m == "fill-arguments" for m, _ in harness.log)
+        assert any("this.clear" in str(p) for _, p in harness.log)
+        assert not any("this.submit" in str(p) for _, p in harness.log)
+
+
 class TestNavigationAndReplacement:
     def test_navigation_before_fill_fails_with_nothing_inserted(self, harness, monkeypatch):
         def on_relay_read(field, **kwargs):
@@ -292,7 +368,7 @@ class TestNavigationAndReplacement:
             harness.run()
         assert not any(m == "fill-arguments" for m, _ in harness.log)
 
-    def test_dead_world_on_fill_reports_replacement_not_may_remain(self, harness):
+    def test_dead_world_during_fill_reports_uncertainty_without_retry(self, harness):
         harness.fake.fill = CDPError(-32000, "Could not find object with given id")
 
         # The fill raise is mapped by _send; simulate by dead world instead.
@@ -305,9 +381,15 @@ class TestNavigationAndReplacement:
             return await original_send(method, params, session_id, timeout)
 
         harness.fake.send = send_then_die  # type: ignore[method-assign]
-        with pytest.raises(LifecycleError, match="changed after validation"):
+        with pytest.raises(LifecycleError, match=r"changed while.*filled") as error:
             harness.run()
+        assert "could not be confirmed" in str(error.value)
+        assert "may still hold" not in str(error.value)
         assert not any(m == "fill-arguments" for m, _ in harness.log)
+        assert not any(
+            m == "Runtime.callFunctionOn" and "this.submit" in str(p)
+            for m, p in harness.log
+        )
 
     def test_uncertain_fill_on_live_document_says_fields_may_remain(self, harness):
         harness.fake.fill = CDPError(-32000, "boom")
@@ -424,6 +506,219 @@ class TestSuccessWait:
             harness.run(timeout_ms=700)
 
 
+SECRET_TABS = [
+    {"targetId": "A" * 16, "url": "https://SENTINEL-tab.example/x", "title": "SENTINEL-title"},
+    {"targetId": "B" * 16, "url": "https://SENTINEL-tab2.example/y", "title": "t2"},
+]
+
+
+class TestSessionEntryDiagnostics:
+    """Failures to choose a tab or connect must not print browser text.
+
+    The underlying errors carry every tab's URL and title, or arbitrary
+    protocol text - page-provided data the fixed-diagnostic contract keeps
+    out of both output channels.
+    """
+
+    def _entry_error(self, monkeypatch, error: BaseException) -> None:
+        import contextlib
+
+        @contextlib.asynccontextmanager
+        async def failing(port, target_spec, target_by):
+            raise error
+            yield None, None
+
+        monkeypatch.setattr(login_module, "one_shot_page_session", failing)
+
+    @pytest.mark.parametrize(
+        "error, message",
+        [
+            (
+                AmbiguousTargetError(targets=SECRET_TABS),
+                "several tabs are open; choose one with --target",
+            ),
+            (
+                TargetNotFoundError(
+                    message="No target matching ID prefix 'SENTINEL-target'",
+                    targets=SECRET_TABS,
+                ),
+                "matches no open tab",
+            ),
+            (NoPageError(), "no open page"),
+            (
+                ConnectionError("websocket to ws://SENTINEL-host/devtools/browser/x failed"),
+                "could not connect",
+            ),
+            (
+                CDPError(-32000, "Target.getTargets exploded with SENTINEL-browser-text"),
+                "could not be opened",
+            ),
+            (RuntimeError("SENTINEL-transport-response"), "session failed"),
+        ],
+    )
+    def test_entry_failures_are_fixed_english_without_browser_text(
+        self, harness, monkeypatch, error, message, capsys
+    ):
+        self._entry_error(monkeypatch, error)
+        with pytest.raises(LifecycleError, match=message) as excinfo:
+            harness.run()
+        assert "SENTINEL" not in str(excinfo.value)
+        captured = capsys.readouterr()
+        assert "SENTINEL" not in captured.out + captured.err
+
+
+class TestTeardownCannotHideTheBody:
+    def test_dialog_cleanup_cancellation_keeps_the_sensitive_warning(self, harness, monkeypatch):
+        import asyncio
+
+        original_close = login_module.DialogGuard.close
+
+        async def cancelled_close(guard):
+            await original_close(guard)
+            raise asyncio.CancelledError
+
+        harness.fake.clear = {"ok": True, "cleared": False}
+        monkeypatch.setattr(login_module.DialogGuard, "close", cancelled_close)
+        with pytest.raises(login_module.LoginError, match="may still hold") as error:
+            harness.run()
+        assert error.value.fields_may_remain
+
+    @pytest.mark.parametrize("body_failure", ["none", "ordinary", "sensitive"])
+    def test_cancelled_detach_preserves_only_sensitive_warning(
+        self, harness, monkeypatch, body_failure
+    ):
+        import asyncio
+        import contextlib
+
+        if body_failure == "ordinary":
+            harness.fake.outcome = {"ok": False, "reason": "wrong-origin"}
+        elif body_failure == "sensitive":
+            harness.fake.clear = {"ok": True, "cleared": False}
+
+        @contextlib.asynccontextmanager
+        async def cancelled_detach(*args):
+            try:
+                yield harness.fake, "S1"
+            finally:
+                raise asyncio.CancelledError
+
+        monkeypatch.setattr(login_module, "one_shot_page_session", cancelled_detach)
+        if body_failure == "sensitive":
+            with pytest.raises(login_module.LoginError, match="may still hold") as error:
+                harness.run()
+            assert error.value.fields_may_remain
+        else:
+            with pytest.raises(asyncio.CancelledError):
+                harness.run()
+
+    def test_stalled_detach_keeps_the_may_remain_warning(self, harness, monkeypatch):
+        """A hung context-manager exit must not replace the body's diagnosis.
+
+        The fields-may-remain warning is the security-relevant fact; a
+        teardown that stalls past the cleanup grace may only report a
+        timeout when there was nothing better to report.
+        """
+        import asyncio
+        import contextlib
+
+        @contextlib.asynccontextmanager
+        async def stalling_session(port, target_spec, target_by):
+            try:
+                yield harness.fake, "S1"
+            finally:
+                await asyncio.Event().wait()  # the detach never completes
+
+        monkeypatch.setattr(login_module, "one_shot_page_session", stalling_session)
+        monkeypatch.setattr(login_module, "_CLEANUP_GRACE_SECONDS", 0.2)
+        harness.fake.fill = CDPError(-32000, "fill stalled")
+        harness.fake.clear = {"ok": True, "cleared": False}  # unclearable fill
+        with pytest.raises(LifecycleError) as excinfo:
+            harness.run()
+        assert "may still hold" in str(excinfo.value)
+        assert "timeout" not in str(excinfo.value).lower()
+
+
+class TestSuccessProbeContextLoss:
+    @pytest.mark.parametrize("error", [
+        CDPError(-32601, "SENTINEL-unsupported-method"),
+        CDPError(-32000, "SENTINEL-permanent-protocol-failure"),
+    ])
+    def test_permanent_probe_errors_are_not_retried(self, harness, error):
+        original_send = harness.fake.send
+        probes = []
+
+        async def failing_probe(method, params=None, session_id=None, timeout=None):
+            expression = (params or {}).get("expression", "")
+            if method == "Runtime.evaluate" and "globalThis.__btLogin" not in expression:
+                probes.append(method)
+                raise error
+            return await original_send(method, params, session_id, timeout)
+
+        harness.fake.send = failing_probe
+        with pytest.raises(LifecycleError, match="session failed") as failure:
+            harness.run(timeout_ms=1000)
+        assert probes == ["Runtime.evaluate"]
+        assert "SENTINEL" not in str(failure.value)
+
+    def test_a_destroyed_probe_context_after_navigation_polls_on(self, harness):
+        """The POST response can commit between the probe's two CDP calls.
+
+        The evaluate targets a context the navigation just destroyed. That
+        is a transient not-yet: polling must continue within the same
+        deadline instead of failing a login that succeeded.
+        """
+        original_send = harness.fake.send
+        probes = {"count": 0}
+
+        def is_probe(params) -> bool:
+            return "globalThis.__btLogin" not in (params or {}).get("expression", "")
+
+        async def losing_context(method, params=None, session_id=None, timeout=None):
+            if method == "Runtime.evaluate" and is_probe(params):
+                probes["count"] += 1
+                if probes["count"] == 1:
+                    harness.fake.navigate()  # the response commits right here
+                    raise CDPError(-32000, "Execution context was destroyed")
+            return await original_send(method, params, session_id, timeout)
+
+        harness.fake.send = losing_context  # type: ignore[method-assign]
+        result = harness.run()
+        assert result["status"] == "authenticated"
+        assert probes["count"] >= 2, "polling must continue after the context loss"
+
+
+class TestDialogs:
+    def test_dialogs_are_dismissed_fixed_without_their_text(self, harness, capsys):
+        """A dialog during the fill is dismissed; its text never lands.
+
+        The event's message and default prompt can quote credential
+        values; the guard answers accept:false, stores nothing, and joins
+        its tasks on exit.
+        """
+        original_send = harness.fake.send
+
+        async def dialog_then_forward(method, params=None, session_id=None, timeout=None):
+            if params and "this.fill" in str(params.get("functionDeclaration", "")):
+                harness.fake.emit(
+                    "Page.javascriptDialogOpening",
+                    {"type": "prompt", "message": SENTINEL_USER, "defaultPrompt": SENTINEL_PASS},
+                )
+            return await original_send(method, params, session_id, timeout)
+
+        harness.fake.send = dialog_then_forward  # type: ignore[method-assign]
+        result = harness.run()
+        assert result["status"] == "authenticated"
+        dismissals = [p for m, p in harness.log if m == "Page.handleJavaScriptDialog"]
+        assert dismissals == [{"accept": False}]
+        for method, params in harness.log:
+            if method != "Page.handleJavaScriptDialog":
+                continue
+            assert "SENTINEL" not in str(params)
+        captured = capsys.readouterr()
+        assert "SENTINEL" not in captured.out + captured.err
+        assert not harness.fake._handlers.get("Page.javascriptDialogOpening")
+
+
 class TestUntrustedText:
     def test_js_exception_details_never_surface(self, harness, capsys):
         harness.fake.exception_details_on.add("outcome")
@@ -489,6 +784,23 @@ class TestRelayFailuresSurfaceFixed:
 
 
 class TestQuietWebsockets:
+    def test_wire_logging_stays_quiet_through_session_teardown(
+        self, harness, monkeypatch, caplog
+    ):
+        import contextlib
+
+        @contextlib.asynccontextmanager
+        async def wire_during_detach(*args):
+            try:
+                yield harness.fake, "S1"
+            finally:
+                logging.getLogger("websockets.client").debug("SENTINEL-late-dialog")
+
+        monkeypatch.setattr(login_module, "one_shot_page_session", wire_during_detach)
+        with caplog.at_level(logging.DEBUG):
+            harness.run()
+        assert "SENTINEL" not in caplog.text
+
     def test_websockets_loggers_are_forced_above_debug(self, harness):
         protocol_logger = logging.getLogger("websockets.protocol")
         saved = protocol_logger.level

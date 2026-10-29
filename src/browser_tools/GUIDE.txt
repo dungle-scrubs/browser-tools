@@ -862,9 +862,10 @@ APPROVED LOGINS (1PASSWORD)
       Fill and submit one pre-approved login form on an existing Chrome
       instance, with credentials this tool never prints. Exit 0 prints
       {"account": ALIAS, "status": "authenticated"} and nothing else.
-      --account is required (exit 2 without it). --timeout-ms bounds the
-      whole operation (default 30000, finite positive integer). --target
-      picks the tab (index or id prefix) when several are open. There is no
+      --account is required (exit 2 without it). --timeout-ms sets one
+      operation deadline (default 30000, finite positive integer); bounded
+      cleanup can finish after it. --target picks the tab (index or id
+      prefix) when several are open. There is no
       --endpoint, no --url, and no flag that accepts a secret, a field name,
       or a raw command.
 
@@ -873,6 +874,9 @@ APPROVED LOGINS (1PASSWORD)
       this tool never falls back to command lines, stdout, or environment
       variables). Credentials come from exactly two fields of one 1Password
       item: `op://VAULT/ITEM/username` and `op://VAULT/ITEM/password`.
+      Configure the identity's read profile with a service account limited
+      to the automation vault. Vault permissions enforce the credential
+      set; aliases in this editable file do not enforce access control.
 
       THE POLICY FILE names what may be logged in. It is JSON the operator
       edits by hand at $XDG_CONFIG_HOME/browser-tools/logins.json
@@ -899,9 +903,9 @@ APPROVED LOGINS (1PASSWORD)
 
       identity is the opchain identity name; vault and item are 1Password
       IDs (26 lowercase base32 characters); origin is a canonical HTTPS
-      origin (an explicit port is allowed, :443 is not written out); the
-      four selectors are CSS. Alias names are letters, digits, underscores,
-      hyphens.
+      origin, including bracketed IPv6 (an explicit port is allowed; :443
+      is omitted). The four selectors are CSS. Identity and alias names
+      use letters, digits, underscores and hyphens, with no leading hyphen.
 
       WHAT IT DOES, IN ORDER: it checks the policy, the instance (Chrome
       only; a Camoufox instance is refused), and opchain's relay support;
@@ -916,7 +920,13 @@ APPROVED LOGINS (1PASSWORD)
       form's own requestSubmit on the validated button, and cleared from
       the fields. It then waits (within the same timeout) for the success
       selector at the configured origin: submitting alone never reports
-      authenticated.
+      authenticated. Browser form validation can refuse submission.
+
+      Fields are cleared without input/change events, before page
+      microtasks run. An asynchronous submit handler must retain values
+      from the fill events or before it yields; reading the cleared DOM
+      fields after an await is unsupported. JavaScript dialogs are
+      dismissed without recording or printing their contents.
 
       EXIT CODES. 0 authenticated. 1 operational: the relay refused or
       timed out, the form did not match the policy, the page changed

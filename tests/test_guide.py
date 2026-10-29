@@ -14,6 +14,7 @@ when an entry is taken out of it.
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import subprocess
 import sys
@@ -76,6 +77,40 @@ def phrases() -> list[str]:
 # --------------------------------------------------------------------------- #
 # The enforcing check
 # --------------------------------------------------------------------------- #
+
+
+class TestApprovedLoginContract:
+    @pytest.fixture
+    def login_section(self, manual):
+        _, heading, rest = manual.partition("APPROVED LOGINS (1PASSWORD)")
+        assert heading, "the manual is missing the approved-login contract"
+        return re.split(r"\n\n(?=[A-Z][A-Z0-9 /()_-]+\n)", rest, maxsplit=1)[0]
+
+    @pytest.mark.parametrize("required", [
+        "login [INSTANCE] --account ALIAS", "--target SPEC", "--config FILE", "--timeout-ms MS",
+        "--value-fd", "service account", "automation vault", "XDG_CONFIG_HOME/browser-tools/logins.json",
+        "same-origin POST", "success selector", "bounded cleanup", "asynchronous submit handler",
+        "MFA/TOTP", "SSO", "passkeys", "iframes", "Step Run", "trace --steps",
+        "unrestricted shell", "CDP access",
+    ])
+    def test_login_contract_is_explicit(self, login_section, required):
+        assert required in flatten(login_section)
+
+    def test_policy_example_passes_the_real_boundary(self, login_section, tmp_path):
+        from browser_tools import login_policy
+
+        offset = login_section.index("{", login_section.index("THE POLICY FILE"))
+        document, _ = json.JSONDecoder().raw_decode(login_section[offset:])
+        path = tmp_path / "guide-policy.json"
+        path.write_text(json.dumps(document))
+        policy = login_policy.load_policy(path)
+        assert policy.account("example").origin == "https://example.com"
+
+    def test_documented_default_matches_the_command(self, login_section):
+        from browser_tools.login import DEFAULT_LOGIN_TIMEOUT_MS
+
+        assert f"default {DEFAULT_LOGIN_TIMEOUT_MS}" in flatten(login_section)
+        assert "login" in verb_phrases(cli.build_parser())
 
 
 class TestEveryVerbIsDocumented:

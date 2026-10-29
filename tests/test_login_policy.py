@@ -73,24 +73,12 @@ class TestValidPolicy:
             success_selector="[data-signed-in]",
         )
 
-    def test_references_are_constructed_not_configured(self, tmp_path):
-        policy = load_policy(write_policy(tmp_path, valid_document()))
-        account = policy.account("example")
-        assert policy.field_reference(account, "username") == f"op://{VAULT}/{ITEM}/username"
-        assert policy.field_reference(account, "password") == f"op://{VAULT}/{ITEM}/password"
-
-    def test_field_reference_refuses_any_other_field(self, tmp_path):
-        policy = load_policy(write_policy(tmp_path, valid_document()))
-        with pytest.raises(LoginPolicyError):
-            policy.field_reference(policy.account("example"), "otp")
-
     def test_policy_dataclasses_hold_configuration_only(self, tmp_path):
         """References and selectors are configuration; no secret value exists here."""
         policy = load_policy(write_policy(tmp_path, valid_document()))
         account = policy.account("example")
         assert account.alias in repr(account)
         assert account.username_selector in repr(account)
-        assert policy.field_reference(account, "username") == f"op://{VAULT}/{ITEM}/username"
 
 
 class TestMalformedBoundaryValues:
@@ -108,6 +96,63 @@ class TestMalformedBoundaryValues:
         target[field] += "\n"
         with pytest.raises(LoginPolicyError):
             load_policy(write_policy(tmp_path, document))
+
+
+class TestReviewPolicyBoundary:
+    @pytest.mark.parametrize("origin", ["https://[::1]", "https://[2001:db8::1]:8443"])
+    def test_canonical_ipv6_origins_are_supported(self, tmp_path, origin):
+        document = valid_document()
+        document["accounts"]["example"]["origin"] = origin
+        policy = load_policy(write_policy(tmp_path, document))
+        assert policy.account("example").origin == origin
+
+    def test_names_can_start_with_an_underscore(self, tmp_path):
+        document = valid_document()
+        document["identity"] = "_browser"
+        document["accounts"]["_example"] = document["accounts"].pop("example")
+        policy = load_policy(write_policy(tmp_path, document))
+        assert policy.identity == "_browser"
+        assert policy.account("_example") is not None
+
+    @pytest.mark.parametrize("suffix", ["?", "#", "?#", ":²"])
+    def test_empty_delimiters_and_non_ascii_ports_fail_closed(self, tmp_path, suffix):
+        document = valid_document()
+        document["accounts"]["example"]["origin"] += suffix
+        with pytest.raises(LoginPolicyError):
+            load_policy(write_policy(tmp_path, document))
+
+    def test_json_nesting_is_a_usage_error(self, tmp_path, monkeypatch):
+        path = write_policy(tmp_path, valid_document())
+
+        def too_deep(*args, **kwargs):
+            raise RecursionError("SYNTHETIC-parser-detail")
+
+        with monkeypatch.context() as patch:
+            patch.setattr("browser_tools.login_policy.json.loads", too_deep)
+            with pytest.raises(LoginPolicyError) as error:
+                load_policy(path)
+        assert "SYNTHETIC" not in str(error.value)
+
+    @pytest.mark.parametrize("case", ["unknown-key", "duplicate-key", "unknown-account", "bad-account"])
+    def test_usage_diagnostics_do_not_echo_policy_inputs(self, tmp_path, case):
+        sentinel = "SYNTHETIC-private-value"
+        document = valid_document()
+        if case == "unknown-key":
+            document[sentinel] = 1
+        elif case == "bad-account":
+            document["accounts"] = {sentinel: None}
+        if case == "duplicate-key":
+            raw = json.dumps(document)[:-1] + f', "{sentinel}": 1, "{sentinel}": 2' + "}"
+            path = write_policy(tmp_path, raw)
+        else:
+            path = write_policy(tmp_path, document)
+        with pytest.raises(LoginPolicyError) as error:
+            if case == "unknown-account":
+                load_account(str(path), sentinel)
+            else:
+                load_policy(path)
+        assert sentinel not in str(error.value)
+        assert "Configured:" not in str(error.value)
 
 
 class TestFileLevelFailures:
@@ -149,7 +194,7 @@ class TestFileLevelFailures:
         text = text.replace('{"version"', '{"version"', 1)
         # Splice a duplicate top-level key after the object opens.
         duplicated = '{' + '"version": 2, ' + text[1:]
-        with pytest.raises(LoginPolicyError, match="duplicate key: 'version'"):
+        with pytest.raises(LoginPolicyError, match="duplicate key"):
             load_policy(write_policy(tmp_path, duplicated))
 
     def test_duplicate_account_key(self, tmp_path):
@@ -158,7 +203,7 @@ class TestFileLevelFailures:
             f'{{"version": 1, "identity": "browser", "vault": "{VAULT}", '
             f'"accounts": {{"example": {account}, "example": {account}}}}}'
         )
-        with pytest.raises(LoginPolicyError, match="duplicate key: 'example'"):
+        with pytest.raises(LoginPolicyError, match="duplicate key"):
             load_policy(write_policy(tmp_path, text))
 
 
@@ -252,7 +297,7 @@ class TestOriginCanonicalization:
             "https://EXAMPLE.com",
             "https://example.com:0x50",
             "https://example.com:99999",
-            "https://[::1]:8443",
+            "https://[::1%25lo0]:8443",
             "https://*.example.com",
             "https://",
             "https://..com",
@@ -287,11 +332,11 @@ class TestLoadAccount:
         assert account.alias == "example"
         assert policy.vault == VAULT
 
-    def test_unknown_alias_names_the_configured_ones(self, tmp_path):
+    def test_unknown_alias_does_not_echo_policy_inputs(self, tmp_path):
         with pytest.raises(LoginPolicyError) as excinfo:
             load_account(str(write_policy(tmp_path, valid_document())), "other")
-        assert "'other'" in str(excinfo.value)
-        assert "example" in str(excinfo.value)
+        assert "other" not in str(excinfo.value)
+        assert "example" not in str(excinfo.value)
 
     def test_malformed_policy_beats_unknown_alias(self, tmp_path):
         path = write_policy(tmp_path, "{")

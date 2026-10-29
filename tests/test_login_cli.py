@@ -119,6 +119,25 @@ class TestGrammar:
             cli.main(["login", "--account", "x", "--timeout-ms", "notanumber"])
         assert excinfo.value.code == 2
 
+    def test_a_huge_timeout_is_a_usage_error_not_a_traceback(self, registry, capsys, tmp_path):
+        """argparse accepts an int no float can hold; that is exit 2.
+
+        The old check called math.isfinite on it, which converts to float
+        first and raised OverflowError - a traceback for a usage problem.
+        """
+        registry(**{"web-01": chrome_entry()})
+        huge = "1" + "0" * 400
+        assert cli.main(
+            ["login", "--account", "x", "--timeout-ms", huge, "--config", policy_file(tmp_path)]
+        ) == 2
+        assert "timeout-ms" in capsys.readouterr().err
+        with pytest.raises(LoginPolicyError, match="timeout-ms"):
+            login_module.login(
+                instance="web-01", account="x",
+                config=policy_file(tmp_path), timeout_ms=10 ** 400,
+                registry_path=os.environ["BROWSER_TOOLS_REGISTRY"],
+            )
+
     def test_leading_instance_syntax_dispatches(self, registry, login_stub, tmp_path):
         registry(**{"web-01": chrome_entry()})
         assert cli.main(
@@ -161,7 +180,12 @@ class TestExitCodes:
         assert cli.main(
             ["login", "--account", "ghost", "--config", policy_file(tmp_path)]
         ) == 2
-        assert "no login account named 'ghost'" in capsys.readouterr().err
+        err = capsys.readouterr().err
+        assert "no login account" in err
+        # The diagnostic names no alias: not the requested one, and not the
+        # configured ones (policy text stays out of the output channels).
+        assert "ghost" not in err
+        assert "example" not in err
         assert opened == []
 
     def test_malformed_config_is_usage_exit_2(self, registry, tmp_path, capsys):
@@ -245,6 +269,10 @@ class TestPreBrowserRefusals:
         entry["engine"] = "camoufox"
         registry(**{"fox-01": entry})
         opened = self._open_session_trap(monkeypatch)
+        monkeypatch.setattr(
+            credential_relay, "ensure_relay_supported",
+            lambda *args, **kwargs: pytest.fail("engine refusal must precede the relay probe"),
+        )
         with pytest.raises(LifecycleError, match="only with Chrome"):
             login_module.login(
                 instance="fox-01", account="example",

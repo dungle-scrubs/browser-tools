@@ -21,8 +21,9 @@
  *                                never inside script source. Returns a fixed
  *                                outcome; never returns the values.
  *   session.submit()          -> revalidate, then form.requestSubmit(button).
- *   session.clear()           -> set both fields to '' with native setters,
- *                                verify empty, never return old values.
+ *   session.clear()           -> set both fields to '' with silent native
+ *                                setters (no events), verify both empty
+ *                                together, never return old values.
  *   __btLogin.probe(policy)   -> {authenticated, originOk} in whatever
  *                                document currently lives in the frame.
  *
@@ -53,6 +54,7 @@ globalThis.__btLogin = (function () {
   const REASON_DOCUMENT_CHANGED = 'document-changed';
   const REASON_FILL_FAILED = 'fill-failed';
   const REASON_SUBMIT_FAILED = 'submit-failed';
+  const REASON_INVALID_FORM = 'form-invalid';
 
   function originOk(policy) {
     try {
@@ -193,18 +195,23 @@ globalThis.__btLogin = (function () {
     if (destination) return { ok: false, reason: destination };
 
     // A page that already satisfies the success selector needs no login;
-    // filling it would only type credentials into a signed-in page.
-    const success = queryExactlyOne(policy.success_selector);
-    if (success.error === REASON_BAD_SELECTOR) {
+    // filling it would only type credentials into a signed-in page. Any
+    // match counts, one or many: checking for "exactly one" would let a
+    // repeated marker slip through and authenticate a stale page.
+    let existing;
+    try {
+      existing = document.querySelectorAll(policy.success_selector);
+    } catch (err) {
       return { ok: false, reason: REASON_BAD_SELECTOR };
     }
-    if (success.element) return { ok: false, reason: REASON_ALREADY_AUTHENTICATED };
+    if (existing.length > 0) return { ok: false, reason: REASON_ALREADY_AUTHENTICATED };
 
     return { ok: true };
   }
 
   // Native value setter + input/change events, the framework-compatible
-  // recipe: a plain .value assignment is invisible to React/Vue state.
+  // recipe for FILLING: a plain .value assignment is invisible to React/Vue
+  // state, and the state is what an async submit handler later submits.
   function setNativeValue(element, value) {
     const prototype =
       element.tagName === 'TEXTAREA'
@@ -218,6 +225,25 @@ globalThis.__btLogin = (function () {
     }
     element.dispatchEvent(new Event('input', { bubbles: true }));
     element.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+
+  // The same native setter, silent: no input/change events. Cleanup must
+  // not dispatch them. An empty-field notification is a no-op at best; at
+  // worst, while a page's async submit handler is still awaiting (fetch or
+  // validation), those events overwrite the framework state the handler
+  // will read, so the submission would carry empty credentials. The DOM
+  // value is still verifiably empty, which is the guarantee cleanup owes.
+  function setNativeValueSilently(element, value) {
+    const prototype =
+      element.tagName === 'TEXTAREA'
+        ? window.HTMLTextAreaElement && HTMLTextAreaElement.prototype
+        : window.HTMLInputElement && HTMLInputElement.prototype;
+    const descriptor = prototype && Object.getOwnPropertyDescriptor(prototype, 'value');
+    if (descriptor && descriptor.set) {
+      descriptor.set.call(element, value);
+    } else {
+      element.value = value;
+    }
   }
 
   function makeSession(policy, boundNodes) {
@@ -250,26 +276,41 @@ globalThis.__btLogin = (function () {
     }
 
     function clearFields() {
-      // Insert '' and confirm empty. The previous value is never read out.
+      // Silent setters only, and no notification for a field that is
+      // already empty. Both fields are set first and verified together
+      // afterwards: a handler that restores one field's remembered value
+      // must not be able to do so after that field's own check has passed.
+      // The previous value is never read out.
       const bound = nodes;
       if (!bound) return false;
-      let cleared = true;
       for (const element of [bound.username, bound.password]) {
+        if (element.value === '') continue;
         try {
-          setNativeValue(element, '');
-          if (element.value !== '') cleared = false;
+          setNativeValueSilently(element, '');
         } catch (err) {
-          cleared = false;
+          // Verified below; a failed setter means not cleared.
         }
       }
-      return cleared;
+      if (bound.username.value !== '' || bound.password.value !== '') return false;
+      // A framework can replace the bound nodes while retaining their values.
+      // Confirm the current fields too, without writing replacement controls.
+      try {
+        for (const selector of [policy.username_selector, policy.password_selector]) {
+          for (const element of document.querySelectorAll(selector)) {
+            if (typeof element.value === 'string' && element.value !== '') return false;
+          }
+        }
+      } catch (err) {
+        return false;
+      }
+      return true;
     }
 
     return {
       outcome: null,
       fill: function (usernameValue, passwordValue) {
         const before = revalidate();
-        if (before.ok !== true) return before;
+        if (before.ok !== true) return { ...before, insertionStarted: false };
         try {
           setNativeValue(nodes.username, usernameValue);
           setNativeValue(nodes.password, passwordValue);
@@ -291,8 +332,13 @@ globalThis.__btLogin = (function () {
         let outcome = before;
         if (before.ok === true) {
           try {
-            HTMLFormElement.prototype.requestSubmit.call(nodes.form, nodes.submit);
-            outcome = { ok: true };
+            const needsValidation = !nodes.form.noValidate && !nodes.submit.formNoValidate;
+            if (needsValidation && !HTMLFormElement.prototype.checkValidity.call(nodes.form)) {
+              outcome = { ok: false, reason: REASON_INVALID_FORM };
+            } else {
+              HTMLFormElement.prototype.requestSubmit.call(nodes.form, nodes.submit);
+              outcome = { ok: true };
+            }
           } catch (err) {
             outcome = { ok: false, reason: REASON_SUBMIT_FAILED };
           }
