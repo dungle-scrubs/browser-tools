@@ -306,6 +306,15 @@ def ensure_relay_supported(
             "opchain is not installed or not on PATH. bt login reads credentials "
             "only through opchain's --value-fd relay; install opchain and retry"
         ) from exc
+    except OSError:
+        # An executable-format-invalid binary (ENOEXEC), a permission failure,
+        # a missing interpreter: every other spawn OSError is one operational
+        # fact -- opchain could not be started -- and its OSError text (which
+        # can carry the provider's path) is never echoed.
+        raise RelayError(
+            "opchain could not be started; the credential relay requires a "
+            "working opchain binary"
+        ) from None
     try:
         deadline = time.monotonic() + timeout
         try:
@@ -395,6 +404,13 @@ def read_reference(
                     "credentials only through opchain's --value-fd relay; install "
                     "opchain and retry"
                 ) from exc
+            except OSError:
+                # Same normalization as the probe: a spawn failure other than
+                # a missing binary is one fixed operational fact, its OSError
+                # text never echoed, its cause suppressed.
+                raise RelayError(
+                    "opchain could not be started; no value was used"
+                ) from None
         finally:
             # The parent's copy is closed whether or not the spawn worked; the
             # child holds its own inherited copy.

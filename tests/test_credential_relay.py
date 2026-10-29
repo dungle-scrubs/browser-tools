@@ -447,6 +447,61 @@ class TestMissingAndUnsupportedBinaries:
         with pytest.raises(RelayMissingError, match="not installed"):
             ensure_relay_supported(str(tmp_path / "no-such-opchain"), IDENTITY)
 
+    @pytest.mark.parametrize("call", ["probe", "read"])
+    def test_an_unspawnable_binary_is_one_fixed_operational_error(
+        self, bin_dir, capfd, call
+    ):
+        """The round-two ENOEXEC escape, at the relay boundary.
+
+        An executable-format-invalid binary raises OSError from Popen; both
+        call sites normalize it into the fixed RelayError family with the
+        cause suppressed, and neither the OSError text nor the path is
+        echoed anywhere.
+        """
+        binary = bin_dir / "opchain"
+        binary.write_text("This deliberately is not an executable format.\n")
+        binary.chmod(0o700)
+        if call == "probe":
+            with pytest.raises(RelayError, match="could not be started") as error:
+                ensure_relay_supported(str(binary), IDENTITY, timeout=5.0)
+        else:
+            with pytest.raises(RelayError, match="could not be started") as error:
+                read_reference(
+                    binary=str(binary), identity=IDENTITY, vault=VAULT, item=ITEM,
+                    field="username",
+                )
+        assert not isinstance(error.value, RelayMissingError)
+        assert error.value.__cause__ is None
+        assert error.value.__suppress_context__ is True
+        captured = capfd.readouterr()
+        assert "executable format" not in captured.out + captured.err
+        assert str(bin_dir) not in captured.out + captured.err
+        assert "Traceback" not in captured.out + captured.err
+
+    @pytest.mark.parametrize("call", ["probe", "read"])
+    def test_an_injected_oserror_is_normalized_without_its_text(
+        self, bin_dir, monkeypatch, capfd, call
+    ):
+        binary = write_fake(bin_dir, "opchain", good_relay_body())
+
+        def explode(*args, **kwargs):
+            raise OSError(8, "SENTINEL-provider-burst", str(binary))
+
+        monkeypatch.setattr(relay.subprocess, "Popen", explode)
+        if call == "probe":
+            with pytest.raises(RelayError, match="could not be started") as error:
+                ensure_relay_supported(str(binary), IDENTITY, timeout=5.0)
+        else:
+            with pytest.raises(RelayError, match="could not be started") as error:
+                read_reference(
+                    binary=str(binary), identity=IDENTITY, vault=VAULT, item=ITEM,
+                    field="username",
+                )
+        assert "SENTINEL" not in str(error.value)
+        assert str(binary) not in str(error.value)
+        captured = capfd.readouterr()
+        assert "SENTINEL" not in captured.out + captured.err
+
     def test_old_binary_without_the_relay_is_refused(self, bin_dir):
         binary = write_fake(
             bin_dir,
