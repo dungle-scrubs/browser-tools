@@ -484,8 +484,8 @@ RUNNING MANY STEPS IN ONE INVOCATION
       page-selecting --url: those belong to the run, which resolves them once.
       attach is not a step (it runs until stdin ends, so nothing could follow
       it), and neither are launch, status, stop, retain, cleanup, profile,
-      window-border, guide, help, navigate, trace, insights or run itself. Any of these
-      in a step list is a usage error (exit 2).
+      window-border, guide, help, navigate, trace, insights, login or run itself.
+      Any of these in a step list is a usage error (exit 2).
 
       FRAME SELECTION LASTS. `frames select` in one step governs the steps after
       it, so `storage get` with no --key works inside a run. A selection
@@ -853,6 +853,95 @@ PROFILES AND LOGIN
   `launch --profile NAME` brings that one forward by itself. The registry
   stays in /tmp: a cleared registry after a reboot is self-consistent, because
   no browser survives one.
+
+
+APPROVED LOGINS (1PASSWORD)
+
+  login [INSTANCE] --account ALIAS [--target SPEC] [--config FILE]
+         [--timeout-ms MS]
+      Fill and submit one pre-approved login form on an existing Chrome
+      instance, with credentials this tool never prints. Exit 0 prints
+      {"account": ALIAS, "status": "authenticated"} and nothing else.
+      --account is required (exit 2 without it). --timeout-ms bounds the
+      whole operation (default 30000, finite positive integer). --target
+      picks the tab (index or id prefix) when several are open. There is no
+      --endpoint, no --url, and no flag that accepts a secret, a field name,
+      or a raw command.
+
+      SETUP. This needs opchain on PATH, built from a release that documents
+      the --value-fd private relay (older binaries are refused with exit 1;
+      this tool never falls back to command lines, stdout, or environment
+      variables). Credentials come from exactly two fields of one 1Password
+      item: `op://VAULT/ITEM/username` and `op://VAULT/ITEM/password`.
+
+      THE POLICY FILE names what may be logged in. It is JSON the operator
+      edits by hand at $XDG_CONFIG_HOME/browser-tools/logins.json
+      (~/.config/browser-tools/logins.json by default); --config FILE
+      overrides. Every field is required, unknown fields are refused, and a
+      missing, unreadable, oversized, duplicate-key, malformed or
+      unsupported-version file fails before anything is read:
+
+        {
+          "version": 1,
+          "identity": "browser",
+          "vault": "aaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "accounts": {
+            "example": {
+              "item": "bbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "origin": "https://example.com",
+              "username_selector": "#username",
+              "password_selector": "#password",
+              "submit_selector": "button[type=submit]",
+              "success_selector": "[data-signed-in]"
+            }
+          }
+        }
+
+      identity is the opchain identity name; vault and item are 1Password
+      IDs (26 lowercase base32 characters); origin is a canonical HTTPS
+      origin (an explicit port is allowed, :443 is not written out); the
+      four selectors are CSS. Alias names are letters, digits, underscores,
+      hyphens.
+
+      WHAT IT DOES, IN ORDER: it checks the policy, the instance (Chrome
+      only; a Camoufox instance is refused), and opchain's relay support;
+      then it opens one session to the tab, requires the exact configured
+      origin and a visible tab, exactly one usable text/email username
+      input and one password input in one connected form, exactly one
+      enabled submit button in that form, and a same-origin POST action
+      (including the button's formaction/formmethod overrides); the
+      configured success selector must not already match. Only then are
+      the two values read through opchain's --value-fd relay into a private
+      pipe, typed with the page's own input events, submitted with the
+      form's own requestSubmit on the validated button, and cleared from
+      the fields. It then waits (within the same timeout) for the success
+      selector at the configured origin: submitting alone never reports
+      authenticated.
+
+      EXIT CODES. 0 authenticated. 1 operational: the relay refused or
+      timed out, the form did not match the policy, the page changed
+      mid-login, the success condition was not met, or the fields could not
+      be cleared (the error says plainly that sensitive fields may remain;
+      it never resubmits on an uncertain outcome). 2 usage: unknown alias,
+      malformed policy, bad arguments. Diagnostics are fixed sentences;
+      neither browser text nor page text is ever printed.
+
+      NOT SUPPORTED, DELIBERATELY: multi-page logins, MFA/TOTP, SSO or
+      passkeys, forms inside iframes, arbitrary endpoints, or choosing a
+      vault/item/field per invocation. `login` is not a Step Run verb and
+      `trace --steps` refuses it: a run validates every step before
+      executing any, and `login --account x` is rejected there (exit 2).
+      Named profiles keep cookies exactly as before; log in by hand for
+      anything this verb does not cover, or to keep the session (PROFILES
+      AND LOGIN above).
+
+      THE GUARANTEE IS ACCIDENTAL-EXPOSURE PREVENTION ONLY. Values never
+      enter CLI arguments, stdout, stderr, result documents, or JavaScript
+      source text. But the config is editable by the same OS user, and the
+      DevTools socket is reachable by any process that user runs: this is
+      not isolation from yourself or from an agent with unrestricted shell
+      or CDP access. Do not run captures or debug clients concurrently with
+      a login.
 
 
 EXTERNAL BROWSERS

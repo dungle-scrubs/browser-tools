@@ -60,7 +60,7 @@ A named profile is a browser user-data directory. One live instance can hold it 
 | `BROWSER_TOOLS_REGISTRY` | Override the registry file, normally under `/tmp/chrome-agent/`. |
 | `BROWSER_TOOLS_CHROME_BINARY` | Override the Chrome executable, including when `--channel` is present. |
 | `BROWSER_TOOLS_LEGACY_PROFILES_DIR` | Override the old profile root, normally `/tmp/browser-tools-profiles`. |
-| `XDG_CONFIG_HOME` | Settings live in `browser-tools/settings.json`; otherwise they use `~/.config/browser-tools/settings.json`. |
+| `XDG_CONFIG_HOME` | Settings live in `browser-tools/settings.json` and the approved-login policy in `browser-tools/logins.json`; otherwise they use `~/.config/browser-tools/`. |
 
 Profiles left under the old temporary root appear with `"legacy": true` in `profile list`. `profile migrate --dry-run` previews migration to durable storage. `profile migrate` moves them, and `profile migrate --back` moves them back. Launching one legacy profile migrates that profile automatically. A live holder or a destination name collision prevents migration.
 
@@ -177,6 +177,10 @@ step_run.py                One connection for a list of steps
   step_list.py             Step List parsing and validation
 one_shot.py                Connect, select page, attach, detach
   attached_session.py      Handler client over an attached session
+login.py                   Approved 1Password logins: one configured form
+  login_policy.py          The operator-edited policy file, validated first
+  login_form.js            Document-bound validation, fill, submit, clear
+  credential_relay.py      opchain --value-fd private relay recipe
 events.py                  attach, wait, console-list, network-list
 list_verbs.py              Frame and storage commands
 usage.py                   Usage error type
