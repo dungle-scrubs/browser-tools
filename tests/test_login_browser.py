@@ -1,227 +1,38 @@
 """The login browser transaction, driven over a fake CDP session.
 
-The fake implements exactly the command surface ``login.py`` uses --
-``Page.getFrameTree``, ``DOM.createIsolatedWorld``, ``Runtime.evaluate`` and
-``Runtime.callFunctionOn`` -- with scriptable outcomes and a shared event
-log that also records the relay reads, so tests can prove the *ordering*
-that is the whole point of the transaction:
-
-    validate everything -> read credentials -> revalidate -> fill ->
-    revalidate -> submit -> clear -> wait for success
-
-and that no sentinel credential ever appears in script source, diagnostics,
-stdout or stderr. Real-Chrome behavior (the actual JS) is exercised by
-``test_login_live.py``; this module proves the Python orchestration keeps
-its side of the contract.
+Behavioral contracts over the shared fake CDP (login_browser_fixtures.py):
+validation-before-reads ordering, fixed diagnostics for every refusal and
+transport failure, document replacement, dialogs, teardown precedence and
+the connected-owner boundary. Real-Chrome behavior (the actual JS) is
+exercised by ``test_login_live.py``; this module proves the Python
+orchestration keeps its side of the contract. Deadline and cleanup-wall
+behavior lives in ``test_login_cancellation.py``.
 """
 
 from __future__ import annotations
 
-import json
 import logging
-from typing import Any
 
 import pytest
 
-from browser_tools import credential_relay
+from browser_tools import credential_relay, login_ownership
 from browser_tools import login as login_module
-from browser_tools.core import registry as core_registry
 from browser_tools.core.attach import AmbiguousTargetError, TargetNotFoundError
 from browser_tools.core.errors import CDPError, NoPageError
 from browser_tools.credential_relay import RelayError, Secret
 from browser_tools.lifecycle import LifecycleError
-
-ORIGIN = "https://example.com"
-VAULT = "dqss6l4yprxhntxymzjaltchwe"
-ITEM = "bbbbbbbbbbbbbbbbbbbbbbbbbb"
-SENTINEL_USER = "SENTINEL-user"
-SENTINEL_PASS = "SENTINEL-pass"
-
-OK_OUTCOME = {"ok": True}
-OK_FILL = {"ok": True}
-OK_SUBMIT = {"ok": True}
-OK_CLEAR = {"ok": True, "cleared": True}
-AUTHENTICATED_PROBE = {"result": {"value": {"authenticated": True, "originOk": True}}}
-UNAUTHENTICATED_PROBE = {"result": {"value": {"authenticated": False, "originOk": True}}}
-
-
-def policy_file(tmp_path, *, origin: str = ORIGIN, alias: str = "example") -> str:
-    document = {
-        "version": 1,
-        "identity": "browser",
-        "vault": VAULT,
-        "accounts": {
-            alias: {
-                "item": ITEM,
-                "origin": origin,
-                "username_selector": "#username",
-                "password_selector": "#password",
-                "submit_selector": "button[type=submit]",
-                "success_selector": "[data-signed-in]",
-            }
-        },
-    }
-    path = tmp_path / "logins.json"
-    path.write_text(json.dumps(document))
-    return str(path)
-
-
-@pytest.fixture
-def registry(tmp_path, monkeypatch):
-    """An isolated registry holding one live-looking Chrome instance."""
-    path = str(tmp_path / "registry.json")
-    monkeypatch.setenv("BROWSER_TOOLS_REGISTRY", path)
-    core_registry._save_registry(  # pyright: ignore[reportPrivateUsage]
-        {"web-01": {
-            "port": 9500,
-            "pid": 2_000_000_000,
-            "browser_version": "Chrome/1",
-            "user_data_dir": "",
-            "engine": "chrome",
-        }},
-        path,
-    )
-    return path
-
-
-class FakeCDP:
-    """The login command surface, scriptable and logged."""
-
-    def __init__(self, log: list[tuple[str, Any]]) -> None:
-        self.log = log
-        self.loader_id = "L1"
-        self.world_dead = False  # a replaced document: object ids are gone
-        self.outcome: dict = OK_OUTCOME
-        self.fill: dict | Exception = OK_FILL
-        self.submit: dict | Exception = OK_SUBMIT
-        self.clear: dict | Exception = OK_CLEAR
-        self.probe: dict = AUTHENTICATED_PROBE
-        self.raise_on: dict[str, Exception] = {}
-        self.exception_details_on: set[str] = set()
-        self._handlers: dict[str, list[Any]] = {}
-
-    def on(self, event, callback, session_id=None) -> None:
-        self._handlers.setdefault(event, []).append(callback)
-
-    def off(self, event, callback) -> None:
-        self._handlers[event] = [
-            cb for cb in self._handlers.get(event, []) if cb is not callback
-        ]
-
-    def navigate(self) -> None:
-        """Replace the document: new loader, dead world."""
-        self.loader_id = "L2"
-        self.world_dead = True
-
-    def emit(self, event: str, payload: dict) -> None:
-        """Deliver one event to registered handlers, as the client would."""
-        for callback in list(self._handlers.get(event, [])):
-            callback(payload)
-
-    async def send(self, method, params=None, session_id=None, timeout=None):
-        self.log.append((method, params))
-        if method in self.raise_on:
-            raise self.raise_on[method]
-        if method == "Page.getFrameTree":
-            return {"frameTree": {"frame": {"id": "F1", "loaderId": self.loader_id}}}
-        if method == "Page.enable":
-            return {}
-        if method == "Page.handleJavaScriptDialog":
-            return {}
-        if method == "Page.createIsolatedWorld":
-            return {"executionContextId": 7}
-        if method == "Runtime.evaluate":
-            # The Python side evaluates the form helper's begin call, plus
-            # one tail call, in a freshly created isolated world; the small
-            # standalone success probe evaluates without the helper at all.
-            # A replaced document never reaches this branch; only the bound
-            # session object (callFunctionOn) dies with it.
-            expression = params.get("expression", "")
-            tail = expression.rsplit(";", 1)[-1].strip()
-            if tail.startswith("__btLogin.begin"):
-                return {"result": {"objectId": "SESSION1"}}
-            # Everything else evaluated in a fresh world is the probe.
-            if "probe" in self.exception_details_on:
-                return {
-                    "result": {"type": "object"},
-                    "exceptionDetails": {"text": SENTINEL_USER, "exception": {}},
-                }
-            return self.probe
-        if method == "Runtime.callFunctionOn":
-            if self.world_dead:
-                raise CDPError(-32000, "Could not find object with given id")
-            declaration = params.get("functionDeclaration", "")
-            if "this.outcome" in declaration:
-                if "outcome" in self.exception_details_on:
-                    return {
-                        "result": {"type": "object"},
-                        "exceptionDetails": {"text": SENTINEL_USER, "exception": {}},
-                    }
-                return {"result": {"value": self.outcome}}
-            if "this.fill" in declaration:
-                self.log.append(("fill-arguments", params.get("arguments")))
-                self.log.append(("fill-declaration", declaration))
-                if isinstance(self.fill, Exception):
-                    raise self.fill
-                return {"result": {"value": self.fill}}
-            if "this.submit" in declaration:
-                if isinstance(self.submit, Exception):
-                    raise self.submit
-                return {"result": {"value": self.submit}}
-            if "this.clear" in declaration:
-                if isinstance(self.clear, Exception):
-                    raise self.clear
-                return {"result": {"value": self.clear}}
-        raise CDPError(-32000, f"unexpected method {method}")
-
-
-@pytest.fixture
-def harness(monkeypatch, tmp_path, registry):
-    """A login run over the fake CDP, with the relay stubbed and logged."""
-    log: list[tuple[str, Any]] = []
-    fake = FakeCDP(log)
-    relay_reads: list[str] = []
-
-    import contextlib
-
-    @contextlib.asynccontextmanager
-    async def fake_session(port, target_spec, target_by):
-        log.append(("open-session", (port, target_spec, target_by)))
-        try:
-            yield fake, "S1"
-        finally:
-            log.append(("close-session", None))
-
-    monkeypatch.setattr(login_module, "one_shot_page_session", fake_session)
-    monkeypatch.setattr(credential_relay, "find_opchain", lambda: "/fake/bin/opchain")
-    monkeypatch.setattr(credential_relay, "ensure_relay_supported", lambda *a, **k: None)
-
-    def fake_read(*, field, **kwargs):
-        relay_reads.append(field)
-        log.append(("relay-read", field))
-        value = SENTINEL_USER if field == "username" else SENTINEL_PASS
-        return Secret(value.encode("utf-8"))
-
-    monkeypatch.setattr(credential_relay, "read_reference", fake_read)
-
-    config = policy_file(tmp_path)
-
-    def run(**overrides):
-        kwargs = {
-            "instance": "web-01",
-            "account": "example",
-            "config": config,
-            "timeout_ms": 2_000,
-            "registry_path": registry,
-        }
-        kwargs.update(overrides)
-        return login_module.login(**kwargs)
-
-    import types
-
-    return types.SimpleNamespace(
-        fake=fake, log=log, relay_reads=relay_reads, run=run, config=config,
-    )
+from login_browser_fixtures import (
+    OK_SUBMIT,
+    OWNER_PID,
+    SENTINEL_PASS,
+    SENTINEL_USER,
+    UNAUTHENTICATED_PROBE,
+    FakeCDP,
+    owner_snapshot,
+    policy_file,
+)
+from login_browser_fixtures import harness as harness
+from login_browser_fixtures import registry as registry
 
 
 class TestTheHappyPath:
@@ -431,47 +242,6 @@ class TestNavigationAndReplacement:
         harness.fake.world_dead = False
         result = harness.run()
         assert result["status"] == "authenticated"
-
-
-class TestDeadlineCleanup:
-    @pytest.mark.parametrize("cleanup_fails", [False, True])
-    def test_expired_fill_still_attempts_cleanup(self, harness, cleanup_fails, monkeypatch):
-        deadlines = []
-
-        class ControlledDeadline(login_module._Deadline):
-            def __init__(self, timeout_ms):
-                super().__init__(timeout_ms)
-                self.expired = False
-                deadlines.append(self)
-
-            def remaining(self):
-                return 0.0 if self.expired else 1.0
-
-        monkeypatch.setattr(login_module, "_Deadline", ControlledDeadline)
-        original_send = harness.fake.send
-
-        async def fail_after_deadline(method, params=None, session_id=None, timeout=None):
-            declaration = (params or {}).get("functionDeclaration", "")
-            if "this.fill" in declaration:
-                deadlines[0].expired = True
-                raise CDPError(-32000, SENTINEL_PASS)
-            if cleanup_fails and "this.clear" in declaration:
-                harness.log.append(("cleanup-attempt", None))
-                raise CDPError(-32000, "cleanup failed")
-            return await original_send(method, params, session_id, timeout)
-
-        harness.fake.send = fail_after_deadline
-        with pytest.raises(LifecycleError) as error:
-            harness.run(timeout_ms=10)
-        attempted = any(
-            method == "cleanup-attempt" or
-            (method == "Runtime.callFunctionOn" and params and "this.clear" in params.get("functionDeclaration", ""))
-            for method, params in harness.log
-        )
-        assert attempted, "an expired operation still owes sensitive-field cleanup"
-        if cleanup_fails:
-            assert "may still hold" in str(error.value)
-        assert SENTINEL_PASS not in str(error.value)
 
 
 class TestUnclearableFields:
@@ -755,6 +525,7 @@ class TestRelayFailuresSurfaceFixed:
             harness.run()
 
     def test_relay_unsupported_fails_before_the_browser_opens(self, monkeypatch, tmp_path, registry):
+        monkeypatch.setattr(login_ownership, "verify_recorded_owner", lambda entry: owner_snapshot())
         monkeypatch.setattr(credential_relay, "find_opchain", lambda: "/fake/bin/opchain")
 
         def unsupported(*args, **kwargs):
@@ -823,3 +594,92 @@ class TestQuietWebsockets:
             assert logging.getLogger("websockets.protocol").level == logging.DEBUG
         finally:
             protocol_logger.setLevel(saved)
+
+
+class TestConnectedOwnerVerification:
+    """The connected root browser must positively be the recorded owner."""
+
+    def test_the_registry_entry_reaches_the_owner_check_on_the_root_session(
+        self, harness, monkeypatch
+    ):
+        seen: dict[str, object] = {}
+        original = harness.fake.send
+
+        async def capture(method, params=None, session_id=None, timeout=None):
+            if method == "SystemInfo.getProcessInfo":
+                seen["session_id"] = session_id
+            return await original(method, params, session_id, timeout)
+
+        monkeypatch.setattr(harness.fake, "send", capture)
+        harness.run()
+        assert [entry.name for entry in harness.seen_entries] == ["web-01"]
+        assert seen["session_id"] is None, "identity must be asked of the root browser"
+
+    def test_pid_mismatch_refuses_before_any_credential(self, harness):
+        harness.fake.process_info = {
+            "processInfo": [{"type": "browser", "id": 42, "cpuTime": 0.1}]
+        }
+        with pytest.raises(LifecycleError, match="not the registered instance"):
+            harness.run()
+        assert harness.relay_reads == []
+        assert not any(
+            m == "Runtime.callFunctionOn" and p and "this.fill" in str(p.get("functionDeclaration"))
+            for m, p in harness.log
+        )
+
+    @pytest.mark.parametrize("process_info", [
+        {"processInfo": []},
+        {"processInfo": [
+            {"type": "browser", "id": 1, "cpuTime": 0.0},
+            {"type": "browser", "id": 2, "cpuTime": 0.0},
+        ]},
+        {"processInfo": [{"type": "browser", "id": True, "cpuTime": 0.0}]},
+        {"processInfo": [{"type": "browser", "id": 0, "cpuTime": 0.0}]},
+        {"processInfo": [{"type": "browser", "id": -5, "cpuTime": 0.0}]},
+        {"processInfo": [{"type": "browser", "id": "4242", "cpuTime": 0.0}]},
+        {"processInfo": [{"type": "renderer", "id": OWNER_PID, "cpuTime": 0.0}]},
+        {},
+        {"processInfo": "SENTINEL-not-a-list"},
+    ])
+    def test_malformed_root_identity_refuses(self, harness, process_info):
+        harness.fake.process_info = process_info
+        with pytest.raises(LifecycleError, match="did not report its process identity"):
+            harness.run()
+        assert harness.relay_reads == []
+
+    def test_an_unavailable_identity_command_refuses_without_its_text(self, harness):
+        harness.fake.process_info = CDPError(-32000, "SENTINEL-protocol-text")
+        with pytest.raises(LifecycleError, match="did not report its process identity") as error:
+            harness.run()
+        assert "SENTINEL" not in str(error.value)
+        assert harness.relay_reads == []
+
+    def test_identity_lost_between_reply_and_recheck_refuses(self, harness, monkeypatch):
+        """The recorded process identity is re-proven after the reply lands."""
+
+        def lost(snapshot):
+            raise login_ownership.OwnershipError(
+                "the recorded browser process is not running as the process "
+                "this tool launched; the registry row is stale"
+            )
+
+        monkeypatch.setattr(login_ownership, "_identity_holds", lost)
+        with pytest.raises(LifecycleError, match="registry row is stale"):
+            harness.run()
+        assert harness.relay_reads == []
+
+
+class TestBeginExceptionDetails:
+    def test_a_thrown_helper_is_never_trusted_as_a_session(self, harness, capsys):
+        """The begin reply can carry exceptionDetails whose Error object has
+        an objectId; taking that objectId as the session object would hand
+        the transaction to the page's own exception. Refused, fixed, before
+        any credential is read."""
+        harness.fake.exception_details_on.add("begin")
+        with pytest.raises(
+            LifecycleError, match=r"browser session failed during login \(form validation\)"
+        ):
+            harness.run()
+        assert harness.relay_reads == []
+        captured = capsys.readouterr()
+        assert "SENTINEL" not in captured.out + captured.err

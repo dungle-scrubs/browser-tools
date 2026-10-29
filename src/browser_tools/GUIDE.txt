@@ -908,8 +908,16 @@ APPROVED LOGINS (1PASSWORD)
       use letters, digits, underscores and hyphens, with no leading hyphen.
 
       WHAT IT DOES, IN ORDER: it checks the policy, the instance (Chrome
-      only; a Camoufox instance is refused), and opchain's relay support;
-      then it opens one session to the tab, requires the exact configured
+      only; a Camoufox instance is refused), positive ownership of that
+      instance, and opchain's relay support. Ownership is positive and
+      physical, not a label: the instance's registry row must record a
+      user-data directory and a process start-time identity, the recorded
+      process must still be running and hold that directory, and the
+      browser actually answering the debug port must report itself as that
+      process; anything missing, unknown or stale refuses before opchain
+      or the page is touched. A named profile is not required - any
+      existing bt Chrome instance qualifies. Then it opens
+      one session to the tab, requires the exact configured
       origin and a visible tab, exactly one usable text/email username
       input and one password input in one connected form, exactly one
       enabled submit button in that form, and a same-origin POST action
@@ -926,7 +934,12 @@ APPROVED LOGINS (1PASSWORD)
       microtasks run. An asynchronous submit handler must retain values
       from the fill events or before it yields; reading the cleared DOM
       fields after an await is unsupported. JavaScript dialogs are
-      dismissed without recording or printing their contents.
+      dismissed without recording or printing their contents. Cleanup has
+      its own budget past the deadline: field clearing is bounded
+      independently, runs on every exit where a value may have been
+      inserted (a page can restore values after a confirmed clear), and a
+      clear that cannot be confirmed says so plainly rather than claiming
+      the login failed.
 
       EXIT CODES. 0 authenticated. 1 operational: the relay refused or
       timed out, the form did not match the policy, the page changed

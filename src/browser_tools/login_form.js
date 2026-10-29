@@ -24,8 +24,9 @@
  *   session.clear()           -> set both fields to '' with silent native
  *                                setters (no events), verify both empty
  *                                together, never return old values.
- *   __btLogin.probe(policy)   -> {authenticated, originOk} in whatever
- *                                document currently lives in the frame.
+ *
+ * Success polling is standalone Python; this helper has exactly one entry
+ * point (begin), which is the whole surface the Python caller uses.
  *
  * Every failure returns a REASON_* string from the fixed vocabulary below.
  * No page-provided text (exception messages, node data, attributes) is ever
@@ -90,20 +91,33 @@ globalThis.__btLogin = (function () {
   }
 
   function isEnabled(element) {
-    return element.isConnected && !element.matches(':disabled') &&
-      !element.readOnly && element.getClientRects().length > 0 &&
-      getComputedStyle(element).visibility === 'visible';
+    if (!element.isConnected || element.matches(':disabled') || element.readOnly) {
+      return false;
+    }
+    if (element.getClientRects().length === 0) return false;
+    const style = getComputedStyle(element);
+    if (style.visibility !== 'visible') return false;
+    // A promised usable field must actually render: opacity zero and a
+    // zero-size box both take credentials while being invisible to the
+    // person. Offscreen placement is allowed - a below-fold form is a real
+    // form - so there is deliberately no viewport-intersection check here.
+    const rect = element.getBoundingClientRect();
+    if (!(rect.width > 0 && rect.height > 0)) return false;
+    for (let node = element; node instanceof Element; node = node.parentElement) {
+      if (getComputedStyle(node).opacity === '0') return false;
+    }
+    return true;
   }
 
   function isSubmitButton(element) {
     if (!element.isConnected) return false;
-    if (element.tagName === 'BUTTON') {
-      const type = (element.getAttribute('type') || 'submit').toLowerCase();
-      return type === 'submit';
-    }
+    // Reflected type properties apply the browser's enumerated-value rules:
+    // an invalid or missing value reads as the default ('submit' for
+    // buttons, 'text' for inputs), which getAttribute + toLowerCase would
+    // miss (e.g. type=' post ' on a method).
+    if (element.tagName === 'BUTTON') return element.type === 'submit';
     if (element.tagName === 'INPUT') {
-      const type = (element.getAttribute('type') || '').toLowerCase();
-      return type === 'submit' || type === 'image';
+      return element.type === 'submit' || element.type === 'image';
     }
     return false;
   }
@@ -118,11 +132,15 @@ globalThis.__btLogin = (function () {
   }
 
   function effectiveAction(form, submitter) {
-    const raw = (submitter && submitter.hasAttribute('formaction')
+    const raw = submitter && submitter.hasAttribute('formaction')
       ? submitter.getAttribute('formaction')
-      : form.getAttribute('action')) || '';
+      : form.getAttribute('action');
     try {
-      // An empty/absent action resolves to the document URL.
+      // Per HTML form submission, an absent or empty action - including an
+      // empty submitter override - submits to the document URL, never the
+      // <base> URL; only a nonempty action resolves against document.baseURI.
+      // Chrome strips HTML spaces here, not JavaScript's Unicode whitespace.
+      if (raw === null || /^[\t\n\f\r ]*$/.test(raw)) return new URL(document.URL);
       return new URL(raw, document.baseURI);
     } catch (err) {
       return null;
@@ -162,12 +180,13 @@ globalThis.__btLogin = (function () {
     if (!submit.element) return { ok: false, reason: REASON_SUBMIT_COUNT };
 
     if (!isInput(username.element)) return { ok: false, reason: REASON_USERNAME_TYPE };
-    const usernameType = (username.element.getAttribute('type') || 'text').toLowerCase();
-    if (usernameType !== 'text' && usernameType !== 'email') {
+    // The reflected property: invalid and missing values read as 'text',
+    // exactly the browser's own enumerated-value semantics.
+    if (username.element.type !== 'text' && username.element.type !== 'email') {
       return { ok: false, reason: REASON_USERNAME_TYPE };
     }
     if (!isInput(password.element)) return { ok: false, reason: REASON_PASSWORD_TYPE };
-    if ((password.element.getAttribute('type') || '').toLowerCase() !== 'password') {
+    if (password.element.type !== 'password') {
       return { ok: false, reason: REASON_PASSWORD_TYPE };
     }
     if (!isEnabled(username.element) || !isEnabled(password.element)) {
@@ -209,30 +228,13 @@ globalThis.__btLogin = (function () {
     return { ok: true };
   }
 
-  // Native value setter + input/change events, the framework-compatible
-  // recipe for FILLING: a plain .value assignment is invisible to React/Vue
-  // state, and the state is what an async submit handler later submits.
-  function setNativeValue(element, value) {
-    const prototype =
-      element.tagName === 'TEXTAREA'
-        ? window.HTMLTextAreaElement && HTMLTextAreaElement.prototype
-        : window.HTMLInputElement && HTMLInputElement.prototype;
-    const descriptor = prototype && Object.getOwnPropertyDescriptor(prototype, 'value');
-    if (descriptor && descriptor.set) {
-      descriptor.set.call(element, value);
-    } else {
-      element.value = value;
-    }
-    element.dispatchEvent(new Event('input', { bubbles: true }));
-    element.dispatchEvent(new Event('change', { bubbles: true }));
-  }
-
-  // The same native setter, silent: no input/change events. Cleanup must
-  // not dispatch them. An empty-field notification is a no-op at best; at
-  // worst, while a page's async submit handler is still awaiting (fetch or
-  // validation), those events overwrite the framework state the handler
-  // will read, so the submission would carry empty credentials. The DOM
-  // value is still verifiably empty, which is the guarantee cleanup owes.
+  // The native value setter, silent: no input/change events. One
+  // implementation serves both callers. Cleanup must not dispatch events:
+  // an empty-field notification is a no-op at best; at worst, while a
+  // page's async submit handler is still awaiting (fetch or validation),
+  // those events overwrite the framework state the handler will read, so
+  // the submission would carry empty credentials. The DOM value is still
+  // verifiably empty, which is the guarantee cleanup owes.
   function setNativeValueSilently(element, value) {
     const prototype =
       element.tagName === 'TEXTAREA'
@@ -244,6 +246,16 @@ globalThis.__btLogin = (function () {
     } else {
       element.value = value;
     }
+  }
+
+  // The notifying variant for FILLING: the same native setter plus
+  // input/change events, the framework-compatible recipe (a plain .value
+  // assignment is invisible to React/Vue state, and the state is what an
+  // async submit handler later submits).
+  function setNativeValue(element, value) {
+    setNativeValueSilently(element, value);
+    element.dispatchEvent(new Event('input', { bubbles: true }));
+    element.dispatchEvent(new Event('change', { bubbles: true }));
   }
 
   function makeSession(policy, boundNodes) {
@@ -374,18 +386,5 @@ globalThis.__btLogin = (function () {
     return session;
   }
 
-  function probe(policy) {
-    if (!documentUsable() || !originOk(policy)) {
-      return { authenticated: false, originOk: false };
-    }
-    let matched = false;
-    try {
-      matched = document.querySelectorAll(policy.success_selector).length > 0;
-    } catch (err) {
-      matched = false;
-    }
-    return { authenticated: matched, originOk: true };
-  }
-
-  return { begin: begin, probe: probe };
+  return { begin: begin };
 })();

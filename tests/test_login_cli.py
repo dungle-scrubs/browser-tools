@@ -10,13 +10,14 @@ credential in either channel.
 from __future__ import annotations
 
 import contextlib
+import errno
 import json
 import os
 from typing import Any
 
 import pytest
 
-from browser_tools import cli, credential_relay
+from browser_tools import cli, credential_relay, login_ownership
 from browser_tools import login as login_module
 from browser_tools.core import registry as core_registry
 from browser_tools.lifecycle import LifecycleError
@@ -74,6 +75,22 @@ def chrome_entry() -> dict:
         "user_data_dir": "",
         "engine": "chrome",
     }
+
+
+@pytest.fixture
+def owned_instance(monkeypatch):
+    """Stand past the ownership boundary in CLI-level runs.
+
+    The registry rows here carry synthetic PIDs; the ownership module's own
+    tests and the live module cover the real check.
+    """
+    monkeypatch.setattr(
+        login_module.login_ownership, "verify_recorded_owner",
+        lambda entry: login_ownership.OwnershipSnapshot(
+            pid=2_000_000_000, pid_start="START",
+            user_data_dir="/recorded/session-dir",
+        ),
+    )
 
 
 @pytest.fixture
@@ -282,7 +299,7 @@ class TestPreBrowserRefusals:
         assert relay_trap == []
 
     def test_missing_opchain_is_refused_without_a_browser(
-        self, registry, monkeypatch, tmp_path
+        self, registry, monkeypatch, tmp_path, owned_instance
     ):
         registry(**{"web-01": chrome_entry()})
         monkeypatch.setattr(credential_relay, "find_opchain", lambda: None)
@@ -348,3 +365,49 @@ class TestNoLeaksThroughTheCLI:
         ) == 0
         captured = capsys.readouterr()
         assert "SENTINEL" not in captured.out
+
+
+class TestUnstartableProvider:
+    """An opchain that cannot even be spawned is one operational fact.
+
+    The round-two reproduction: an executable-format-invalid fake opchain
+    raised OSError(ENOEXEC) out of the CLI as a traceback. Both Popen call
+    sites normalize any spawn OSError into the fixed RelayError family,
+    cause suppressed, so the shell sees exit 1 and a fixed sentence.
+    """
+
+    def test_executable_format_invalid_opchain_is_exit_1_not_a_traceback(
+        self, registry, monkeypatch, tmp_path, capsys, owned_instance
+    ):
+        registry(**{"web-01": chrome_entry()})
+        binary = tmp_path / "opchain"
+        binary.write_text("This deliberately is not an executable format.\n")
+        binary.chmod(0o700)
+        monkeypatch.setattr(credential_relay, "find_opchain", lambda: str(binary))
+        assert cli.main(
+            ["login", "web-01", "--account", "example", "--config", policy_file(tmp_path)]
+        ) == 1
+        err = capsys.readouterr().err
+        assert "could not be started" in err
+        assert "Traceback" not in err
+        assert str(tmp_path) not in err
+        assert "opchain" in err
+
+    def test_injected_oserror_with_sentinel_text_is_exit_1_clean(
+        self, registry, monkeypatch, tmp_path, capsys, owned_instance
+    ):
+        registry(**{"web-01": chrome_entry()})
+        monkeypatch.setattr(credential_relay, "find_opchain", lambda: "/fake/opchain")
+
+        def explode(*args, **kwargs):
+            raise OSError(errno.ENOEXEC, "SENTINEL-provider-burst /fake/opchain")
+
+        monkeypatch.setattr(credential_relay.subprocess, "Popen", explode)
+        assert cli.main(
+            ["login", "web-01", "--account", "example", "--config", policy_file(tmp_path)]
+        ) == 1
+        captured = capsys.readouterr()
+        assert "could not be started" in captured.err
+        assert "SENTINEL" not in captured.out + captured.err
+        assert "Traceback" not in captured.err
+        assert "/fake/opchain" not in captured.err

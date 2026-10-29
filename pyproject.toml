@@ -162,4 +162,4 @@ select = [
 ignore = ["E501", "E731", "F841"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["browser_tools"]
+known-first-party = ["browser_tools", "login_browser_fixtures", "login_fixtures"]

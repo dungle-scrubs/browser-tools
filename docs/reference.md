@@ -179,8 +179,13 @@ one_shot.py                Connect, select page, attach, detach
   attached_session.py      Handler client over an attached session
 login.py                   Approved 1Password logins: one configured form
   login_policy.py          The operator-edited policy file, validated first
+  login_contract.py        Shared contracts: fixed diagnostics, reason
+                          mapping, timeout rules, Deadline and Frame types
   login_form.js            Document-bound validation, fill, submit, clear
   login_guards.py          Dialog dismissal and suppression of CDP frame logs
+  login_ownership.py       Positive ownership: recorded process identity,
+                          the user-data directory it holds, and the
+                          connected browser's own reported process id
   credential_relay.py      opchain --value-fd private relay recipe
 events.py                  attach, wait, console-list, network-list
 list_verbs.py              Frame and storage commands

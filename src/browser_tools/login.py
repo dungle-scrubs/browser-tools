@@ -1,26 +1,14 @@
 """``bt login``: one configured login form, filled and submitted once.
 
-The operation, end to end:
-
-1. Load the operator's policy (:mod:`browser_tools.login_policy`) and refuse
-   anything malformed, before the browser or 1Password is touched.
-2. Resolve the instance and refuse non-Chrome engines.
-3. Verify the installed opchain supports the private relay
-   (:mod:`browser_tools.credential_relay`) -- grammar only, no credential.
-4. Over one standalone one-shot CDP session (the existing
-   :func:`browser_tools.one_shot.one_shot_page_session` seam), validate the
-   whole form in an isolated world bound to that exact document: exact
-   configured HTTPS origin, visible tab, exactly one usable username input
-   and one password input in one connected form, exactly one usable submit
-   button in the same form, a POST same-origin destination including
-   ``formaction``/``formmethod`` overrides, and a success selector that does
-   not already match. Only then are credentials read, through the relay.
-5. Fill both fields with native value setters (values arrive as CDP call
-   arguments, never as script source), revalidate after the input events,
-   submit with the form's own ``requestSubmit`` on the validated button, and
-   clear the fields synchronously.
-6. Wait within the same overall deadline for the configured success selector
-   at the configured origin. Submission alone never means authenticated.
+One standalone CDP session over the existing :func:`one_shot_page_session`
+seam: positively own the registered browser
+(:mod:`browser_tools.login_ownership`), validate the whole form in an
+isolated world bound to that exact document, read the two credentials
+through the private relay (:mod:`browser_tools.credential_relay`), fill,
+submit once, clear, and wait for the configured success condition - all
+under one overall deadline. The full walkthrough, contract and limits are
+The Manual's APPROVED LOGINS section (``bt guide``); the shared fixed
+diagnostic vocabulary and value types are :mod:`browser_tools.login_contract`.
 
 Every diagnostic this module raises is a fixed sentence. Browser- and
 page-provided text (JS exception details, CDP messages, page markup) is
@@ -37,40 +25,38 @@ import asyncio
 import contextlib
 import json
 import logging
-import math
 import threading
-import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from . import credential_relay, curated, lifecycle, login_policy
-from .core.attach import AmbiguousTargetError, TargetNotFoundError
-from .core.errors import CDPError, NoPageError
+from . import credential_relay, curated, lifecycle, login_ownership, login_policy
+from . import login_contract as contract
+from .core.errors import CDPError
 from .lifecycle import LifecycleError
+from .login_contract import DEFAULT_LOGIN_TIMEOUT_MS, LoginError, validate_timeout_ms
 from .login_guards import DialogGuard, quiet_websocket_logs
 from .one_shot import one_shot_page_session
 
 if TYPE_CHECKING:
     from .endpoint import ResolvedEndpoint
-
-#: Overall deadline default, shared with the CLI flag.
-DEFAULT_LOGIN_TIMEOUT_MS = 30_000
+    from .login_ownership import OwnershipSnapshot
 
 #: How often the success condition is polled after submission.
 SUCCESS_POLL_SECONDS = 0.25
 
-#: Per-CDP-command bound cap so one stalled command cannot eat the whole
-#: deadline before the phase that needs it.
-PER_COMMAND_TIMEOUT_SECONDS = 10.0
-
-#: Grace past the overall deadline that cancellation cleanup (relay group
-#: teardown, field clearing, session close) gets before the hard wall.
+#: Grace past the overall deadline that session-close teardown gets before
+#: the hard wall. Separate from the field-clear budget: closing the one-shot
+#: session (detach, socket close) is the slowest cleanup step, so it gets the
+#: widest bound; relay group teardown and the field clear each keep their own
+#: tighter bounds (``_RELAY_CANCEL_SETTLE_SECONDS`` and the 2-second clear).
 _CLEANUP_GRACE_SECONDS = 8.0
 
-#: The inner wall fires this far after the cooperative deadline so the
-#: precise phase checks ("timed out during ...", "success condition was not
-#: met") always report first; the wall only catches phases that ignore the
-#: deadline, such as a hung session attach.
+#: Both operation walls (session acquisition and the body's active work)
+#: fire this far after the cooperative deadline so the precise phase checks
+#: ("timed out during ...", "success condition was not met") always report
+#: first; a wall only catches phases that ignore the deadline, such as a hung
+#: session attach. Field finalization and dialog shutdown never run inside a
+#: wall: they draw from their own budgets instead.
 _WALL_CUSHION_SECONDS = 0.05
 
 #: Bound on waiting for a cancelled relay read's worker thread to settle
@@ -85,160 +71,7 @@ _LOGIN_SCRIPT_PATH = Path(__file__).parent / "login_form.js"
 _login_script: str | None = None
 _relay_tasks: set[asyncio.Task[str]] = set()
 
-#: Fixed diagnostics. None of these interpolate browser or provider text.
-_ENGINE_MESSAGE = (
-    "login works only with Chrome instances. This instance runs a different "
-    "engine, which the login transaction does not support"
-)
-_TIMED_OUT = "the login did not complete within its timeout"
-_FIELDS_MAY_REMAIN = (
-    "the login did not complete and sensitive form fields may still hold "
-    "values; check the tab before reusing it. The form was not resubmitted"
-)
-_SESSION_FAILED = "the browser session failed during login ({phase})"
-_SUCCESS_UNMET = (
-    "the form submission was requested but the configured success condition was not met "
-    "within the timeout"
-)
-_PAGE_CHANGED_BEFORE_SUBMIT = (
-    "the page changed while submission was in progress; whether it completed "
-    "could not be confirmed. The form was not resubmitted"
-)
-_PAGE_CHANGED_BEFORE_FILL = (
-    "the page changed after validation and before any value was inserted; "
-    "nothing was sent to a replacement document"
-)
-_PAGE_CHANGED_DURING_FILL = (
-    "the page changed while the form was being filled; whether the values "
-    "were inserted could not be confirmed, but nothing was sent to a "
-    "replacement document and the form was not submitted"
-)
-_FILL_UNCERTAIN_CLEARED = (
-    "the fill could not be confirmed; the configured fields were cleared and "
-    "the form was not submitted"
-)
-_SUBMIT_UNCERTAIN_CLEARED = (
-    "the form submission could not be confirmed; the configured fields were "
-    "cleared and the form was not resubmitted"
-)
-
-#: Fixed English for the JS helper's fixed reason vocabulary.
-_REASONS: dict[str, str] = {
-    "wrong-origin": "the selected page is not at the configured origin",
-    "hidden-tab": (
-        "the selected page is a hidden tab; input to a hidden tab is dropped, "
-        "so bring the tab to the front or select a visible one with --target"
-    ),
-    "no-document": "the selected page has no usable document",
-    "bad-selector": "a configured selector is not a valid selector for this page",
-    "username-not-unique": "the configured username selector does not match exactly one input",
-    "password-not-unique": "the configured password selector does not match exactly one input",
-    "submit-not-unique": "the configured submit selector does not match exactly one element",
-    "username-wrong-type": "the username field is not an ordinary text or email input",
-    "password-wrong-type": "the password field is not a password input",
-    "field-disabled": "one of the configured fields is disabled, read-only, or detached",
-    "fields-not-distinct": "the username and password selectors resolve to the same element",
-    "no-common-form": "the username and password fields are not in the same connected form",
-    "form-detached": "the login form is not connected to the main document",
-    "submit-wrong-form": "the submit button does not belong to the login form",
-    "submit-wrong-type": "the submit element is not a submit button",
-    "not-post": "the form (or its submit button override) does not submit by POST",
-    "action-not-same-origin": (
-        "the form (or its submit button override) submits somewhere other than "
-        "the configured origin"
-    ),
-    "submit-unsupported": "this browser form does not support requestSubmit",
-    "already-authenticated": (
-        "the configured success condition already holds on this page, so "
-        "nothing was filled or submitted"
-    ),
-    "document-changed": (
-        "the page or its form changed during the login and no value was "
-        "inserted into a replacement document"
-    ),
-    "fill-failed": "the configured fields could not be filled",
-    "submit-failed": "the form could not be submitted",
-    "form-invalid": "the form's validation rules prevented submission",
-}
-
 logger = logging.getLogger(__name__)
-
-
-class LoginError(LifecycleError):
-    """One fixed-diagnostic login failure (CLI exit 1)."""
-
-    def __init__(self, message: str, *, fields_may_remain: bool = False) -> None:
-        super().__init__(message)
-        self.fields_may_remain = fields_may_remain
-
-
-def validate_timeout_ms(timeout_ms: object) -> None:
-    """Refuse a timeout that is not a usable positive integer (exit 2).
-
-    One check, shared by the CLI preconditions and the direct entry point
-    so the two cannot drift. An ``int`` too large for its seconds
-    conversion to represent is refused here rather than crashing
-    ``math.isfinite``, which would convert it to float first and raise
-    OverflowError; no arbitrary maximum is imposed on ordinary values.
-    """
-    if isinstance(timeout_ms, bool) or not isinstance(timeout_ms, int) or timeout_ms <= 0:
-        raise login_policy.LoginPolicyError(
-            "login --timeout-ms must be a finite positive integer"
-        )
-    try:
-        seconds = timeout_ms / 1000.0
-    except OverflowError:
-        raise login_policy.LoginPolicyError(
-            "login --timeout-ms is too large to represent"
-        ) from None
-    if not math.isfinite(seconds):
-        raise login_policy.LoginPolicyError(
-            "login --timeout-ms is too large to represent"
-        ) from None
-
-
-def _acquisition_message(exc: BaseException) -> str:
-    """A fixed diagnostic for one session-entry failure.
-
-    The underlying errors carry every tab's URL and title, or arbitrary
-    protocol text - page-provided data the output channels never see. The
-    generic :func:`cli_cdp_errors` mapping is deliberately not used: it
-    forwards ``str(exc)`` verbatim.
-    """
-    if isinstance(exc, AmbiguousTargetError):
-        return "several tabs are open; choose one with --target"
-    if isinstance(exc, TargetNotFoundError):
-        return "the --target value matches no open tab; no page was selected"
-    if isinstance(exc, NoPageError):
-        return "the browser has no open page; open the login page and retry"
-    if isinstance(exc, ConnectionError):
-        return "could not connect to the browser; check that the instance is still running"
-    if isinstance(exc, CDPError):
-        return "the browser session could not be opened"
-    return "the browser session failed during login"
-
-
-class _Deadline:
-    """The one overall deadline every phase draws from."""
-
-    def __init__(self, timeout_ms: int) -> None:
-        self._ends_at = time.monotonic() + timeout_ms / 1000.0
-
-    def remaining(self) -> float:
-        return self._ends_at - time.monotonic()
-
-    def command_timeout(self, phase: str) -> float:
-        remaining = self.remaining()
-        if remaining <= 0:
-            raise LoginError(f"the login timed out during {phase}")
-        return min(PER_COMMAND_TIMEOUT_SECONDS, remaining)
-
-
-def _reason_message(reason: str) -> str:
-    """Fixed English for one JS reason code; unknown codes stay fixed too."""
-    if reason in _REASONS:
-        return _REASONS[reason]
-    return "the login form did not match the configured policy"
 
 
 def _policy_json_for_page(account: login_policy.AccountSpec) -> str:
@@ -262,32 +95,32 @@ def _login_script_source() -> str:
 
 
 async def _send(cdp: Any, session_id: str, method: str, params: dict[str, Any],
-                phase: str, deadline: _Deadline) -> Any:
+                phase: str, deadline: contract.Deadline) -> Any:
     """One bounded CDP send whose failures become fixed diagnostics."""
     timeout = deadline.command_timeout(phase)
     try:
         result = await cdp.send(method=method, params=params, session_id=session_id, timeout=timeout)
     except Exception:
         logger.debug("login CDP send failed at %s", phase)
-        raise LoginError(_SESSION_FAILED.format(phase=phase)) from None
+        raise LoginError(contract.SESSION_FAILED.format(phase=phase)) from None
     if not isinstance(result, dict):
-        raise LoginError(_SESSION_FAILED.format(phase=phase))
+        raise LoginError(contract.SESSION_FAILED.format(phase=phase))
     return result
 
 
 def _outcome_of(result: object, phase: str) -> dict[str, Any]:
     """Parse a by-value Runtime result without exposing protocol contents."""
     if not isinstance(result, dict) or result.get("exceptionDetails"):
-        raise LoginError(_SESSION_FAILED.format(phase=phase))
+        raise LoginError(contract.SESSION_FAILED.format(phase=phase))
     remote = result.get("result")
     if not isinstance(remote, dict) or not isinstance(remote.get("value"), dict):
-        raise LoginError(_SESSION_FAILED.format(phase=phase))
+        raise LoginError(contract.SESSION_FAILED.format(phase=phase))
     return remote["value"]
 
 
 async def _eval_login_script(cdp: Any, session_id: str, frame_id: str, expression_tail: str,
                              *, return_by_value: bool, phase: str,
-                             deadline: _Deadline) -> dict[str, Any]:
+                             deadline: contract.Deadline) -> dict[str, Any]:
     """Evaluate the login helper (plus one tail call) in a fresh isolated world.
 
     ``Page.createIsolatedWorld`` in the current document means the expression
@@ -302,7 +135,7 @@ async def _eval_login_script(cdp: Any, session_id: str, frame_id: str, expressio
     )
     context_id = world.get("executionContextId")
     if not isinstance(context_id, int):
-        raise LoginError(_SESSION_FAILED.format(phase=phase))
+        raise LoginError(contract.SESSION_FAILED.format(phase=phase))
     result = await _send(
         cdp, session_id, "Runtime.evaluate",
         {
@@ -317,7 +150,7 @@ async def _eval_login_script(cdp: Any, session_id: str, frame_id: str, expressio
 
 
 async def _call_on_session(cdp: Any, session_id: str, object_id: str,
-                           function_declaration: str, phase: str, deadline: _Deadline,
+                           function_declaration: str, phase: str, deadline: contract.Deadline,
                            arguments: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     """Call one method on the bound session object, by value.
 
@@ -336,32 +169,24 @@ async def _call_on_session(cdp: Any, session_id: str, object_id: str,
     return _outcome_of(result, phase)
 
 
-class _Frame:
-    """The main frame's id and its loader id: the document identity."""
-
-    def __init__(self, frame_id: str, loader_id: str) -> None:
-        self.frame_id = frame_id
-        self.loader_id = loader_id
-
-
-async def _read_frame(cdp: Any, session_id: str, deadline: _Deadline) -> _Frame:
+async def _read_frame(cdp: Any, session_id: str, deadline: contract.Deadline) -> contract.Frame:
     tree = await _send(cdp, session_id, "Page.getFrameTree", {}, "frame lookup", deadline)
     frame_tree = tree.get("frameTree")
     frame = frame_tree.get("frame") if isinstance(frame_tree, dict) else None
     if not isinstance(frame, dict):
-        raise LoginError(_SESSION_FAILED.format(phase="frame lookup"))
+        raise LoginError(contract.SESSION_FAILED.format(phase="frame lookup"))
     frame_id = frame.get("id")
     loader_id = frame.get("loaderId")
     if (
         not isinstance(frame_id, str) or not frame_id
         or not isinstance(loader_id, str) or not loader_id
     ):
-        raise LoginError(_SESSION_FAILED.format(phase="frame lookup"))
-    return _Frame(frame_id, loader_id)
+        raise LoginError(contract.SESSION_FAILED.format(phase="frame lookup"))
+    return contract.Frame(frame_id, loader_id)
 
 
-async def _loader_changed(cdp: Any, session_id: str, frame: _Frame,
-                          deadline: _Deadline) -> bool:
+async def _loader_changed(cdp: Any, session_id: str, frame: contract.Frame,
+                          deadline: contract.Deadline) -> bool:
     """Whether a new document has loaded in the frame since validation.
 
     ``loaderId`` is a trusted browser-protocol fact (not page text): it
@@ -372,7 +197,7 @@ async def _loader_changed(cdp: Any, session_id: str, frame: _Frame,
     return current.loader_id != frame.loader_id
 
 
-def _ensure_relay_ready(policy: login_policy.LoginPolicy, deadline: _Deadline) -> str:
+def _ensure_relay_ready(policy: login_policy.LoginPolicy, deadline: contract.Deadline) -> str:
     """The opchain binary path, after the no-credential support probe.
 
     The probe draws from the same overall deadline as everything else,
@@ -386,7 +211,7 @@ def _ensure_relay_ready(policy: login_policy.LoginPolicy, deadline: _Deadline) -
         )
     remaining = deadline.remaining()
     if remaining <= 0:
-        raise LoginError(_TIMED_OUT)
+        raise LoginError(contract.TIMED_OUT)
     credential_relay.ensure_relay_supported(
         binary,
         policy.identity,
@@ -397,7 +222,7 @@ def _ensure_relay_ready(policy: login_policy.LoginPolicy, deadline: _Deadline) -
 
 async def _read_credentials(binary: str, policy: login_policy.LoginPolicy,
                             account: login_policy.AccountSpec,
-                            deadline: _Deadline) -> tuple[str, str]:
+                            deadline: contract.Deadline) -> tuple[str, str]:
     """Both fields through the private relay, inside the remaining budget.
 
     An owned task runs each blocking read. asyncio.wait leaves that task
@@ -445,24 +270,106 @@ async def _read_credentials(binary: str, policy: login_policy.LoginPolicy,
     return username, password
 
 
+class _LoginMarker(LoginError):
+    """A body failure whose final diagnosis the controller must complete.
+
+    The body raises these where the outcome depends on the bounded cleanup
+    that runs outside the work wall; the controller replaces them with the
+    precise fixed diagnostic once the clear's own result is known.
+    """
+
+
+class _FillFailed(_LoginMarker):
+    """The fill call failed; whether it inserted anything is unknown."""
+
+    def __init__(self) -> None:
+        # A placeholder that never surfaces: the controller replaces it with
+        # the precise diagnosis once the final clear's result is known.
+        super().__init__("the form fill could not be confirmed")
+
+
+class _SubmitFailed(_LoginMarker):
+    """The submit call failed; whether it submitted anything is unknown."""
+
+    def __init__(self) -> None:
+        super().__init__("the form submission could not be confirmed")
+
+
+class _State:
+    """Base of the mutually exclusive progress variants."""
+
+
+class _Untouched(_State):
+    """Nothing was inserted: no clear is owed on any exit.
+
+    This is also the state the body returns to when the page refuses the
+    fill before insertion began, so a known pre-insert refusal owes no
+    cleanup either.
+    """
+
+
+class _MayHoldValues(_State):
+    """Base of the variants where field values may exist."""
+
+    def __init__(self, session_object: str, frame: contract.Frame) -> None:
+        self.session_object = session_object
+        self.frame = frame
+
+
+class _FillDispatched(_MayHoldValues):
+    """The fill call was dispatched; insertion may have started."""
+
+
+class _Filled(_MayHoldValues):
+    """Both values were inserted and revalidated."""
+
+
+class _SubmitDispatched(_MayHoldValues):
+    """The submit call was dispatched; its outcome is unknown."""
+
+
+class _Submitted(_MayHoldValues):
+    """The submission request returned successfully."""
+
+
+class _Progress:
+    """What the transaction has done that finalization must answer for.
+
+    The body marks this object immediately before the field and submit
+    calls (and back to untouched on a known pre-insert refusal), so that an
+    exception -- including cancellation -- never loses the insertion state.
+    The controller owns the object and reads it after the work wall, on
+    every exit, to decide whether a bounded final clear is owed.
+    """
+
+    def __init__(self) -> None:
+        self.state: _State = _Untouched()
+
+    def mark(self, state: _State) -> None:
+        self.state = state
+
+
 async def _login_transaction(port: int | ResolvedEndpoint, target_spec: str | None, target_by: str | None,
                              policy: login_policy.LoginPolicy,
                              account: login_policy.AccountSpec,
-                             binary: str, deadline: _Deadline) -> None:
+                             binary: str, deadline: contract.Deadline,
+                             ownership: OwnershipSnapshot) -> None:
     """The whole browser-side transaction, on one one-shot session.
 
     The deadline was created before the capability probe and is never reset,
     so the documented timeout covers session attach too (a registry session
-    has no per-command open bound of its own). The body runs inside one
-    wall that fires just past the deadline; session teardown then runs in
-    its own bounded grace, outside that wall, so a stalled detach cannot
-    replace the body's diagnosis: a fields-may-remain warning outranks a
-    timeout. The inner scope cancels at the deadline only after the
-    cooperative phase checks have already reported their precise fixed
-    messages.
+    has no per-command open bound of its own). The operation wall covers
+    session acquisition only; everything after attach owns its own budget:
+    :func:`_transaction_on_session` wraps its active work in a wall of the
+    remaining budget, runs all field finalization and dialog shutdown
+    outside that wall, and the session teardown below runs in its own
+    bounded grace, so a stalled detach cannot replace the body's diagnosis:
+    a fields-may-remain warning outranks a timeout. The inner wall cancels
+    at the deadline only after the cooperative phase checks have already
+    reported their precise fixed messages.
     """
     if deadline.remaining() <= 0:
-        raise LoginError(_TIMED_OUT)
+        raise LoginError(contract.TIMED_OUT)
     cm = one_shot_page_session(port, target_spec, target_by)
     entered = False
     body_failure: LoginError | None = None
@@ -471,22 +378,23 @@ async def _login_transaction(port: int | ResolvedEndpoint, target_spec: str | No
         try:
             async with asyncio.timeout(deadline.remaining() + _WALL_CUSHION_SECONDS):
                 cdp, session_id = await cm.__aenter__()  # pyright: ignore[reportAbstractUsage]
-                entered = True
-                await _transaction_on_session(
-                    cdp, session_id, policy, account, binary, deadline
-                )
+            entered = True
+            await _transaction_on_session(
+                cdp, session_id, ownership, policy, account, binary, deadline
+            )
         except LoginError as failure:
             body_failure = failure
         except TimeoutError:
-            body_failure = LoginError(_TIMED_OUT)
+            body_failure = LoginError(contract.TIMED_OUT)
         except BaseException as exc:
             propagating = exc
             raise
     finally:
-        # Teardown is bounded by the cleanup grace. An exception raised here
-        # would replace one already propagating, so teardown failures are
-        # contained: with a body failure or an in-flight exception they are
-        # dropped; with nothing else to report, a stalled teardown is
+        # Teardown is bounded by the cleanup grace, separate from both the
+        # acquisition wall and the field-clear budget. An exception raised
+        # here would replace one already propagating, so teardown failures
+        # are contained: with a body failure or an in-flight exception they
+        # are dropped; with nothing else to report, a stalled teardown is
         # itself the timeout it caused.
         if entered:
             try:
@@ -500,38 +408,117 @@ async def _login_transaction(port: int | ResolvedEndpoint, target_spec: str | No
                         raise
                 elif body_failure is None:
                     body_failure = LoginError(
-                        _TIMED_OUT if isinstance(failure, TimeoutError)
-                        else _SESSION_FAILED.format(phase="session cleanup")
+                        contract.TIMED_OUT if isinstance(failure, TimeoutError)
+                        else contract.SESSION_FAILED.format(phase="session cleanup")
                     )
     if body_failure is not None:
         raise body_failure
 
 
-async def _transaction_on_session(cdp: Any, session_id: str, policy: login_policy.LoginPolicy,
+async def _transaction_on_session(cdp: Any, session_id: str, ownership: OwnershipSnapshot,
+                                  policy: login_policy.LoginPolicy,
                                   account: login_policy.AccountSpec, binary: str,
-                                  deadline: _Deadline) -> None:
+                                  deadline: contract.Deadline) -> None:
+    """Own the active work, then every field finalization, outside its wall.
+
+    The work wall bounds the active phase only (dialog enable, validation,
+    credential reads, fill, submission request) and fires just past the
+    cooperative deadline. Field finalization and dialog shutdown run
+    outside that wall on budgets separate from it and from each other: the
+    2-second field-clear bound, the guard's own settle bound, and the
+    session-close grace owned by the transaction below. A page that
+    restores values after a confirmed clear is why the final clear runs on
+    every exit where insertion was possible.
+    """
+    await login_ownership.verify_connected_browser(
+        cdp, ownership, deadline.command_timeout("owner verification")
+    )
     frame = await _read_frame(cdp, session_id, deadline)
     dialogs = DialogGuard(cdp, session_id)
     dialogs.start()
-    body_failure: LoginError | None = None
+    failure: LoginError | None = None
     try:
-        await _send(cdp, session_id, "Page.enable", {}, "dialog handling", deadline)
-        await _transaction_body(cdp, session_id, frame, policy, account, binary, deadline)
-    except LoginError as failure:
-        body_failure = failure
-        raise
+        progress = _Progress()
+        submitted = False
+        try:
+            async with asyncio.timeout(deadline.remaining() + _WALL_CUSHION_SECONDS):
+                await _send(cdp, session_id, "Page.enable", {}, "dialog handling", deadline)
+                await _transaction_body(
+                    cdp, session_id, frame, policy, account, binary, deadline, progress
+                )
+            submitted = True
+        except asyncio.CancelledError:
+            # Ordinary external cancellation: cleanup first, then propagate,
+            # unless the clear could not be confirmed - the sensitive-field
+            # warning outranks the cancellation.
+            final = await _finalize_after_cancellation(cdp, session_id, progress)
+            if final is not None:
+                failure = final
+            else:
+                raise
+        except LoginError as error:
+            failure = await _finalize_failure(cdp, session_id, progress, error)
+        except TimeoutError:
+            failure = await _finalize_failure(
+                cdp, session_id, progress, LoginError(contract.TIMED_OUT)
+            )
+        except BaseException:
+            # Relay and transport failures keep their own fixed text; only
+            # the owed clear runs here, and its outcome cannot replace what
+            # already has a diagnosis of its own.
+            await _finalize_failure(cdp, session_id, progress, None)
+            raise
+        if submitted:
+            state = progress.state
+            if isinstance(state, _MayHoldValues):
+                cleared = await _try_clear(cdp, session_id, state.session_object, state.frame)
+                if cleared is False:
+                    failure = LoginError(contract.FIELDS_MAY_REMAIN, fields_may_remain=True)
+                else:
+                    try:
+                        await _wait_for_success(cdp, session_id, frame, account, deadline)
+                    except LoginError as unmet:
+                        cleared = await _try_clear(
+                            cdp, session_id, state.session_object, state.frame
+                        )
+                        failure = (
+                            LoginError(contract.FIELDS_MAY_REMAIN, fields_may_remain=True)
+                            if cleared is False else unmet
+                        )
+                    except asyncio.CancelledError:
+                        cleared = await _try_clear(
+                            cdp, session_id, state.session_object, state.frame
+                        )
+                        if cleared is False:
+                            failure = LoginError(contract.FIELDS_MAY_REMAIN, fields_may_remain=True)
+                        else:
+                            raise
+                    else:
+                        cleared = await _try_clear(
+                            cdp, session_id, state.session_object, state.frame
+                        )
+                        if cleared is False:
+                            failure = LoginError(contract.FIELDS_MAY_REMAIN, fields_may_remain=True)
     finally:
         try:
             await dialogs.close()
         except (Exception, asyncio.CancelledError):
-            if body_failure is None or not body_failure.fields_may_remain:
+            if failure is None or not failure.fields_may_remain:
                 raise
+    if failure is not None:
+        raise failure
 
 
-async def _transaction_body(cdp: Any, session_id: str, frame: _Frame,
+async def _transaction_body(cdp: Any, session_id: str, frame: contract.Frame,
                             policy: login_policy.LoginPolicy,
                             account: login_policy.AccountSpec, binary: str,
-                            deadline: _Deadline) -> None:
+                            deadline: contract.Deadline, progress: _Progress) -> None:
+    """Validate, read, fill and request submission, marking ``progress``.
+
+    Cleanup and success polling are the controller's: this body only marks
+    what it has done, immediately before the calls that make insertion
+    possible, so the controller can answer for the fields on every exit.
+    """
     policy_json = _policy_json_for_page(account)
 
     # -- Validation, in the document, before any credential is read. -------
@@ -539,91 +526,132 @@ async def _transaction_body(cdp: Any, session_id: str, frame: _Frame,
         cdp, session_id, frame.frame_id, f"__btLogin.begin({policy_json})",
         return_by_value=False, phase="form validation", deadline=deadline,
     )
+    if begin.get("exceptionDetails"):
+        # A thrown helper is not a session object; its Error remote object
+        # is never trusted as one.
+        raise LoginError(contract.SESSION_FAILED.format(phase="form validation"))
     session_object = (begin.get("result") or {}).get("objectId")
     if not isinstance(session_object, str) or not session_object:
-        raise LoginError(_SESSION_FAILED.format(phase="form validation"))
+        raise LoginError(contract.SESSION_FAILED.format(phase="form validation"))
     outcome = await _call_on_session(
         cdp, session_id, session_object,
         "function () { return this.outcome; }", "form validation", deadline,
     )
     if outcome.get("ok") is not True:
-        raise LoginError(_reason_message(str(outcome.get("reason", ""))))
+        raise LoginError(contract.reason_message(str(outcome.get("reason", ""))))
 
     # -- Credential reads, between validation and any insertion. -----------
     username, password = await _read_credentials(binary, policy, account, deadline)
 
     # -- Revalidation in the bound world, then insertion. -------------------
     if await _loader_changed(cdp, session_id, frame, deadline):
-        raise LoginError(_PAGE_CHANGED_BEFORE_FILL)
+        raise LoginError(contract.PAGE_CHANGED_BEFORE_FILL)
+    progress.mark(_FillDispatched(session_object, frame))
     try:
         fill = await _call_on_session(
             cdp, session_id, session_object,
             "function (u, p) { return this.fill(u, p); }", "form fill", deadline,
             arguments=[{"value": username}, {"value": password}],
         )
-    except (LoginError, asyncio.CancelledError) as failure:
-        cleared = await _try_clear(cdp, session_id, session_object, frame)
-        if cleared is None:
-            raise LoginError(_PAGE_CHANGED_DURING_FILL) from None
-        if cleared:
-            if isinstance(failure, asyncio.CancelledError):
-                raise
-            raise LoginError(_FILL_UNCERTAIN_CLEARED) from None
-        raise LoginError(_FIELDS_MAY_REMAIN, fields_may_remain=True) from None
+    except asyncio.CancelledError:
+        raise
+    except LoginError as failure:
+        raise _FillFailed() from failure
     if fill.get("ok") is not True:
-        message = _reason_message(str(fill.get("reason", "")))
+        message = contract.reason_message(str(fill.get("reason", "")))
         if fill.get("insertionStarted") is False:
+            # The page refused before insertion began; the document is still
+            # untouched and owes no clear.
+            progress.mark(_Untouched())
             raise LoginError(message)
-        if fill.get("cleared") is not True:
-            raise LoginError(message + ". " + _FIELDS_MAY_REMAIN, fields_may_remain=True)
         raise LoginError(message)
+    progress.mark(_Filled(session_object, frame))
 
-    # -- Submission on the validated form, then a synchronous clear. -------
+    # -- Submission on the validated form. The JS helper clears the fields
+    # -- synchronously before returning; the controller confirms that clear
+    # -- and polls for success, both outside the work wall.
+    progress.mark(_SubmitDispatched(session_object, frame))
     try:
         submitted = await _call_on_session(
             cdp, session_id, session_object,
             "function () { return this.submit(); }", "form submission", deadline,
         )
-    except (LoginError, asyncio.CancelledError) as failure:
-        cleared = await _try_clear(cdp, session_id, session_object, frame)
-        if cleared is None:
-            raise LoginError(_PAGE_CHANGED_BEFORE_SUBMIT) from None
-        if cleared:
-            if isinstance(failure, asyncio.CancelledError):
-                raise
-            raise LoginError(_SUBMIT_UNCERTAIN_CLEARED) from None
-        raise LoginError(_FIELDS_MAY_REMAIN, fields_may_remain=True) from None
+    except asyncio.CancelledError:
+        raise
+    except LoginError as failure:
+        raise _SubmitFailed() from failure
     if submitted.get("ok") is not True:
-        message = _reason_message(str(submitted.get("reason", "")))
-        cleared = await _try_clear(cdp, session_id, session_object, frame)
-        if cleared is False:
-            raise LoginError(message + ". " + _FIELDS_MAY_REMAIN, fields_may_remain=True)
-        raise LoginError(message)
+        raise LoginError(contract.reason_message(str(submitted.get("reason", ""))))
+    progress.mark(_Submitted(session_object, frame))
 
-    cleared = await _try_clear(cdp, session_id, session_object, frame)
+
+async def _finalize_failure(cdp: Any, session_id: str, progress: _Progress,
+                            failure: LoginError | None) -> LoginError | None:
+    """Run the owed final clear; return the diagnosis to report.
+
+    Nothing was inserted (validation refusal, pre-insert refusal, a relay
+    or loader failure before the fill) owes no clear and keeps its own
+    diagnosis. Every other failure runs one bounded clear and maps to the
+    precise fixed diagnostic its result selects, preserving the distinctions
+    between a replaced document, a confirmed clear, and uncertainty.
+    """
+    state = progress.state
+    if not isinstance(state, _MayHoldValues):
+        return failure
+    cleared = await _try_clear(cdp, session_id, state.session_object, state.frame)
+    if failure is None:
+        return None
+    if isinstance(failure, _FillFailed):
+        if cleared is None:
+            return LoginError(contract.PAGE_CHANGED_DURING_FILL)
+        if cleared:
+            return LoginError(contract.FILL_UNCERTAIN_CLEARED)
+        return LoginError(contract.FIELDS_MAY_REMAIN, fields_may_remain=True)
+    if isinstance(failure, _SubmitFailed):
+        if cleared is None:
+            return LoginError(contract.PAGE_CHANGED_BEFORE_SUBMIT)
+        if cleared:
+            return LoginError(contract.SUBMIT_UNCERTAIN_CLEARED)
+        return LoginError(contract.FIELDS_MAY_REMAIN, fields_may_remain=True)
     if cleared is False:
-        raise LoginError(_FIELDS_MAY_REMAIN, fields_may_remain=True)
-
-    # Framework state can restore fields after either a successful response
-    # or a failed one. Cleanup is owed on every exit, not only authentication.
-    try:
-        await _wait_for_success(cdp, session_id, frame, account, deadline)
-    finally:
-        cleared = await _try_clear(cdp, session_id, session_object, frame)
-        if cleared is False:
-            raise LoginError(_FIELDS_MAY_REMAIN, fields_may_remain=True)
+        return LoginError(f"{failure}. {contract.FIELDS_MAY_REMAIN}", fields_may_remain=True)
+    return failure
 
 
-async def _try_clear(cdp: Any, session_id: str, session_object: str, frame: _Frame) -> bool | None:
+async def _finalize_after_cancellation(cdp: Any, session_id: str,
+                                       progress: _Progress) -> LoginError | None:
+    """The same finalization for an external cancellation.
+
+    Returns None when the cancellation should propagate after cleanup; a
+    returned failure (an unconfirmed clear, or a document change whose
+    fixed diagnosis outranks the cancellation) replaces it.
+    """
+    state = progress.state
+    if not isinstance(state, _MayHoldValues):
+        return None
+    cleared = await _try_clear(cdp, session_id, state.session_object, state.frame)
+    if cleared is False:
+        return LoginError(contract.FIELDS_MAY_REMAIN, fields_may_remain=True)
+    if isinstance(state, _FillDispatched) and cleared is None:
+        return LoginError(contract.PAGE_CHANGED_DURING_FILL)
+    if isinstance(state, _SubmitDispatched) and cleared is None:
+        return LoginError(contract.PAGE_CHANGED_BEFORE_SUBMIT)
+    return None
+
+
+async def _try_clear(cdp: Any, session_id: str, session_object: str, frame: contract.Frame) -> bool | None:
     """Clear the bound fields. True=cleared, False=uncertain, None=replaced.
 
     A document replacement (the bound world died with it) is a clean clear:
     the values went with the document. Only an uncertain outcome on a
     still-live document means the fields may remain.
+
+    Cleanup is still owed after the operation deadline. It runs outside the
+    work wall on its own budget - the 2-second bound below, separate from
+    both the operation walls and the session-close grace - never on the
+    operation's remaining time.
     """
-    # Cleanup is still owed after the operation deadline. Its independent
-    # budget stays inside the transaction's outer cleanup grace.
-    cleanup_deadline = _Deadline(2000)
+    cleanup_deadline = contract.Deadline(2000)
     try:
         result = await _call_on_session(
             cdp, session_id, session_object,
@@ -657,9 +685,9 @@ def _probe_expression(account: login_policy.AccountSpec) -> str:
     )
 
 
-async def _wait_for_success(cdp: Any, session_id: str, frame: _Frame,
+async def _wait_for_success(cdp: Any, session_id: str, frame: contract.Frame,
                             account: login_policy.AccountSpec,
-                            deadline: _Deadline) -> None:
+                            deadline: contract.Deadline) -> None:
     """Poll the configured success selector at the configured origin.
 
     Each poll creates one isolated world and evaluates the small probe in
@@ -672,7 +700,7 @@ async def _wait_for_success(cdp: Any, session_id: str, frame: _Frame,
     while True:
         remaining = deadline.remaining()
         if remaining <= 0:
-            raise LoginError(_SUCCESS_UNMET)
+            raise LoginError(contract.SUCCESS_UNMET)
         timeout = deadline.command_timeout("success check")
         try:
             world = await cdp.send(
@@ -686,7 +714,7 @@ async def _wait_for_success(cdp: Any, session_id: str, frame: _Frame,
             )
             context_id = world.get("executionContextId")
             if not isinstance(context_id, int):
-                raise LoginError(_SESSION_FAILED.format(phase="success check"))
+                raise LoginError(contract.SESSION_FAILED.format(phase="success check"))
             result = await cdp.send(
                 method="Runtime.evaluate",
                 params={
@@ -701,12 +729,12 @@ async def _wait_for_success(cdp: Any, session_id: str, frame: _Frame,
             if error.code != -32000 or not error.message.startswith((
                 "Execution context was destroyed", "Cannot find context with specified id",
             )):
-                raise LoginError(_SESSION_FAILED.format(phase="success check")) from None
+                raise LoginError(contract.SESSION_FAILED.format(phase="success check")) from None
             logger.debug("login success probe lost its context (continuing)")
         except TimeoutError:
             logger.debug("login success probe timed out (continuing)")
         except Exception:
-            raise LoginError(_SESSION_FAILED.format(phase="success check")) from None
+            raise LoginError(contract.SESSION_FAILED.format(phase="success check")) from None
         else:
             value = _outcome_of(result, "success check")
             if value.get("authenticated") is True and value.get("originOk") is True:
@@ -732,7 +760,7 @@ def login(*, instance: str | None, account: str, target: str | None = None,
     # One overall deadline for the whole operation: capability probe, session
     # acquisition, credential reads, and the browser transaction all draw
     # from it, and it is never reset along the way.
-    deadline = _Deadline(timeout_ms)
+    deadline = contract.Deadline(timeout_ms)
     policy, account_spec = login_policy.load_account(config, account)
 
     name = instance if instance is not None else lifecycle.resolve_single_instance(registry_path)
@@ -744,7 +772,11 @@ def login(*, instance: str | None, account: str, target: str | None = None,
     if entry is None:
         raise LifecycleError(f"no browser instance named '{name}' is registered")
     if entry.engine != lifecycle.DEFAULT_ENGINE:
-        raise LifecycleError(_ENGINE_MESSAGE)
+        raise LifecycleError(contract.ENGINE_MESSAGE)
+    # Positive ownership before anything else runs: the relay probe, the
+    # session, and the reads all come after this. A registry row alone (or
+    # a live-looking port) is never enough to hand a credential to.
+    ownership = login_ownership.verify_recorded_owner(entry)
     port = lifecycle.resolve_cdp_port(name, registry_path=registry_path)
     binary = _ensure_relay_ready(policy, deadline)
 
@@ -754,14 +786,17 @@ def login(*, instance: str | None, account: str, target: str | None = None,
     try:
         with quiet_websocket_logs():
             asyncio.run(
-                _login_transaction(port, target_spec, target_by, policy, account_spec, binary, deadline)
+                _login_transaction(
+                    port, target_spec, target_by, policy, account_spec, binary,
+                    deadline, ownership,
+                )
             )
     except LifecycleError:
         raise
     except Exception as exc:
         # Transport libraries can include tab URLs, titles and protocol
         # contents in errors; only fixed diagnostics cross this boundary.
-        raise LoginError(_acquisition_message(exc)) from None
+        raise LoginError(contract.acquisition_message(exc)) from None
     return {"account": account_spec.alias, "status": "authenticated"}
 
 

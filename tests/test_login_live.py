@@ -1,401 +1,50 @@
 """The whole login flow against a disposable Chrome and a synthetic form.
 
-Everything here is synthetic: a throwaway headless Chrome (never the
-developer's browser), a loopback HTTPS server with a self-signed certificate
-serving a hand-written login form, and a fake ``opchain`` on PATH that
-answers the relay probe and writes sentinel credentials from a fixed table.
-No 1Password account, real credential, or real site is involved.
+The behavioral contracts: what the real ``login_form.js`` does against the
+real DOM (native setters firing framework-visible events, ``requestSubmit``
+on the validated button, same-origin POST with overrides, browser form
+semantics), the real relay recipe end to end, the real loaderId identity
+across the navigation the submit causes, the field-clearing guarantee on
+both the navigating and the single-page shapes, positive ownership of the
+registered browser, and the bridge contract between the Python caller and
+the injected helper.
 
-What this proves that the fake-CDP module cannot: the real ``login_form.js``
-against the real DOM (native setters firing framework-visible events,
-``requestSubmit`` on the validated button, same-origin POST with overrides),
-the real relay recipe end to end, the real loaderId identity across the
-navigation the submit causes, and the field-clearing guarantee on both the
-navigating and the single-page shapes.
-
-Skipped when no plain Chrome binary (application-bundle launches abort under
-repeated test launches) or no openssl for the certificate is available; the
-gap is then reported by the worker rather than silently claimed.
+The disposable Chrome, the loopback HTTPS site and the fake opchain come
+from login_fixtures.py, imported explicitly; everything here is synthetic.
 """
 
 from __future__ import annotations
 
-import http.server
+import asyncio
 import json
 import os
-import ssl
-import subprocess
-import textwrap
-import threading
-import time
-import urllib.parse
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 import pytest
 
 from browser_tools import lifecycle
+from browser_tools.one_shot import one_shot_page_session
 
-if TYPE_CHECKING:
-    from pathlib import Path
-
-VAULT = "dqss6l4yprxhntxymzjaltchwe"
-ITEM = "bbbbbbbbbbbbbbbbbbbbbbbbbb"
-SENTINEL_USER = "SENTINEL-live-user"
-SENTINEL_PASS = "SENTINEL-live-pass"
-
-LOGIN_PAGE = textwrap.dedent(
-    """
-    <!doctype html>
-    <title>sign in</title>
-    <form method="post" action="/login">
-      <input id="username" type="text" name="u">
-      <input id="password" type="password" name="p">
-      <button type="submit" id="go">Sign in</button>
-    </form>
-    """
+# The pytest fixtures are re-exported under their own names (the explicit
+# `x as x` alias is pyflakes' re-export form), so pytest resolves them from
+# this module while lint stays clean without any waiver.
+from login_fixtures import (
+    LOGIN_PAGE,
+    SENTINEL_PASS,
+    SENTINEL_USER,
+    SEPARATE_FORM_PAGE,
+    SPA_PAGE,
+    TWO_MARKERS_PAGE,
+    _navigate_to,
+    _relay_reads,
+    _run_login,
+    _write_fake_opchain,
+    _write_policy,
 )
-
-WELCOME_PAGE = textwrap.dedent(
-    """
-    <!doctype html>
-    <title>welcome</title>
-    <main data-signed-in>Signed in</main>
-    """
-)
-
-# A single-page variant shaped like a framework form: state is maintained
-# from the fill's input events, the submit handler awaits a real POST that
-# carries the pair from that state (never from the DOM), and the success
-# marker appears only after the response. The password input handler also
-# restores the remembered username into the DOM, the way framework state
-# management re-writes fields, and the response handler re-renders both
-# fields from state after the response commits.
-SPA_PAGE = textwrap.dedent(
-    """
-    <!doctype html>
-    <title>spa sign in</title>
-    <form method="post" action="/spa-login" id="theform">
-      <input id="username" type="text" name="u">
-      <input id="password" type="password" name="p">
-      <button type="submit" id="go">Sign in</button>
-    </form>
-    <script>
-      var state = {u: '', p: ''};
-      document.getElementById('username').addEventListener('input', function (event) {
-        state.u = event.target.value;
-      });
-      document.getElementById('password').addEventListener('input', function (event) {
-        state.p = event.target.value;
-        document.getElementById('username').value = state.u;
-      });
-      document.getElementById('theform').addEventListener('submit', async function (event) {
-        event.preventDefault();
-        queueMicrotask(function () {
-          window.submitClearedBeforeYield =
-            document.getElementById('username').value === '' &&
-            document.getElementById('password').value === '';
-        });
-        await Promise.resolve();
-        var body = 'u=' + encodeURIComponent(state.u) + '&p=' + encodeURIComponent(state.p);
-        await window.fetch('/spa-login', {
-          method: 'POST',
-          headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-          body: body
-        });
-        window.stateAfterResponse = {u: state.u, p: state.p};
-        document.getElementById('username').value = state.u;
-        document.getElementById('password').value = state.p;
-        var marker = document.createElement('main');
-        marker.setAttribute('data-signed-in', '');
-        document.body.appendChild(marker);
-      });
-    </script>
-    """
-)
-
-# The username and the submit button share one form; the password input
-# belongs to a second form. Everything else about both forms is valid, so
-# only the common-form check can refuse this page.
-SEPARATE_FORM_PAGE = textwrap.dedent(
-    """
-    <!doctype html>
-    <title>split sign in</title>
-    <form method="post" action="/login">
-      <input id="username" type="text" name="u">
-      <button type="submit" id="go">Sign in</button>
-    </form>
-    <form method="post" action="/login">
-      <input id="password" type="password" name="p">
-    </form>
-    """
-)
-
-# The configured success marker, twice, before any login: a page that is
-# already signed in with the marker repeated must not slip past the
-# already-authenticated refusal.
-TWO_MARKERS_PAGE = LOGIN_PAGE + textwrap.dedent(
-    """
-    <main data-signed-in>one</main>
-    <main data-signed-in>two</main>
-    """
-)
-
-
-
-class LoginFormServer:
-    """The synthetic site: one form, one POST recorder, one welcome page."""
-
-    def __init__(self, page: str) -> None:
-        self.posts: list[dict[str, str]] = []
-        self.gets: list[str] = []
-        self.page = page
-        outer = self
-
-        class Handler(http.server.BaseHTTPRequestHandler):
-            def do_GET(self) -> None:
-                outer.gets.append(self.path)
-                body = (outer.welcome_page() if self.path == "/welcome" else outer.page).encode()
-                self.send_response(200)
-                self.send_header("Content-Type", "text/html")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
-
-            def do_POST(self) -> None:
-                length = int(self.headers.get("Content-Length", "0"))
-                data = self.rfile.read(length).decode("utf-8")
-                outer.posts.append(
-                    {k: v[0] for k, v in urllib.parse.parse_qs(data).items()}
-                )
-                if self.path == "/spa-login":
-                    body = b"<html></html>"
-                    self.send_response(200)
-                else:
-                    body = b""
-                    self.send_response(302)
-                    self.send_header("Location", "/welcome")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
-
-            def log_message(self, format: str, *args: object) -> None:
-                pass
-
-        self.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-
-    def welcome_page(self) -> str:
-        return WELCOME_PAGE
-
-    @property
-    def port(self) -> int:
-        return self.httpd.server_address[1]
-
-    @property
-    def origin(self) -> str:
-        return f"https://127.0.0.1:{self.port}"
-
-    def start(self, cert: Path, key: Path) -> None:
-        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        context.load_cert_chain(str(cert), str(key))
-        self.httpd.socket = context.wrap_socket(self.httpd.socket, server_side=True)
-        self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
-        self.thread.start()
-
-    def stop(self) -> None:
-        self.httpd.shutdown()
-        self.httpd.server_close()
-
-
-def _make_cert(tmp: Path) -> tuple[Path, Path]:
-    cert, key = tmp / "cert.pem", tmp / "key.pem"
-    subprocess.run(
-        ["/usr/bin/openssl", "req", "-x509", "-newkey", "rsa:2048",
-         "-keyout", str(key), "-out", str(cert), "-days", "2", "-nodes",
-         "-subj", "/CN=127.0.0.1"],
-        capture_output=True,
-        check=True,
-    )
-    return cert, key
-
-
-def _write_fake_opchain(bin_dir: Path) -> None:
-    """The fake relay: answers the probe, records each read, writes values."""
-    body = textwrap.dedent(
-        f"""
-        #!/usr/bin/env python3
-        import os, sys
-        argv = sys.argv
-        fd_text = argv[argv.index("--value-fd") + 1]
-        if fd_text == "0":
-            sys.stderr.write("opchain: relay: descriptor-standard\\n")
-            sys.exit(1)
-        ref = argv[argv.index("op") + 2]
-        field = ref.rsplit("/", 1)[-1]
-        with open({str(bin_dir / 'relay-reads.log')!r}, "a") as fh:
-            fh.write(field + "\\n")
-        values = {{"username": {SENTINEL_USER!r}, "password": {SENTINEL_PASS!r}}}
-        data = values.get(field, "").encode("utf-8")
-        os.write(1, data)
-        os.write(2, data)
-        os.write(int(fd_text), data)
-        sys.exit(0)
-        """
-    ).lstrip("\n")
-    path = bin_dir / "opchain"
-    path.write_text(body)
-    path.chmod(0o755)
-
-
-def _relay_reads(fake_relay) -> list[str]:
-    """The fields the fake opchain was asked for, in order."""
-    from pathlib import Path
-
-    log = Path(fake_relay).parent / "bin" / "relay-reads.log"
-    if not log.exists():
-        return []
-    return [line for line in log.read_text().splitlines() if line.strip()]
-
-
-def _write_policy(tmp: Path, origin: str, *, username_selector="#username",
-                  password_selector="#password", submit_selector="#go",
-                  success_selector="[data-signed-in]") -> Path:
-    document = {
-        "version": 1,
-        "identity": "browser",
-        "vault": VAULT,
-        "accounts": {
-            "example": {
-                "item": ITEM,
-                "origin": origin,
-                "username_selector": username_selector,
-                "password_selector": password_selector,
-                "submit_selector": submit_selector,
-                "success_selector": success_selector,
-            }
-        },
-    }
-    path = tmp / "logins.json"
-    path.write_text(json.dumps(document))
-    return path
-
-
-@pytest.fixture(scope="module")
-def site(tmp_path_factory):
-    """The loopback HTTPS site, on an OS-assigned port."""
-    tmp = tmp_path_factory.mktemp("login-site")
-    cert, key = _make_cert(tmp)
-    server = LoginFormServer(LOGIN_PAGE)
-    server.start(cert, key)
-    yield server
-    server.stop()
-
-
-@pytest.fixture(scope="module")
-def disposable(site, tmp_path_factory):
-    """A throwaway Chrome on the login page, registered in its own registry."""
-    if not os.environ.get(lifecycle.CHROME_BINARY_ENV_VAR):
-        pytest.skip("no plain Chrome binary for an isolated launch")
-    root = tmp_path_factory.mktemp("login-browser")
-    registry = str(root / "registry.json")
-    instance = lifecycle.launch(
-        headless=True,
-        registry_path=registry,
-        browser_args=["--ignore-certificate-errors", site.origin],
-    )
-    try:
-        yield type("Disposable", (), {"registry": registry, "name": instance.name})()
-    finally:
-        lifecycle.stop(instance=instance.name, registry_path=registry)
-
-
-@pytest.fixture
-def fake_relay(tmp_path, monkeypatch):
-    """The fake opchain first on PATH, plus an isolated config directory."""
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    _write_fake_opchain(bin_dir)
-    monkeypatch.setenv("PATH", str(bin_dir) + os.pathsep + os.environ.get("PATH", ""))
-    config_home = tmp_path / "config"
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(config_home))
-    return config_home
-
-
-def _wait_page_ready(origin: str, registry: str, name: str, *, navigate_url: str | None = None,
-                    selector: str = "#go", timeout: float = 10.0) -> None:
-    """Hold until the tab shows the expected origin and its form.
-
-    Readiness is the observed page, never a sleep: the frame URL must be at
-    the expected origin and the form's submit button must exist in its
-    document. Without this, a login fired straight after Page.navigate (or
-    straight after launch) races the document and fails with wrong-origin.
-    """
-    import asyncio
-
-    from browser_tools.one_shot import one_shot_page_session
-
-    async def go() -> None:
-        port = lifecycle.resolve_cdp_port(name, registry_path=registry)
-        async with one_shot_page_session(port, None, None) as (cdp, session_id):
-            previous_loader = None
-            if navigate_url is not None:
-                before = await cdp.send(
-                    method="Page.getFrameTree", params={},
-                    session_id=session_id, timeout=5.0,
-                )
-                previous_loader = before["frameTree"]["frame"]["loaderId"]
-                await cdp.send(
-                    method="Page.navigate",
-                    params={"url": navigate_url},
-                    session_id=session_id,
-                    timeout=10.0,
-                )
-            deadline = time.monotonic() + timeout
-            while time.monotonic() < deadline:
-                ready = False
-                try:
-                    tree = await cdp.send(
-                        method="Page.getFrameTree", params={},
-                        session_id=session_id, timeout=5.0,
-                    )
-                    frame = tree["frameTree"]["frame"]
-                    if previous_loader is None or frame.get("loaderId") != previous_loader:
-                        check = await cdp.send(
-                            method="Runtime.evaluate",
-                            params={
-                                "expression": f"document.location.origin === {json.dumps(origin)} && "
-                                              f"Boolean(document.querySelector({selector!r}))",
-                                "returnByValue": True,
-                            },
-                            session_id=session_id, timeout=5.0,
-                        )
-                        ready = check.get("result", {}).get("value") is True
-                except Exception:
-                    ready = False  # mid-navigation: the document is not ready
-                if ready:
-                    return
-                await asyncio.sleep(0.05)
-            raise AssertionError(f"the page at {origin} never became ready")
-
-    asyncio.run(go())
-
-
-def _navigate_to(site, disposable, path: str = "/") -> None:
-    """Put the disposable browser's single tab back on a chosen page, ready."""
-    _wait_page_ready(
-        site.origin, disposable.registry, disposable.name,
-        navigate_url=site.origin + path,
-    )
-
-
-def _run_login(disposable, policy: Path, monkeypatch, *, timeout_ms=20_000, target=None):
-    from browser_tools import cli
-
-    monkeypatch.setenv("BROWSER_TOOLS_REGISTRY", disposable.registry)
-    args = ["login", disposable.name, "--account", "example",
-            "--config", str(policy), "--timeout-ms", str(timeout_ms)]
-    if target is not None:
-        args.extend(["--target", target])
-    return cli.main(args)
+from login_fixtures import disposable as disposable
+from login_fixtures import fake_relay as fake_relay
+from login_fixtures import site as site
+from login_fixtures import spa as spa
 
 
 class TestRefusalDiagnostics:
@@ -469,7 +118,6 @@ class TestTheWholeFlow:
     ):
         import asyncio
 
-        from browser_tools.one_shot import one_shot_page_session
 
         port = lifecycle.resolve_cdp_port(disposable.name, registry_path=disposable.registry)
         targets = {}
@@ -683,7 +331,10 @@ class TestClearingOnASinglePageForm:
             policy = _write_policy(tmp_path, spa.server.origin)
             assert _run_login(spa, policy, monkeypatch, timeout_ms=1000) == 1
             captured = capfd.readouterr()
-            assert spa.server.posts == [{"u": SENTINEL_USER, "p": SENTINEL_PASS}]
+            assert spa.server.posts == [{"u": SENTINEL_USER, "p": SENTINEL_PASS}], (
+                "no synthetic POST was recorded; the login's stderr was: "
+                f"{captured.err!r}"
+            )
             state = self._page_state(spa)
             if case == "no-success":
                 assert state["u"] == "" and state["p"] == ""
@@ -695,36 +346,9 @@ class TestClearingOnASinglePageForm:
         finally:
             spa.server.page = original_page
 
-    @pytest.fixture(scope="class")
-    def spa(self, tmp_path_factory):
-        """A single-page form site plus a throwaway Chrome opened on it."""
-        if not os.environ.get(lifecycle.CHROME_BINARY_ENV_VAR):
-            pytest.skip("no plain Chrome binary for an isolated launch")
-        tmp = tmp_path_factory.mktemp("login-spa")
-        cert, key = _make_cert(tmp)
-        server = LoginFormServer(SPA_PAGE)
-        server.start(cert, key)
-        registry = str(tmp / "registry.json")
-        instance = lifecycle.launch(
-            headless=True,
-            registry_path=registry,
-            browser_args=["--ignore-certificate-errors", server.origin],
-        )
-        try:
-            # The tab must actually show the form before any test logs in:
-            # the launch navigation is asynchronous and races otherwise.
-            _wait_page_ready(server.origin, registry, instance.name)
-            yield type(
-                "Spa", (), {"registry": registry, "name": instance.name, "server": server}
-            )()
-        finally:
-            lifecycle.stop(instance=instance.name, registry_path=registry)
-            server.stop()
-
     def _page_state(self, spa) -> dict[str, object]:
         import asyncio
 
-        from browser_tools.one_shot import one_shot_page_session
 
         async def read() -> dict[str, object]:
             port = lifecycle.resolve_cdp_port(spa.name, registry_path=spa.registry)
@@ -782,3 +406,287 @@ class TestClearingOnASinglePageForm:
         # the final cleanup confirmation cleared the restored values.
         assert state["u"] == "" and state["p"] == ""
         assert "SENTINEL" not in captured.err
+
+
+class TestPositiveOwnership:
+    """The reproduced round-two defect, as a regression.
+
+    A stale registry row (nonexistent PID, erased start token, swapped
+    directory) whose port still serves a real browser must be refused
+    before opchain is asked for anything; the restored row must log in
+    normally against the same positively owned browser. The instance
+    itself is unnamed (entry.profile is None): ownership is the physical
+    process/directory binding, not a profile label.
+    """
+
+    @pytest.mark.parametrize("bad_dir", [None, 5, ["/recorded"], ""])
+    def test_a_malformed_recorded_directory_refuses_before_any_read(
+        self, site, disposable, fake_relay, tmp_path, monkeypatch, capfd, bad_dir
+    ):
+        """A registry row whose user-data directory is not a usable string
+        is a missing-evidence refusal, never a crash or a credential read."""
+        registry_path = Path(disposable.registry)
+        original = registry_path.read_bytes()
+        data = json.loads(original)
+        data[disposable.name]["user_data_dir"] = bad_dir
+        registry_path.write_text(json.dumps(data))
+        site.posts.clear()
+        policy = _write_policy(tmp_path, site.origin)
+        try:
+            assert _run_login(disposable, policy, monkeypatch) == 1
+            captured = capfd.readouterr()
+            assert "no usable user-data directory" in captured.err
+            assert _relay_reads(fake_relay) == []
+            assert site.posts == []
+            assert "SENTINEL" not in captured.out + captured.err
+        finally:
+            registry_path.write_bytes(original)
+
+    def test_a_stale_row_is_refused_before_any_read(
+        self, site, disposable, fake_relay, tmp_path, monkeypatch, capfd
+    ):
+        registry_path = Path(disposable.registry)
+        original = registry_path.read_bytes()
+        data = json.loads(original)
+        data[disposable.name]["pid"] = 2_000_000_000
+        data[disposable.name]["pid_start"] = None
+        data[disposable.name]["user_data_dir"] = str(tmp_path / "different-crashed-profile")
+        registry_path.write_text(json.dumps(data))
+        site.posts.clear()
+        policy = _write_policy(tmp_path, site.origin)
+        try:
+            assert _run_login(disposable, policy, monkeypatch) == 1
+            captured = capfd.readouterr()
+            assert "registry row" in captured.err
+            assert _relay_reads(fake_relay) == []
+            assert site.posts == []
+            assert "SENTINEL" not in captured.out + captured.err
+        finally:
+            registry_path.write_bytes(original)
+        # Positive owned Chrome: the untouched row logs in end to end,
+        # through the real process identity and the connected browser reply.
+        _navigate_to(site, disposable)
+        site.posts.clear()
+        assert _run_login(disposable, policy, monkeypatch) == 0
+        assert site.posts == [{"u": SENTINEL_USER, "p": SENTINEL_PASS}]
+
+
+class TestFormSemantics:
+    """Actual browser form semantics: actions, input types, usability."""
+
+    def _run_case(self, site, disposable, monkeypatch, tmp_path, page):
+        monkeypatch.setattr(site, "page", page)
+        _navigate_to(site, disposable)
+        site.posts.clear()
+        policy = _write_policy(tmp_path, site.origin)
+        return policy
+
+    @pytest.mark.parametrize("case", [
+        "omitted", "empty", "empty-override", "html-space", "html-space-override",
+    ])
+    def test_an_empty_action_submits_to_the_document_url_not_the_base(
+        self, site, disposable, fake_relay, tmp_path, monkeypatch, capfd, case
+    ):
+        """The reproduced empty-action defect, with a cross-origin <base>."""
+        original = site.page
+        inputs = (
+            '<input id="username" type="text" name="u">'
+            '<input id="password" type="password" name="p">'
+        )
+        empty_action = "\t\n\f\r " if case.startswith("html-space") else ""
+        if case == "omitted":
+            form = f'<form method="post">{inputs}<button type="submit" id="go">Sign in</button></form>'
+        elif case in {"empty", "html-space"}:
+            form = f'<form method="post" action="{empty_action}">{inputs}<button type="submit" id="go">Sign in</button></form>'
+        else:
+            form = (
+                '<form method="post" action="/login">' + inputs +
+                f'<button type="submit" id="go" formaction="{empty_action}">Sign in</button></form>'
+            )
+        page = '<!doctype html><base href="https://other.invalid/dir/">' + form
+        try:
+            policy = self._run_case(site, disposable, monkeypatch, tmp_path, page)
+            assert _run_login(disposable, policy, monkeypatch) == 0
+            captured = capfd.readouterr()
+            assert site.posts == [{"u": SENTINEL_USER, "p": SENTINEL_PASS}]
+            assert "SENTINEL" not in captured.err
+        finally:
+            site.page = original
+
+    @pytest.mark.parametrize("action", [
+        "https://wrong.invalid/session", "\u00a0", "\u2003", "\ufeff", "\u000b",
+    ])
+    @pytest.mark.parametrize("override", [False, True])
+    def test_a_cross_origin_action_refuses_before_any_read(
+        self, site, disposable, fake_relay, tmp_path, monkeypatch, capfd, action, override
+    ):
+        original = site.page
+        form_action = "/login" if override else action
+        button_action = f' formaction="{action}"' if override else ""
+        page = '<!doctype html><meta charset="utf-8"><base href="https://other.invalid/dir/">' + (
+            f'<form method="post" action="{form_action}">'
+            '<input id="username" type="text" name="u">'
+            '<input id="password" type="password" name="p">'
+            f'<button type="submit" id="go"{button_action}>Sign in</button></form>'
+        )
+        try:
+            policy = self._run_case(site, disposable, monkeypatch, tmp_path, page)
+            assert _run_login(disposable, policy, monkeypatch, timeout_ms=1000) == 1
+            captured = capfd.readouterr()
+            assert "somewhere other than" in captured.err
+            assert _relay_reads(fake_relay) == []
+            assert site.posts == []
+            assert "SENTINEL" not in captured.out + captured.err
+        finally:
+            site.page = original
+
+    def test_an_email_username_authenticates_with_a_valid_synthetic_value(
+        self, site, disposable, tmp_path, monkeypatch, capfd
+    ):
+        """The named proof for the round-two username-type mutant: a real
+        DOM type=email field is accepted (with a value constraint
+        validation accepts) and submits exactly once."""
+
+        email_user = "synthetic-user@example.invalid"
+        bin_dir = tmp_path / "email-bin"
+        bin_dir.mkdir()
+        _write_fake_opchain(bin_dir, username=email_user)
+        monkeypatch.setenv("PATH", str(bin_dir) + os.pathsep + os.environ.get("PATH", ""))
+        original = site.page
+        page = LOGIN_PAGE.replace('id="username" type="text"', 'id="username" type="email"')
+        try:
+            policy = self._run_case(site, disposable, monkeypatch, tmp_path, page)
+            assert _run_login(disposable, policy, monkeypatch) == 0
+            captured = capfd.readouterr()
+            assert site.posts == [{"u": email_user, "p": SENTINEL_PASS}]
+            assert "SENTINEL" not in captured.err
+        finally:
+            site.page = original
+
+    @pytest.mark.parametrize("username_type", ["number", "search", "tel"])
+    def test_non_text_username_types_refuse_before_any_read(
+        self, site, disposable, fake_relay, tmp_path, monkeypatch, capfd, username_type
+    ):
+        """The other half of the named mutant proof: number/search/tel
+        username inputs are refused with zero credential reads."""
+        original = site.page
+        page = LOGIN_PAGE.replace(
+            'id="username" type="text"', f'id="username" type="{username_type}"'
+        )
+        try:
+            policy = self._run_case(site, disposable, monkeypatch, tmp_path, page)
+            assert _run_login(disposable, policy, monkeypatch, timeout_ms=1000) == 1
+            captured = capfd.readouterr()
+            assert "ordinary text or email" in captured.err
+            assert _relay_reads(fake_relay) == []
+            assert site.posts == []
+            assert "SENTINEL" not in captured.out + captured.err
+        finally:
+            site.page = original
+
+    @pytest.mark.parametrize("case", ["opacity", "ancestor-opacity", "zero-size"])
+    def test_invisible_username_fields_refuse_before_any_read(
+        self, site, disposable, fake_relay, tmp_path, monkeypatch, capfd, case
+    ):
+        """The reproduced hidden-username defect: opacity-zero and
+        zero-size fields take credentials while being invisible."""
+        original = site.page
+        style = {
+            "opacity": "opacity:0",
+            "ancestor-opacity": None,
+            "zero-size": "width:0;height:0;border:0;padding:0",
+        }[case]
+        if case == "ancestor-opacity":
+            page = (
+                '<!doctype html><form method="post" action="/login" '
+                'style="opacity:0">' + LOGIN_PAGE.split("<form", 1)[1]
+            )
+        else:
+            page = LOGIN_PAGE.replace(
+                '<input id="username" type="text" name="u">',
+                f'<input id="username" type="text" name="u" style="{style}">',
+            )
+        try:
+            policy = self._run_case(site, disposable, monkeypatch, tmp_path, page)
+            assert _run_login(disposable, policy, monkeypatch, timeout_ms=1000) == 1
+            captured = capfd.readouterr()
+            assert "disabled" in captured.err
+            assert _relay_reads(fake_relay) == []
+            assert site.posts == []
+            assert "SENTINEL" not in captured.out + captured.err
+        finally:
+            site.page = original
+
+    def test_a_below_fold_form_still_authenticates(
+        self, site, disposable, fake_relay, tmp_path, monkeypatch, capfd
+    ):
+        """Offscreen placement alone is allowed: no viewport intersection
+        requirement may refuse a valid below-fold form."""
+        original = site.page
+        page = LOGIN_PAGE.replace(
+            "<form", '<div style="height:4000px"></div><form', 1
+        )
+        try:
+            policy = self._run_case(site, disposable, monkeypatch, tmp_path, page)
+            assert _run_login(disposable, policy, monkeypatch) == 0
+            assert site.posts == [{"u": SENTINEL_USER, "p": SENTINEL_PASS}]
+        finally:
+            site.page = original
+
+
+class TestBridgeContract:
+    def test_helper_exports_match_the_python_caller(self, disposable):
+        """One enforcing check for the repeat dead-export mistake.
+
+        The helper's exported entry points must be exactly the entry points
+        the Python caller still uses (derived from login.py itself), so an
+        export left behind by a rewrite - like the obsolete success probe -
+        fails here, named, with the instruction to remove it.
+        """
+        import re
+
+        from browser_tools import login as login_module
+
+        caller = Path(login_module.__file__).read_text(encoding="utf-8")
+        used = sorted(set(re.findall(r"__btLogin\.(\w+)", caller)))
+        assert "begin" in used, "the Python caller must use the form entry point"
+
+        async def exports_of_helper() -> list[str]:
+            port = lifecycle.resolve_cdp_port(
+                disposable.name, registry_path=disposable.registry
+            )
+            async with one_shot_page_session(port, None, None) as (cdp, session_id):
+                tree = await cdp.send(
+                    "Page.getFrameTree", {}, session_id=session_id, timeout=5.0
+                )
+                frame_id = tree["frameTree"]["frame"]["id"]
+                world = await cdp.send(
+                    "Page.createIsolatedWorld",
+                    {"frameId": frame_id, "worldName": "bridge-contract",
+                     "grantUniveralAccess": False},
+                    session_id=session_id, timeout=5.0,
+                )
+                reply = await cdp.send(
+                    "Runtime.evaluate",
+                    {
+                        "expression": (
+                            login_module._login_script_source()
+                            + "\n;Object.keys(globalThis.__btLogin).sort()"
+                        ),
+                        "contextId": world["executionContextId"],
+                        "returnByValue": True,
+                    },
+                    session_id=session_id, timeout=5.0,
+                )
+                return reply["result"]["value"]
+
+        exports = asyncio.run(exports_of_helper())
+        unused = sorted(set(exports) - set(used))
+        assert not unused, (
+            f"login_form.js exports {unused}, which the Python caller no longer "
+            "uses; remove the dead entry point(s) and their contract comment"
+        )
+        missing = sorted(set(used) - set(exports))
+        assert not missing, (
+            f"the Python caller uses {missing}, which the helper no longer exports"
+        )
