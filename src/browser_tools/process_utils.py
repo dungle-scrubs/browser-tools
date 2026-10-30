@@ -310,7 +310,7 @@ def read_process_command(pid: int, timeout: float = 2.0) -> str | None:
     """
     try:
         result = subprocess.run(
-            ["ps", "-p", str(pid), "-o", "command="],
+            ["ps", "-ww", "-p", str(pid), "-o", "command="],
             capture_output=True,
             text=True,
             timeout=timeout,
@@ -581,7 +581,7 @@ def find_user_data_dir_processes(user_data_dir: str) -> list[int] | None:
         return None
     try:
         result = subprocess.run(
-            ["ps", "-e", "-o", "pid=", "-o", "args="],
+            ["ps", "-ww", "-e", "-o", "pid=", "-o", "args="],
             capture_output=True,
             text=True,
             timeout=2,
