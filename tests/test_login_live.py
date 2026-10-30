@@ -636,14 +636,70 @@ class TestFormSemantics:
             site.page = original
 
 
+def _expression_parameter() -> tuple[str, int]:
+    """The evaluated-expression parameter of ``_eval_login_script``.
+
+    Located through the function's real signature - its name and its
+    positional index - so a rename or a reorder fails this guard loudly
+    instead of silently degrading into scanning every argument (the
+    round-four B6-R4 mistake this guard exists to reject).
+    """
+    import inspect
+
+    from browser_tools import login as login_module
+
+    name = "expression_tail"
+    signature = inspect.signature(login_module._eval_login_script)
+    parameter = signature.parameters.get(name)
+    positional = [
+        item.name
+        for item in signature.parameters.values()
+        if item.kind
+        in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+    ]
+    if parameter is None or name not in positional:
+        raise AssertionError(
+            "_eval_login_script no longer takes its evaluated expression as "
+            f"the parameter {name!r}; update this guard to the real signature "
+            "so only the evaluated argument is ever scanned"
+        )
+    return name, positional.index(name)
+
+
+def _evaluated_argument(call: ast.Call, name: str, position: int) -> ast.AST | None:
+    """The one argument bound to the expression parameter, or None.
+
+    Keyword first, else the positional slot at the parameter's index. A
+    call that unpacks star arguments cannot be resolved and fails loudly
+    rather than guess - expanding it keeps the guard exact.
+    """
+    if any(isinstance(argument, ast.Starred) for argument in call.args) or any(
+        keyword.arg is None for keyword in call.keywords
+    ):
+        raise AssertionError(
+            "a call to _eval_login_script unpacks star arguments; expand "
+            "them so the evaluated expression can be identified exactly"
+        )
+    for keyword in call.keywords:
+        if keyword.arg == name:
+            return keyword.value
+    if len(call.args) > position:
+        return call.args[position]
+    return None
+
+
 def _helper_entry_calls(source: str) -> set[str]:
     """Entry points the Python caller actually calls, derived from the AST.
 
-    Only evaluation-call string arguments count: entry points are called
-    as ``__btLogin.<name>(`` inside string literals (plain or the literal
-    parts of f-strings) passed as call arguments. Comments never parse and
-    docstrings are not call arguments, so a seeded mention of a dead
-    export in either cannot keep it alive (round-three B6).
+    Only the evaluated expression argument of ``_eval_login_script``
+    counts - located through that function's real signature, by positional
+    index or keyword name - because entry points are called as
+    ``__btLogin.<name>(`` inside string literals (plain or the literal
+    parts of f-strings) inside the evaluated source. Every other argument
+    (``phase`` diagnostics, ``return_by_value``, ids, budgets) never
+    reaches the browser, so a mention seeded there cannot keep a dead
+    export alive; comments never parse, and docstrings are not arguments
+    (round-three B6, round-four B6-R4).
     """
 
     def literal_strings(node: object) -> list[str]:
@@ -657,6 +713,7 @@ def _helper_entry_calls(source: str) -> set[str]:
             ]
         return []
 
+    parameter, position = _expression_parameter()
     uses: set[str] = set()
     for node in ast.walk(ast.parse(source)):
         if not (
@@ -665,16 +722,69 @@ def _helper_entry_calls(source: str) -> set[str]:
             and node.func.id == "_eval_login_script"
         ):
             continue
-        arguments = [*node.args, *(keyword.value for keyword in node.keywords)]
-        for argument in arguments:
-            for text in literal_strings(argument):
-                uses.update(
-                    name for name in re.findall(r"__btLogin\.(\w+)\s*\(", text)
-                )
+        argument = _evaluated_argument(node, parameter, position)
+        if argument is None:
+            continue
+        for text in literal_strings(argument):
+            uses.update(
+                name for name in re.findall(r"__btLogin\.(\w+)\s*\(", text)
+            )
     return uses
 
 
 class TestBridgeContract:
+    def test_an_inert_phase_diagnostic_is_not_an_evaluated_use(self):
+        """Round-four B6-R4: only the evaluated expression argument counts.
+
+        The exact round-four witness: a diagnostic string naming a dead
+        entry point, seeded into the ``phase`` keyword - an argument that
+        never reaches the browser - must not keep that entry point alive.
+        """
+        from browser_tools import login as login_module
+
+        caller = Path(login_module.__file__).read_text(encoding="utf-8")
+        before = 'return_by_value=False, phase="form validation", deadline=deadline'
+        after = (
+            'return_by_value=False, phase="diagnostic __btLogin.probe(", '
+            "deadline=deadline"
+        )
+        assert caller.count(before) == 1, "the caller's validation call moved; reseed"
+        seeded = caller.replace(before, after, 1)
+        assert _helper_entry_calls(seeded) == _helper_entry_calls(caller) == {"begin"}, (
+            "an argument other than the evaluated expression legitimized "
+            "an entry point"
+        )
+
+    def test_inert_mentions_in_other_arguments_are_not_uses(self):
+        """No argument of the evaluation call reaches the browser except
+        the evaluated expression, so a dead-export mention seeded into
+        ``return_by_value`` counts for nothing either."""
+        from browser_tools import login as login_module
+
+        caller = Path(login_module.__file__).read_text(encoding="utf-8")
+        before = 'return_by_value=False, phase="form validation"'
+        after = 'return_by_value="__btLogin.probe(", phase="form validation"'
+        assert caller.count(before) == 1, "the caller's validation call moved; reseed"
+        seeded = caller.replace(before, after, 1)
+        assert _helper_entry_calls(seeded) == {"begin"}, (
+            "an argument other than the evaluated expression legitimized "
+            "an entry point"
+        )
+
+    def test_the_expression_argument_by_keyword_still_counts(self):
+        """The guard follows the real signature, so moving the evaluated
+        expression to a keyword argument cannot hide a genuine use."""
+        from browser_tools import login as login_module
+
+        caller = Path(login_module.__file__).read_text(encoding="utf-8")
+        before = 'f"__btLogin.begin({policy_json})",'
+        after = 'expression_tail=f"__btLogin.begin({policy_json})",'
+        assert caller.count(before) == 1, "the caller's begin call moved; reseed"
+        seeded = caller.replace(before, after, 1)
+        assert _helper_entry_calls(seeded) == {"begin"}, (
+            "the evaluated expression, passed by keyword, was not counted"
+        )
+
     def test_a_seeded_comment_or_docstring_mention_is_not_a_use(self):
         """The repeat guard reads actual call strings, never prose.
 
