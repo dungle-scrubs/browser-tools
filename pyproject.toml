@@ -38,7 +38,7 @@ classifiers = [
 # is >=16.0 -- the higher of the two merged projects' floors, required by the
 # vendored core.
 dependencies = [
-    "websockets>=16.0",
+    "websockets>=17.3",
 ]
 
 [project.optional-dependencies]
