@@ -1,4 +1,4 @@
-"""Guards for the login test modules' own support code.
+"""Guards for the login test modules' own support code and size.
 
 The round-four review (Quality Q8, Reuse, A's nit) found the approved-login
 work leaving dead scaffolding behind in the two test modules it had modified:
@@ -6,15 +6,23 @@ an orphan private helper method and unused local bindings - a repeat of the
 standing dead-code rule. ``F841`` is deliberately ignored in the repository's
 Ruff config and Pyright checks only ``src/``, so nothing rejected them.
 
-These two checks close exactly that gap, and only that gap: they enforce
-that private helper *methods* and *local variable bindings* in
+The round-five review (Quality Q10) found the same class of unenforced
+written rule one level up: ``tests/test_login_live.py`` had grown past
+CONTRIBUTING.md's module-size guidance (~800 lines) with nothing rejecting
+an oversized module.
+
+These checks close exactly those gaps, and only those gaps: the first two
+enforce that private helper *methods* and *local variable bindings* in
 ``tests/test_login_cancellation.py`` and ``tests/test_login_ownership.py``
-are consumed. This is not a repository-wide dead-code analysis, and it does
-not attempt to prove anything about untested runtime branches; both checks
-run from the ordinary ``uv run pytest tests/`` invocation (and therefore
-CI), using the standard ``vulture`` analyzer (a dev dependency) and the
-repository's existing Ruff, deliberately re-enabled for this one rule on
-these two files only.
+are consumed, and the third enforces the size limit on the two whole-flow
+login modules, ``tests/test_login_live.py`` and ``tests/test_login_bridge.py``
+(the round-six Q10 extraction). This is not a repository-wide dead-code or
+size analysis, and it does not attempt to prove anything about untested
+runtime branches; the first two checks run from the ordinary
+``uv run pytest tests/`` invocation (and therefore CI), using the standard
+``vulture`` analyzer (a dev dependency) and the repository's existing Ruff,
+deliberately re-enabled for this one rule on these two files only, and the
+size check simply reads the two modules' actual line counts.
 """
 
 from __future__ import annotations
@@ -97,3 +105,44 @@ def test_login_test_modules_have_no_unused_local_bindings() -> None:
         "needed side effect (assign to the name only when it is read, or "
         "drop the name entirely); never delete an assertion or a wait"
     )
+
+
+#: The two whole-flow login test modules kept under the size limit, oldest
+#: first: the limit is checked against the actual files (so a missing module
+#: is itself a failure), and the long-lived ``test_login_live.py`` is named
+#: first so an oversized live module is reported for what it is - extraction
+#: overdue - rather than as a missing ``test_login_bridge.py``.
+SIZE_MODULES = (
+    "test_login_live.py",
+    "test_login_bridge.py",
+)
+
+#: CONTRIBUTING.md's module-size guidance: modules stay under ~800 lines.
+SIZE_LIMIT = 800
+
+
+def test_login_test_modules_stay_under_the_module_size_limit() -> None:
+    """A login test module over the size limit fails, named with its count.
+
+    Reads the actual current files rather than any snapshot, so the guard
+    holds for every future change to the two whole-flow login modules: an
+    oversized one is reported with its real line count and the instruction
+    CONTRIBUTING.md already gives - extract a cohesive set of symbols into
+    a new test module - never a license to delete a case to fit the limit.
+    """
+    tests = Path(__file__).parent
+    for name in SIZE_MODULES:
+        path = tests / name
+        assert path.is_file(), (
+            f"tests/{name} does not exist; the whole-flow login tests are "
+            "organized as exactly these two modules"
+        )
+        count = len(path.read_text(encoding="utf-8").splitlines())
+        assert count <= SIZE_LIMIT, (
+            f"tests/{name} is {count} lines, over the {SIZE_LIMIT}-line "
+            "module-size limit (CONTRIBUTING.md, Module Size): extract a "
+            "cohesive set of symbols into a new test module and migrate "
+            "the references to it, keeping every collected case exactly "
+            "once (do not re-export test classes; pytest would collect "
+            "them twice)"
+        )
