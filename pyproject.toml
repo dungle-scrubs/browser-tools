@@ -111,7 +111,7 @@ dev = [
     "pyright>=1.1.0",
     "pytest>=8.0.0",
     "pytest-asyncio>=1.3.0",
-    "ruff>=0.8.0",
+    "ruff>=0.17.3",
     # camoufox is a runtime extra, not a default dependency; it is in the dev
     # group so pyright can resolve `camoufox.sync_api` when type-checking the
     # optional Camoufox engine paths.
