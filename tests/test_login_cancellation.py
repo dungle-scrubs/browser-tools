@@ -158,7 +158,7 @@ class TestLiveCancellation:
             task = asyncio.ensure_future(
                 login._read_credentials(str(fake_relay), POLICY, ACCOUNT, deadline)
             )
-            pids = await _wait_for_pids(marker, count=1)
+            await _wait_for_pids(marker, count=1)
             task.cancel()
             started = time.monotonic()
             with pytest.raises(asyncio.CancelledError):
@@ -623,11 +623,6 @@ class TestUncertainSubmission:
     clears first and then propagates. All three run the actual controller
     over the fake CDP/transport boundary.
     """
-
-    def _sentences(self, harness) -> list[str]:
-        return [
-            str(entry) for entry in [harness]
-        ]  # placeholder removed below; see tests
 
     def test_a_work_timeout_after_submit_dispatched_is_uncertain(self, harness, monkeypatch):
         import asyncio

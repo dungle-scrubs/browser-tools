@@ -508,8 +508,6 @@ class TestRecheckOffTheEventLoop:
         result is simply discarded."""
         import logging
 
-        release = asyncio.Event()
-
         def holding(pid: int, path: Path, timeout: float = 2.0) -> bool:
             deadline = time.monotonic() + min(0.3, timeout)
             while time.monotonic() < deadline:
