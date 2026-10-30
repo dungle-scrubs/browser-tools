@@ -35,6 +35,7 @@ from . import (
     insights,
     lifecycle,
     list_verbs,
+    login,
     passthrough,
     step_run,
     user_settings,
@@ -89,6 +90,7 @@ KNOWN_VERBS = {
     "run",
     "trace",
     "heap",
+    "login",
 }
 
 
@@ -373,8 +375,46 @@ def build_parser() -> argparse.ArgumentParser:
 
     _add_curated_verbs(sub)
     _add_run_verb(sub)
+    _add_login_verb(sub)
 
     return parser
+
+
+def _add_login_verb(
+    sub: argparse._SubParsersAction[argparse.ArgumentParser],  # pyright: ignore[reportPrivateUsage]
+) -> None:
+    """Add ``login``: one configured login form, filled and submitted once.
+
+    Deliberately not a Step Run verb and not endpoint-capable: credentials
+    flow through this one path only, over a registered Chrome instance. No
+    flag accepts a secret, a field name, or an endpoint.
+    """
+    login_parser = sub.add_parser(
+        "login", help="Fill and submit one configured login form"
+    )
+    login_parser.add_argument(
+        "instance", nargs="?", metavar="INSTANCE", help="Instance (omit if only one)"
+    )
+    login_parser.add_argument(
+        "--account",
+        metavar="ALIAS",
+        help="Account alias from the login config (required)",
+    )
+    login_parser.add_argument(
+        "--target", metavar="SPEC", help="Select the page target (index or id prefix)"
+    )
+    login_parser.add_argument(
+        "--config",
+        metavar="FILE",
+        help="Login config file (default: $XDG_CONFIG_HOME/browser-tools/logins.json)",
+    )
+    login_parser.add_argument(
+        "--timeout-ms",
+        type=int,
+        default=login.DEFAULT_LOGIN_TIMEOUT_MS,
+        metavar="MS",
+        help=f"Overall deadline in ms (default: {login.DEFAULT_LOGIN_TIMEOUT_MS})",
+    )
 
 
 def _add_run_verb(
@@ -934,6 +974,16 @@ def check_preconditions(
             )
         curated.check_screencast_values(args.duration, args.format)
 
+    if command == "login":
+        if not getattr(args, "account", None):
+            raise PassthroughUsageError(
+                "login requires --account ALIAS (an alias from the login config)"
+            )
+        # The same check the direct entry point runs, so the CLI and the
+        # library cannot drift (a huge int would otherwise overflow the
+        # float conversion inside math.isfinite).
+        login.validate_timeout_ms(args.timeout_ms)
+
     if command == "detect":
         curated.check_detect_wait(None if args.no_wait else args.wait)
 
@@ -1065,6 +1115,18 @@ def _run(args: argparse.Namespace) -> int:
 
     if args.command in _CURATED_COMMANDS:
         _print_json(step_envelope(args, registry_path))
+        return EXIT_OK
+
+    if args.command == "login":
+        document = login.login(
+            instance=args.instance,
+            account=args.account,
+            target=args.target,
+            config=args.config,
+            timeout_ms=args.timeout_ms,
+            registry_path=registry_path,
+        )
+        _print_json(document)
         return EXIT_OK
 
     if args.command == "trace":

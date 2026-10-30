@@ -1,0 +1,739 @@
+"""Live cancellation of the async credential read, against a fake opchain.
+
+The regression pinned here: cancelling the coroutine that awaits a relay
+read must stop the relay child *for real*. Before the fix, asyncio
+cancellation cancelled only the ``asyncio.to_thread`` waiter: the worker
+thread, the opchain process, and its group kept running to their own
+deadline, and a sentinel delivered mid-flight could still be consumed.
+
+Every child is a synthetic ``opchain`` that records its pid and either
+sleeps (live cancellation) or answers one field and sleeps on the other.
+No real opchain, real credential, or real 1Password access happens here.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import json
+import os
+import textwrap
+import threading
+import time
+from typing import TYPE_CHECKING
+
+import pytest
+
+from browser_tools import login, login_contract, login_ownership, login_policy
+from browser_tools import login as login_module
+from browser_tools.core.errors import CDPError
+from browser_tools.lifecycle import LifecycleError
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+from login_browser_fixtures import SENTINEL_PASS
+from login_browser_fixtures import harness as harness
+from login_browser_fixtures import registry as registry
+
+#: A synthetic but complete owner identity for direct transaction tests:
+#: the recorded browser is never reached there (the session hangs first).
+OWNED = login_ownership.OwnershipSnapshot(
+    pid=1234, pid_start="START", user_data_dir="/synthetic/session-dir", port=9500,
+)
+
+VAULT = "dqss6l4yprxhntxymzjaltchwe"
+ITEM = "bbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+POLICY = login_policy.LoginPolicy(identity="browser", vault=VAULT, accounts={})
+ACCOUNT = login_policy.AccountSpec(
+    alias="example",
+    item=ITEM,
+    origin="https://example.com",
+    username_selector="#username",
+    password_selector="#password",
+    submit_selector="button[type=submit]",
+    success_selector="[data-signed-in]",
+)
+
+#: The sentinel the fake writes into the relay pipe before it sleeps. If a
+#: cancelled read ever returned a value, this is the value it would return.
+SENTINEL_USER = "SENTINEL-user\n"
+
+POLICY_DOCUMENT = {
+    "version": 1,
+    "identity": "browser",
+    "vault": VAULT,
+    "accounts": {
+        "example": {
+            "item": ITEM,
+            "origin": "https://example.com",
+            "username_selector": "#username",
+            "password_selector": "#password",
+            "submit_selector": "button[type=submit]",
+            "success_selector": "[data-signed-in]",
+        }
+    },
+}
+
+
+def write_fake(bin_dir: Path, name: str, body: str) -> Path:
+    path = bin_dir / name
+    path.write_text(textwrap.dedent(body).lstrip("\n"))
+    path.chmod(0o755)
+    return path
+
+
+def sleeping_relay_body(*, marker: str, hang_fields: set[str]) -> str:
+    """A relay-capable fake: answers the probe, hangs on ``hang_fields``.
+
+    Each invocation appends its pid to the marker file so the test can
+    both find the live process group and count how many reads started.
+    """
+    return f'''
+        #!/usr/bin/env python3
+        import os, sys, time
+        argv = sys.argv
+        fd_text = argv[argv.index("--value-fd") + 1]
+        if fd_text == "0":
+            sys.stderr.write("opchain: relay: descriptor-standard\\n")
+            sys.exit(1)
+        ref = argv[argv.index("op") + 2]
+        field = ref.rsplit("/", 1)[-1]
+        with open({marker!r}, "a") as fh:
+            fh.write(str(os.getpid()) + "\\n")
+        if field in {sorted(hang_fields)!r}:
+            time.sleep(30)
+            sys.exit(0)
+        os.write(int(fd_text), {SENTINEL_USER.encode()!r})
+        sys.exit(0)
+        '''
+
+
+async def _wait_for_pids(marker: Path, count: int, timeout: float = 10.0) -> list[int]:
+    """Pids recorded by the fake, awaited without blocking the loop."""
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        text = marker.read_text() if marker.exists() else ""
+        pids = [int(line) for line in text.splitlines() if line.strip()]
+        if len(pids) >= count:
+            return pids
+        await asyncio.sleep(0.02)
+    pytest.fail(f"the fake opchain never started {count} read(s); marker={marker}")
+
+
+def _assert_groups_dead(pids: list[int], timeout: float = 8.0) -> None:
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        if all(_dead(pid) for pid in pids):
+            return
+        time.sleep(0.05)
+    pytest.fail(f"process group(s) survived cancellation: {pids}")
+
+
+def _dead(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return False
+    except OSError:
+        return True
+
+
+@pytest.fixture
+def fake_relay(tmp_path) -> Path:
+    marker = tmp_path / "pids.log"
+    return write_fake(
+        tmp_path, "opchain", sleeping_relay_body(marker=str(marker), hang_fields={"username"})
+    )
+
+
+class TestLiveCancellation:
+    def test_cancel_during_a_live_read_kills_the_group_and_returns_nothing(
+        self, fake_relay, tmp_path, capsys
+    ):
+        marker = tmp_path / "pids.log"
+
+        async def scenario() -> float:
+            deadline = login_contract.Deadline(30_000)
+            task = asyncio.ensure_future(
+                login._read_credentials(str(fake_relay), POLICY, ACCOUNT, deadline)
+            )
+            await _wait_for_pids(marker, count=1)
+            task.cancel()
+            started = time.monotonic()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            return time.monotonic() - started
+
+        elapsed = asyncio.run(scenario())
+        # Prompt: bounded cleanup, not the fake's 30-second sleep, and not
+        # the relay's own command deadline either.
+        assert elapsed < 6.0, elapsed
+        pids = [int(line) for line in marker.read_text().splitlines()]
+        assert pids, "the fake opchain never started"
+        _assert_groups_dead(pids)
+        # Only the username read started; the password read never spawned.
+        assert len(pids) == 1
+        # No value was returned (CancelledError above) and none leaked.
+        captured = capsys.readouterr()
+        assert "SENTINEL" not in captured.out + captured.err
+
+    def test_cancel_during_the_second_field_never_returns_the_first(
+        self, tmp_path
+    ):
+        marker = tmp_path / "pids.log"
+        binary = write_fake(
+            tmp_path,
+            "opchain",
+            sleeping_relay_body(marker=str(marker), hang_fields={"password"}),
+        )
+
+        async def scenario() -> float:
+            deadline = login_contract.Deadline(30_000)
+            task = asyncio.ensure_future(
+                login._read_credentials(str(binary), POLICY, ACCOUNT, deadline)
+            )
+            pids = []
+            while len(pids) < 2:
+                pids = await _wait_for_pids(marker, count=2)
+            task.cancel()
+            started = time.monotonic()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            return time.monotonic() - started
+
+        elapsed = asyncio.run(scenario())
+        assert elapsed < 6.0, elapsed
+        pids = [int(line) for line in marker.read_text().splitlines()]
+        assert len(pids) == 2, "both fields should have started"
+        _assert_groups_dead(pids)
+
+    def test_a_second_cancellation_during_cleanup_cannot_break_it(
+        self, fake_relay, tmp_path, monkeypatch
+    ):
+        marker = tmp_path / "pids.log"
+        release_kill = threading.Event()
+        original_kill = login.credential_relay._kill_group
+
+        async def scenario() -> None:
+            loop = asyncio.get_running_loop()
+            cleanup_started = asyncio.Event()
+
+            def controlled_kill(proc):
+                loop.call_soon_threadsafe(cleanup_started.set)
+                assert release_kill.wait(5), "test did not release relay cleanup"
+                original_kill(proc)
+
+            monkeypatch.setattr(login.credential_relay, "_kill_group", controlled_kill)
+            task = asyncio.create_task(
+                login._read_credentials(str(fake_relay), POLICY, ACCOUNT, login_contract.Deadline(30_000))
+            )
+            try:
+                pids = await _wait_for_pids(marker, count=1)
+                assert task.cancel()
+                await asyncio.wait_for(cleanup_started.wait(), 5)
+                for pid in pids:
+                    os.kill(pid, 0)  # Still alive when the second cancellation lands.
+                assert task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+            finally:
+                release_kill.set()
+            _assert_groups_dead(pids)
+            await asyncio.sleep(0)
+
+        asyncio.run(scenario())
+
+    def test_an_abandoned_settle_wait_consumes_the_late_outcome(
+        self, tmp_path, monkeypatch, capsys, caplog
+    ):
+        """A settle wait that gives up must not leave a stranded outcome.
+
+        The worker thread can finish after the bounded settle wait abandoned
+        it (a slow group kill, a busy machine). Whatever arrives then - here
+        a RelayError carrying the cancelled-read diagnostic - must be
+        consumed, never surfaced as an unretrieved-exception traceback by
+        the still-live event loop, and never used as a value.
+        """
+        import gc
+        import logging
+
+        marker = tmp_path / "pids.log"
+        binary = write_fake(
+            tmp_path,
+            "opchain",
+            sleeping_relay_body(marker=str(marker), hang_fields={"username"}),
+        )
+        # Abandon the settle wait almost immediately, so the thread's
+        # outcome lands after the await gave up on it.
+        monkeypatch.setattr(login, "_RELAY_CANCEL_SETTLE_SECONDS", 0.01)
+        release_kill = threading.Event()
+        original_kill = login.credential_relay._kill_group
+
+        def controlled_kill(proc):
+            assert release_kill.wait(5), "test did not release relay cleanup"
+            original_kill(proc)
+
+        monkeypatch.setattr(login.credential_relay, "_kill_group", controlled_kill)
+
+        async def scenario() -> None:
+            deadline = login_contract.Deadline(30_000)
+            task = asyncio.ensure_future(
+                login._read_credentials(str(binary), POLICY, ACCOUNT, deadline)
+            )
+            pids = await _wait_for_pids(marker, count=1)
+            try:
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+                for pid in pids:
+                    os.kill(pid, 0)  # The relay outcome cannot have arrived yet.
+            finally:
+                release_kill.set()
+            # The worker thread finishes after the abandon; let its outcome
+            # land inside the live loop, then force the futures through
+            # finalization while the loop can still report them.
+            await asyncio.sleep(0.5)
+            gc.collect()
+            await asyncio.sleep(0.1)
+
+        with caplog.at_level(logging.DEBUG, logger="asyncio"):
+            asyncio.run(scenario())
+        pids = [int(line) for line in marker.read_text().splitlines()]
+        _assert_groups_dead(pids)
+        captured = capsys.readouterr()
+        noise = caplog.text + captured.out + captured.err
+        assert "never retrieved" not in noise
+        assert "RelayError" not in noise
+        assert "SENTINEL" not in noise
+
+
+class TestOverallDeadlineWall:
+    def test_a_hung_session_attach_is_bounded_by_the_deadline(self, monkeypatch):
+        """The documented timeout covers session attach, with a grace."""
+
+        @contextlib.asynccontextmanager
+        async def hung(port, target_spec, target_by):
+            await asyncio.Event().wait()  # never yields a session
+            yield None, None
+
+        monkeypatch.setattr(login, "one_shot_page_session", hung)
+        deadline = login_contract.Deadline(300)
+
+        with pytest.raises(login.LoginError, match="timeout"):
+            asyncio.run(login._login_transaction(
+                9222, None, None, POLICY, ACCOUNT, "/fake/opchain", deadline, OWNED
+            ))
+
+    def test_the_probe_consumes_the_shared_deadline(self, monkeypatch, tmp_path):
+        """Probe time counts against the total; the deadline never resets.
+
+        A 300 ms budget with a probe that sleeps 250 ms must time out around
+        300 ms in total. A reset after the probe would hand the browser phase
+        a fresh 300 ms and finish near 550 ms instead.
+        """
+        from browser_tools import credential_relay
+        from browser_tools.core import registry as core_registry
+
+        monkeypatch.setattr(credential_relay, "find_opchain", lambda: "/fake/opchain")
+        monkeypatch.setattr(
+            login.login_ownership, "verify_recorded_owner",
+            lambda entry, deadline: OWNED,
+        )
+
+        def slow_probe(*args, **kwargs):
+            time.sleep(0.25)
+
+        monkeypatch.setattr(credential_relay, "ensure_relay_supported", slow_probe)
+
+        @contextlib.asynccontextmanager
+        async def hung(port, target_spec, target_by):
+            await asyncio.Event().wait()
+            yield None, None
+
+        monkeypatch.setattr(login, "one_shot_page_session", hung)
+
+        config = tmp_path / "logins.json"
+        config.write_text(json.dumps(POLICY_DOCUMENT))
+        registry_path = str(tmp_path / "registry.json")
+        core_registry._save_registry(  # pyright: ignore[reportPrivateUsage]
+            {"web-01": {"port": 9500, "pid": 2_000_000_000,
+                        "browser_version": "Chrome/1", "user_data_dir": "",
+                        "engine": "chrome"}},
+            registry_path,
+        )
+        started = time.monotonic()
+        with pytest.raises(login.LoginError, match="timeout"):
+            login.login(
+                instance="web-01",
+                account="example",
+                config=str(config),
+                timeout_ms=300,
+                registry_path=registry_path,
+            )
+        assert time.monotonic() - started < 0.45
+
+
+class TestDeadlineCleanup:
+    @pytest.mark.parametrize("cleanup_fails", [False, True])
+    def test_expired_fill_still_attempts_cleanup(self, harness, cleanup_fails, monkeypatch):
+        deadlines = []
+
+        class ControlledDeadline(login_contract.Deadline):
+            def __init__(self, timeout_ms):
+                super().__init__(timeout_ms)
+                self.expired = False
+                deadlines.append(self)
+
+            def remaining(self):
+                return 0.0 if self.expired else 1.0
+
+        monkeypatch.setattr(login_contract, "Deadline", ControlledDeadline)
+        original_send = harness.fake.send
+
+        async def fail_after_deadline(method, params=None, session_id=None, timeout=None):
+            declaration = (params or {}).get("functionDeclaration", "")
+            if "this.fill" in declaration:
+                deadlines[0].expired = True
+                raise CDPError(-32000, SENTINEL_PASS)
+            if cleanup_fails and "this.clear" in declaration:
+                harness.log.append(("cleanup-attempt", None))
+                raise CDPError(-32000, "cleanup failed")
+            return await original_send(method, params, session_id, timeout)
+
+        harness.fake.send = fail_after_deadline
+        with pytest.raises(LifecycleError) as error:
+            harness.run(timeout_ms=10)
+        attempted = any(
+            method == "cleanup-attempt" or
+            (method == "Runtime.callFunctionOn" and params and "this.clear" in params.get("functionDeclaration", ""))
+            for method, params in harness.log
+        )
+        assert attempted, "an expired operation still owes sensitive-field cleanup"
+        if cleanup_fails:
+            assert "may still hold" in str(error.value)
+        assert SENTINEL_PASS not in str(error.value)
+
+
+class TestCleanupOutsideTheWorkWall:
+    """The caller's round-two deadline reproduction, and its neighbours.
+
+    Every timing case drives the real success poll through the fake CDP
+    boundary (scriptable responses and transport-like delays), never a
+    private poll stub, so the regressions fail if the poll stops drawing
+    each allowance from the one clock.
+    """
+
+    def test_unmet_success_at_the_deadline_retains_the_error_after_a_slow_clear(
+        self, harness, monkeypatch
+    ):
+        """A real 150ms deadline; the poll never sees success; the final
+        clear takes a slow 100ms round trip.
+
+        The success wait expires at the deadline; the final clear must still
+        complete on its own budget and the unmet-success diagnosis must
+        survive - never be cancelled into an unconfirmed-clear warning.
+        """
+        import asyncio
+
+        from login_browser_fixtures import UNAUTHENTICATED_PROBE
+
+        harness.fake.probe = UNAUTHENTICATED_PROBE
+        original_send = harness.fake.send
+        clears = {"count": 0}
+        completed = False
+
+        async def delayed_clear(method, params=None, session_id=None, timeout=None):
+            nonlocal completed
+            if method == "Runtime.callFunctionOn" and "this.clear" in (
+                params or {}
+            ).get("functionDeclaration", ""):
+                clears["count"] += 1
+                if clears["count"] == 2:  # the final clear, after success polling
+                    await asyncio.sleep(0.10)
+                    completed = True
+            return await original_send(method, params, session_id, timeout)
+
+        monkeypatch.setattr(harness.fake, "send", delayed_clear)
+        with pytest.raises(
+            login_module.LoginError, match="success condition was not met"
+        ) as error:
+            harness.run(timeout_ms=150)
+        assert completed, "the final field clear was cancelled before its budget elapsed"
+        assert not error.value.fields_may_remain
+        assert clears["count"] == 2
+
+    def test_success_near_the_deadline_keeps_the_success_result(
+        self, harness, monkeypatch
+    ):
+        """Success lands just before the deadline (the probe evaluate takes
+        a real 90ms under a 150ms budget); the final clear still runs past
+        the deadline on its own budget and the login reports authenticated,
+        not a timeout."""
+        import asyncio
+
+        original_send = harness.fake.send
+        completed = False
+        clears = {"count": 0}
+
+        async def delayed_probe_and_clear(
+            method, params=None, session_id=None, timeout=None
+        ):
+            nonlocal completed
+            expression = (params or {}).get("expression", "")
+            if (
+                method == "Runtime.evaluate"
+                and "globalThis.__btLogin" not in expression
+            ):
+                await asyncio.sleep(0.09)  # one slow poll round trip, in budget
+            if method == "Runtime.callFunctionOn" and "this.clear" in (
+                params or {}
+            ).get("functionDeclaration", ""):
+                clears["count"] += 1
+                if clears["count"] == 2:  # the final clear, past the deadline
+                    await asyncio.sleep(0.10)
+                    completed = True
+            return await original_send(method, params, session_id, timeout)
+
+        monkeypatch.setattr(harness.fake, "send", delayed_probe_and_clear)
+        result = harness.run(timeout_ms=150)
+        assert result == {"account": "example", "status": "authenticated"}
+        assert completed, "the final clear never completed"
+
+    def test_chained_probe_calls_that_each_fit_an_allowance_cannot_jointly_pass(
+        self, harness, monkeypatch
+    ):
+        """Two 160ms probe calls under a 300ms deadline: each would fit the
+        allowance the old code computed once, and jointly they exceed it.
+        The second call must receive a freshly recalculated, smaller
+        allowance, and the operation must report the unmet success
+        condition - never authenticate after its deadline.
+        """
+        import asyncio
+
+        original_send = harness.fake.send
+        submitted = {"now": False}
+        allowances: list[float | None] = []
+
+        async def chained_delays(method, params=None, session_id=None, timeout=None):
+            declaration = (params or {}).get("functionDeclaration", "")
+            if method == "Runtime.callFunctionOn" and "this.submit" in declaration:
+                submitted["now"] = True
+            expression = (params or {}).get("expression", "")
+            if submitted["now"] and method in {
+                "Page.createIsolatedWorld", "Runtime.evaluate",
+            } and (
+                method == "Page.createIsolatedWorld"
+                or "globalThis.__btLogin" not in expression
+            ):
+                allowances.append(timeout)
+                await asyncio.wait_for(asyncio.sleep(0.16), timeout=timeout)
+            return await original_send(method, params, session_id, timeout)
+
+        monkeypatch.setattr(harness.fake, "send", chained_delays)
+        with pytest.raises(
+            login_module.LoginError, match="success condition was not met"
+        ):
+            harness.run(timeout_ms=300)
+        assert len(allowances) >= 2, "the chained probe calls never ran"
+        assert allowances[1] is not None and allowances[0] is not None
+        assert allowances[1] < allowances[0], (
+            f"the second probe call reused the first allowance: {allowances}"
+        )
+
+    def test_an_ignored_transport_timeout_cannot_authenticate_late(
+        self, harness, monkeypatch
+    ):
+        """A transport that ignores its supplied timeout answers success
+        after the deadline; acceptance must still refuse it."""
+        import asyncio
+
+        original_send = harness.fake.send
+        submitted = {"now": False}
+
+        async def ignoring_transport(method, params=None, session_id=None, timeout=None):
+            declaration = (params or {}).get("functionDeclaration", "")
+            if method == "Runtime.callFunctionOn" and "this.submit" in declaration:
+                submitted["now"] = True
+            expression = (params or {}).get("expression", "")
+            if (
+                submitted["now"]
+                and method == "Runtime.evaluate"
+                and "globalThis.__btLogin" not in expression
+            ):
+                await asyncio.sleep(0.31)  # ignores `timeout` on purpose
+            return await original_send(method, params, session_id, timeout)
+
+        monkeypatch.setattr(harness.fake, "send", ignoring_transport)
+        with pytest.raises(
+            login_module.LoginError, match="success condition was not met"
+        ):
+            harness.run(timeout_ms=300)
+
+    def test_cancellation_after_a_dispatched_fill_still_clears_then_propagates(
+        self, harness, monkeypatch
+    ):
+        import asyncio
+
+        original_send = harness.fake.send
+
+        async def cancel_after_fill(method, params=None, session_id=None, timeout=None):
+            if "this.fill" in (params or {}).get("functionDeclaration", ""):
+                await original_send(method, params, session_id, timeout)
+                raise asyncio.CancelledError
+            return await original_send(method, params, session_id, timeout)
+
+        monkeypatch.setattr(harness.fake, "send", cancel_after_fill)
+        with pytest.raises(asyncio.CancelledError):
+            harness.run()
+        assert any(
+            m == "Runtime.callFunctionOn" and p and "this.clear" in str(p.get("functionDeclaration"))
+            for m, p in harness.log
+        ), "a cancellation after possible insertion still owes a clear"
+
+    def test_cancellation_with_an_unconfirmed_clear_reports_the_warning(
+        self, harness, monkeypatch
+    ):
+        import asyncio
+
+        original_send = harness.fake.send
+
+        async def cancel_and_break_cleanup(method, params=None, session_id=None, timeout=None):
+            declaration = (params or {}).get("functionDeclaration", "")
+            if "this.fill" in declaration:
+                await original_send(method, params, session_id, timeout)
+                raise asyncio.CancelledError
+            if "this.clear" in declaration:
+                raise CDPError(-32000, "SENTINEL-stalled-cleanup")
+            return await original_send(method, params, session_id, timeout)
+
+        monkeypatch.setattr(harness.fake, "send", cancel_and_break_cleanup)
+        with pytest.raises(login_module.LoginError, match="may still hold") as error:
+            harness.run()
+        assert error.value.fields_may_remain
+        assert "SENTINEL" not in str(error.value)
+
+
+class TestUncertainSubmission:
+    """One phase, three stop causes: timeout, call failure, cancellation.
+
+    The fourth-round contract: after a dispatched submit, a work timeout
+    and a call failure produce the same uncertain-submission sentence -
+    never a confirmed failure sentence - and an external cancellation
+    clears first and then propagates. All three run the actual controller
+    over the fake CDP/transport boundary.
+    """
+
+    def test_a_work_timeout_after_submit_dispatched_is_uncertain(self, harness, monkeypatch):
+        import asyncio
+
+        original_send = harness.fake.send
+
+        async def hanging_submit(method, params=None, session_id=None, timeout=None):
+            declaration = (params or {}).get("functionDeclaration", "")
+            if "this.submit" in declaration:
+                await asyncio.Event().wait()  # ignores its timeout entirely
+            return await original_send(method, params, session_id, timeout)
+
+        monkeypatch.setattr(harness.fake, "send", hanging_submit)
+        with pytest.raises(login_module.LoginError) as error:
+            harness.run(timeout_ms=250)
+        assert "could not be confirmed" in str(error.value), str(error.value)
+        assert "not resubmitted" in str(error.value)
+        assert "did not complete within its timeout" not in str(error.value)
+
+    def test_a_call_failure_after_submit_dispatched_is_the_same_sentence(
+        self, harness, monkeypatch
+    ):
+        original_send = harness.fake.send
+
+        async def failing_submit(method, params=None, session_id=None, timeout=None):
+            declaration = (params or {}).get("functionDeclaration", "")
+            if "this.submit" in declaration:
+                raise CDPError(-32000, "SENTINEL-submit-transport-burst")
+            return await original_send(method, params, session_id, timeout)
+
+        monkeypatch.setattr(harness.fake, "send", failing_submit)
+        with pytest.raises(login_module.LoginError) as error:
+            harness.run(timeout_ms=2_000)
+        assert "could not be confirmed" in str(error.value), str(error.value)
+        assert "not resubmitted" in str(error.value)
+        assert "SENTINEL" not in str(error.value)
+
+    def test_timeout_and_call_failure_agree_at_the_same_dispatched_state(
+        self, harness, monkeypatch
+    ):
+        """The comparison the round-three panel asked for: at the same
+        dispatched state, deadline and call failure map identically, so an
+        interrupted submission is never reported as a confirmed failure."""
+        import asyncio
+
+        sentences: dict[str, str] = {}
+        original_send = harness.fake.send
+
+        async def hanging_submit(method, params=None, session_id=None, timeout=None):
+            declaration = (params or {}).get("functionDeclaration", "")
+            if "this.submit" in declaration:
+                await asyncio.Event().wait()
+            return await original_send(method, params, session_id, timeout)
+
+        monkeypatch.setattr(harness.fake, "send", hanging_submit)
+        with pytest.raises(login_module.LoginError) as timed_out:
+            harness.run(timeout_ms=250)
+        sentences["timeout"] = str(timed_out.value)
+
+        async def failing_submit(method, params=None, session_id=None, timeout=None):
+            declaration = (params or {}).get("functionDeclaration", "")
+            if "this.submit" in declaration:
+                raise CDPError(-32000, "SENTINEL-submit-transport-burst")
+            return await original_send(method, params, session_id, timeout)
+
+        monkeypatch.setattr(harness.fake, "send", failing_submit)
+        with pytest.raises(login_module.LoginError) as call_failed:
+            harness.run(timeout_ms=2_000)
+        sentences["call-failure"] = str(call_failed.value)
+        assert sentences["timeout"] == sentences["call-failure"], sentences
+        assert "could not be confirmed" in sentences["timeout"], sentences
+
+    def test_cancellation_after_a_dispatched_submit_clears_then_propagates(
+        self, harness, monkeypatch
+    ):
+        import asyncio
+
+        original_send = harness.fake.send
+
+        async def cancel_after_submit(method, params=None, session_id=None, timeout=None):
+            if "this.submit" in (params or {}).get("functionDeclaration", ""):
+                await original_send(method, params, session_id, timeout)
+                raise asyncio.CancelledError
+            return await original_send(method, params, session_id, timeout)
+
+        monkeypatch.setattr(harness.fake, "send", cancel_after_submit)
+        with pytest.raises(asyncio.CancelledError):
+            harness.run()
+        assert any(
+            m == "Runtime.callFunctionOn" and p and "this.clear" in str(p.get("functionDeclaration"))
+            for m, p in harness.log
+        ), "a cancellation after a dispatched submit still owes a clear"
+
+    def test_cancellation_with_an_unconfirmed_clear_after_submit_warns(
+        self, harness, monkeypatch
+    ):
+        import asyncio
+
+        original_send = harness.fake.send
+
+        async def cancel_and_break_cleanup(method, params=None, session_id=None, timeout=None):
+            declaration = (params or {}).get("functionDeclaration", "")
+            if "this.submit" in declaration:
+                await original_send(method, params, session_id, timeout)
+                raise asyncio.CancelledError
+            if "this.clear" in declaration:
+                raise CDPError(-32000, "SENTINEL-stalled-cleanup")
+            return await original_send(method, params, session_id, timeout)
+
+        monkeypatch.setattr(harness.fake, "send", cancel_and_break_cleanup)
+        with pytest.raises(login_module.LoginError, match="may still hold") as error:
+            harness.run()
+        assert error.value.fields_may_remain
+        assert "SENTINEL" not in str(error.value)

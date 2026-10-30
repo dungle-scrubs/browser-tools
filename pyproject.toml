@@ -116,6 +116,7 @@ dev = [
     # group so pyright can resolve `camoufox.sync_api` when type-checking the
     # optional Camoufox engine paths.
     "camoufox[geoip]>=0.4.11",
+    "vulture>=2.16",
 ]
 
 [tool.pytest.ini_options]
@@ -162,4 +163,4 @@ select = [
 ignore = ["E501", "E731", "F841"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["browser_tools"]
+known-first-party = ["browser_tools", "login_browser_fixtures", "login_fixtures"]

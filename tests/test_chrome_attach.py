@@ -226,7 +226,19 @@ def shell(profile, port):
             deadline = time.monotonic() + 8
             while time.monotonic() < deadline:
                 text = log.read_text()
-                if (profile / "DevToolsActivePort").exists() or "Cannot start http server" in text:
+                try:
+                    active = (profile / "DevToolsActivePort").read_text().splitlines()
+                except FileNotFoundError:
+                    active = []
+                complete = (
+                    len(active) >= 2
+                    and 1 <= len(active[0]) <= 5
+                    and active[0].isascii() and active[0].isdigit()
+                    and 1 <= int(active[0]) <= 65535
+                    and active[1].startswith("/devtools/browser/")
+                    and len(active[1]) > len("/devtools/browser/")
+                )
+                if complete or "Cannot start http server" in text:
                     break
                 if process.poll() is not None:
                     if "MachPortRendezvousServer" in text and "Permission denied" in text:
@@ -239,6 +251,36 @@ def shell(profile, port):
         finally:
             process.terminate()
             process.wait(timeout=5)
+
+
+@pytest.mark.parametrize("partial", ["", "12345\n", "12345\n/devtools/browser/"])
+def test_shell_waits_for_complete_devtools_file(tmp_path, monkeypatch, partial):
+    path = tmp_path / "DevToolsActivePort"
+    path.write_text(partial)
+    complete = "12345\n/devtools/browser/synthetic-browser-id"
+    ticks = []
+
+    class Process:
+        def poll(self):
+            return None
+
+        def terminate(self):
+            pass
+
+        def wait(self, timeout):
+            assert timeout == 5
+
+    monkeypatch.setenv("BROWSER_TOOLS_CHROME_BINARY", "synthetic-headless-shell")
+    monkeypatch.setattr(subprocess, "Popen", lambda *args, **kwargs: Process())
+
+    def complete_at_next_tick(interval):
+        ticks.append(interval)
+        path.write_text(complete)
+
+    monkeypatch.setattr(time, "sleep", complete_at_next_tick)
+    with shell(tmp_path, 0):
+        assert path.read_text() == complete
+    assert ticks == [0.02]
 
 
 @contextlib.contextmanager
