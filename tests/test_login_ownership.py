@@ -16,6 +16,7 @@ carried rather than re-resolved through the liveness ladder.
 from __future__ import annotations
 
 import asyncio
+import os
 import subprocess
 import sys
 import time
@@ -23,7 +24,7 @@ from pathlib import Path
 
 import pytest
 
-from browser_tools import login_contract, login_ownership
+from browser_tools import login_contract, login_ownership, process_utils
 from browser_tools.core.errors import CDPError
 from browser_tools.lifecycle import ExtendedInstance
 
@@ -314,6 +315,80 @@ class TestRecordedOwnerBudget:
         monkeypatch.setattr(login_ownership, "pid_holds_user_data_dir", explode)
         with pytest.raises(login_contract.DeadlineExpiredError, match="timeout"):
             login_ownership.verify_recorded_owner(entry(), deadline)
+
+
+class TestDirectoryAdapterBudget:
+    """The real directory-adapter chain honors the forwarded budget.
+
+    Round-four T13: every other test here mocks ``pid_holds_user_data_dir``
+    (the recorded PIDs are synthetic), so deleting the timeout forwarding
+    inside the adapter survived the named relay proof. This regression runs
+    the whole real chain - ``pid_holds_user_data_dir`` ->
+    ``find_chrome_user_data_dir`` -> ``read_process_command`` ->
+    ``subprocess.run`` - against one controlled fake ``ps`` found through
+    ``PATH``; no ownership helper is mocked. The synthetic PID is never a
+    real process and nothing inspects a real process's arguments.
+    """
+
+    @pytest.mark.skipif(
+        not (Path("/bin/sh").is_file() and Path("/bin/sleep").is_file()),
+        reason="POSIX shell utilities needed by the controlled fake ps",
+    )
+    def test_the_directory_command_runs_on_the_forwarded_budget(
+        self, tmp_path, monkeypatch
+    ):
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        stage = tmp_path / "directory-command-ran"
+        # A POSIX fake ps: record the stage and the controlled child's
+        # own pid, then become one sleeping child (``exec`` keeps a single
+        # PID, so the timeout kill of subprocess.run leaves no descendant
+        # behind). POSIX shell only - no Python startup eating into the
+        # 150 ms budget.
+        script = "#!/bin/sh\n"
+        script += 'if [ -n "${PS_WARMUP:-}" ]; then exit 0; fi\n'
+        script += 'printf "%s\\n" "$$" > "' + str(stage) + '"\n'
+        script += "exec /bin/sleep 0.6\n"
+        (bin_dir / "ps").write_text(script)
+        (bin_dir / "ps").chmod(0o755)
+        monkeypatch.setenv(
+            "PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}"
+        )
+        # Establish executable readiness outside the measured budget.
+        # Warmup touches neither the stage nor the timed measurement;
+        # the 150 ms budget and 600 ms delay below stay unchanged. This
+        # does not establish why the round-four witness missed its stage.
+        monkeypatch.setenv("PS_WARMUP", "1")
+        subprocess.run([str(bin_dir / "ps")], check=True, timeout=5.0)
+        monkeypatch.delenv("PS_WARMUP")
+
+        started = time.monotonic()
+        holds = process_utils.pid_holds_user_data_dir(
+            PID, Path(DATA_DIR), timeout=0.15
+        )
+        elapsed = time.monotonic() - started
+
+        # The chain really reached its directory command and can report
+        # only the controlled child's pid: without this marker an early
+        # failure (import, spawn or call-shape change) could fake a fast
+        # green.
+        assert stage.is_file(), (
+            "the directory-command stage marker is missing: the adapter "
+            "never ran its ps command"
+        )
+        recorded = stage.read_text().split()
+        assert len(recorded) == 1 and recorded[0].isdigit()
+        # The predicate failed closed promptly on its 150 ms forwarded
+        # budget and its one child was reaped; without the forwarding the
+        # adapter uses the nested 2 s default, the fake's 600 ms delay
+        # runs to completion, and this assertion fails (measured ~0.6 s).
+        assert holds is False
+        with pytest.raises(OSError):
+            os.kill(int(recorded[0]), 0)
+        assert elapsed < 0.4, (
+            f"the directory command took {elapsed:.3f}s under a 150 ms "
+            "forwarded budget; the adapter fell back to its nested default"
+        )
 
 
 class FakeCDP:
