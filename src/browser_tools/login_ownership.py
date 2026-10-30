@@ -237,14 +237,22 @@ async def verify_connected_browser(
     post-reply recheck runs in a worker thread: the receive/event loop stays
     responsive, and the recheck's subprocess calls are themselves capped by
     the remaining budget, so neither a cancelled future nor asyncio's
-    executor join can extend normal operation past the deadline.
+    executor join can extend normal operation past the deadline. A query
+    that exhausts the budget reports the operation timeout - the stronger,
+    earlier fact - rather than identity unavailability.
     """
     timeout = deadline.command_timeout()
     try:
         reply = await cdp.send(
             method="SystemInfo.getProcessInfo", params={}, timeout=timeout
         )
+    except contract.DeadlineExpiredError:
+        raise
     except Exception:
+        if deadline.remaining() <= 0:
+            # The query outlived the operation budget: the timeout outranks
+            # the identity diagnosis (fixed text, no new error kind).
+            raise contract.DeadlineExpiredError(contract.TIMED_OUT) from None
         logger.debug("connected-owner verification send failed")
         raise OwnershipError(_CONNECTED_UNAVAILABLE) from None
     processes = reply.get("processInfo") if isinstance(reply, dict) else None

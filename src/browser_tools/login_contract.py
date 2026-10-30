@@ -13,9 +13,10 @@ rule). Browser and provider calls remain in the transaction module:
   :class:`Frame` (main-frame document identity), the value types the
   transaction passes around.
 - The per-command timeout cap and the default overall timeout.
-- The progress phases, stop causes and :class:`Progress` record the
+- The progress state variants (untouched, or a bound phase with its
+  required immutable binding), the stop causes and :class:`Progress` the
   transaction's body keeps, and :func:`diagnosis`, the one mapping from
-  (phase, cause, clear result) to the fixed diagnosis - the vocabulary
+  (state, cause, clear result) to the fixed diagnosis - the vocabulary
   both the body and the finalization owner agree on, extracted from
   login.py (module-size rule) without moving any browser-side behavior
   here.
@@ -26,8 +27,10 @@ section (``bt guide``); the transaction itself lives in login.py.
 
 from __future__ import annotations
 
+import enum
 import math
 import time
+from dataclasses import dataclass
 
 from . import login_policy
 from .core.attach import AmbiguousTargetError, TargetNotFoundError
@@ -227,27 +230,51 @@ class Frame:
 
 
 # --------------------------------------------------------------------------- #
-# Progress phases, stop causes, and the one finalization mapping
+# Progress state variants, stop causes, and the one finalization mapping
 # --------------------------------------------------------------------------- #
 
 
-class Phase:
-    """The mutually exclusive progress phases the body records.
+class BoundPhase(enum.Enum):
+    """The mutually exclusive phases a bound progress record takes.
 
-    In order: nothing inserted yet, the fill call dispatched, the fill
-    call returned, the submit call dispatched, the submit call returned,
-    and positive success observed. A dispatched phase means that call's
-    outcome is unknown (it never returned); a response phase means the
-    call returned, so its refusals are known facts rather than
-    uncertainties.
+    In order: the fill call dispatched, the fill call returned, the submit
+    call dispatched, the submit call returned, and positive success
+    observed. A dispatched phase means that call's outcome is unknown (it
+    never returned); a response phase means the call returned, so its
+    refusals are known facts rather than uncertainties. The members are
+    the only phases that exist: there is no free-form phase string.
     """
 
-    UNTOUCHED = "untouched"
     FILL_DISPATCHED = "fill-dispatched"
     FILL_RESPONSE = "fill-response"
     SUBMIT_DISPATCHED = "submit-dispatched"
     SUBMIT_RESPONSE = "submit-response"
     OBSERVED_SUCCESS = "observed-success"
+
+
+class Untouched:
+    """Nothing has been inserted: no document binding exists.
+
+    A variant, not a flag: an untouched progress record carries no
+    session object and no frame, so no assertion is ever needed to
+    "recover" a binding that a string phase could have left behind.
+    """
+
+
+@dataclass(frozen=True)
+class BoundProgress:
+    """Progress past fill dispatch: a phase plus its required binding.
+
+    The binding (the session object of the validated form and the frame it
+    was validated in) is required and immutable from fill-dispatched on -
+    the only phases where field values may exist - and every transition
+    carries it forward, so a bound phase without its handles cannot be
+    constructed at all.
+    """
+
+    session_object: str
+    frame: Frame
+    phase: BoundPhase
 
 
 class KnownFailure:
@@ -282,63 +309,68 @@ class CancelledCause:
     """External cancellation: propagates after confirmed clearing."""
 
 
-class SucceededCause:
-    """Positive success observed and accepted within the clock."""
-
+#: Every way normal work can stop, as one union instead of a repetition.
+StopCause = KnownFailure | UnknownFailure | ExpiredCause | UnmetSuccess | CancelledCause
 
 CANCELLED = CancelledCause()
-SUCCEEDED = SucceededCause()
+
+#: The fail-closed sentence for an impossible finalization state: a
+#: progress/cause combination the controller can never produce must never
+#: be granted an outcome - it fails closed with this fixed sentence.
+FINALIZATION_FAILED = SESSION_FAILED.format(phase="finalization")
 
 
 class Progress:
     """What the transaction has done that finalization must answer for.
 
-    The body records the phase immediately before the calls that make
-    insertion possible (and back to untouched on a known pre-insert
-    refusal), so an exception -- including cancellation -- never loses the
-    insertion state. The document-bound form/frame is carried only from
-    fill-dispatched onward: the only phases where field values may exist.
-    The controller owns this object, appends the stop cause when normal
-    work ends, and reads both, on every exit, to run the one owed final
-    clear and select the fixed diagnosis its result picks.
+    The state is one variant: :class:`Untouched` (nothing inserted, no
+    binding) until the fill is dispatched, then an immutable
+    :class:`BoundProgress` carrying the required binding and the current
+    bound phase. The body records the state immediately before the calls
+    that make insertion possible (and back to untouched on a known
+    pre-insert refusal), so an exception -- including cancellation -- never
+    loses the insertion state. The controller owns this object, appends
+    the stop cause when normal work ends, and reads both, on every exit,
+    to run the one owed final clear and select the fixed diagnosis its
+    result picks.
     """
 
     def __init__(self) -> None:
-        self.phase = Phase.UNTOUCHED
-        self.stop: KnownFailure | UnknownFailure | ExpiredCause | UnmetSuccess | CancelledCause | SucceededCause | None = None
-        self.session_object: str | None = None
-        self.frame: Frame | None = None
+        self.state: Untouched | BoundProgress = Untouched()
+        self.stop: StopCause | None = None
 
     def mark_fill_dispatched(self, session_object: str, frame: Frame) -> None:
-        self.phase = Phase.FILL_DISPATCHED
-        self.session_object = session_object
-        self.frame = frame
+        self.state = BoundProgress(session_object, frame, BoundPhase.FILL_DISPATCHED)
 
     def mark_fill_response(self) -> None:
-        self.phase = Phase.FILL_RESPONSE
+        self._advance(BoundPhase.FILL_RESPONSE)
 
     def mark_submit_dispatched(self) -> None:
-        self.phase = Phase.SUBMIT_DISPATCHED
+        self._advance(BoundPhase.SUBMIT_DISPATCHED)
 
     def mark_submit_response(self) -> None:
-        self.phase = Phase.SUBMIT_RESPONSE
+        self._advance(BoundPhase.SUBMIT_RESPONSE)
 
     def mark_observed_success(self) -> None:
-        self.phase = Phase.OBSERVED_SUCCESS
+        """The only positive fact: set once success was observed and
+        accepted inside the clock. Nothing else ever marks progress."""
+        self._advance(BoundPhase.OBSERVED_SUCCESS)
 
     def mark_untouched(self) -> None:
         """A known pre-insert refusal: the document owes no clear."""
-        self.phase = Phase.UNTOUCHED
-        self.session_object = None
-        self.frame = None
+        self.state = Untouched()
 
-    def binding(self) -> tuple[str, Frame]:
-        """The bound form/frame, from fill-dispatched onward."""
-        assert self.session_object is not None and self.frame is not None
-        return self.session_object, self.frame
+    def _advance(self, phase: BoundPhase) -> None:
+        """Advance a bound phase; the immutable binding is carried forward."""
+        state = self.state
+        if not isinstance(state, BoundProgress):
+            # No bound phase exists without a binding to preserve: this
+            # transition is impossible through the body's own order and
+            # fails closed rather than inventing handles.
+            raise LoginError(FINALIZATION_FAILED)
+        self.state = BoundProgress(state.session_object, state.frame, phase)
 
-    def stop_with(self, cause: KnownFailure | UnknownFailure | ExpiredCause
-                  | UnmetSuccess | CancelledCause | SucceededCause) -> None:
+    def stop_with(self, cause: StopCause) -> None:
         self.stop = cause
 
 
@@ -347,42 +379,63 @@ def may_remain() -> LoginError:
     return LoginError(FIELDS_MAY_REMAIN, fields_may_remain=True)
 
 
+def _invalid_finalization(cleared: bool | None) -> LoginError:
+    if cleared is False:
+        return LoginError(
+            f"{FINALIZATION_FAILED}. {FIELDS_MAY_REMAIN}", fields_may_remain=True
+        )
+    return LoginError(FINALIZATION_FAILED)
+
+
 def diagnosis(progress: Progress, cleared: bool | None) -> LoginError | None:
-    """The one phase/cause-to-diagnosis mapping.
+    """The one state/cause-to-diagnosis mapping, failing closed.
 
     ``cleared`` is the final clear's result: True confirmed, False
     uncertain on a live document (the may-remain warning outranks
     everything), None replaced document (a clean clear: the values went
     with the document). Returns None when there is nothing to report - an
-    authenticated success, or a cancellation that must propagate.
+    observed success with a certified clear, or a cancellation that must
+    propagate. Every other combination the controller cannot produce - a
+    missing cause anywhere except the observed success, or a cause type
+    outside the fixed vocabulary - fails closed with the fixed
+    finalization sentence instead of granting an outcome.
     """
-    phase = progress.phase
+    state = progress.state
     cause = progress.stop
-    if phase == Phase.UNTOUCHED:
+    if isinstance(state, Untouched):
         # Nothing was inserted: no clear is owed and each cause keeps its
         # own fixed error; a cancellation propagates unchanged.
-        if cause is CANCELLED or not isinstance(
-            cause, (KnownFailure, UnknownFailure, ExpiredCause, UnmetSuccess)
-        ):
+        if cause is CANCELLED:
             return None
-        return cause.error
+        if isinstance(cause, (KnownFailure, UnknownFailure, ExpiredCause)):
+            return cause.error
+        return LoginError(FINALIZATION_FAILED)
+    phase = state.phase
     if cause is CANCELLED:
         if cleared is False:
             return may_remain()
-        if cleared is None and phase == Phase.FILL_DISPATCHED:
+        if cleared is None and phase is BoundPhase.FILL_DISPATCHED:
             return LoginError(PAGE_CHANGED_DURING_FILL)
-        if cleared is None and phase == Phase.SUBMIT_DISPATCHED:
+        if cleared is None and phase is BoundPhase.SUBMIT_DISPATCHED:
             return LoginError(PAGE_CHANGED_BEFORE_SUBMIT)
         return None
+    if cause is None:
+        # No cause means the work was still active or had observed and
+        # accepted success. Only the observed success earns the
+        # authenticated outcome; any other phase finalized without a
+        # cause is an impossible internal state and fails closed.
+        if phase is BoundPhase.OBSERVED_SUCCESS:
+            return may_remain() if cleared is False else None
+        return _invalid_finalization(cleared)
     if isinstance(cause, (UnknownFailure, ExpiredCause)) and phase in (
-        Phase.FILL_DISPATCHED, Phase.SUBMIT_DISPATCHED,
+        BoundPhase.FILL_DISPATCHED, BoundPhase.SUBMIT_DISPATCHED,
     ):
         # The call never returned (or the clock ran out mid-flight): the
         # insertion/submission outcome is unknown, so the fixed
         # uncertain-outcome sentences speak, never a confirmed failure.
         if cleared is False:
             return may_remain()
-        uncertain_fill = phase == Phase.FILL_DISPATCHED
+        uncertain_fill = phase is BoundPhase.FILL_DISPATCHED
         if cleared is None:
             return LoginError(
                 PAGE_CHANGED_DURING_FILL if uncertain_fill
@@ -405,9 +458,9 @@ def diagnosis(progress: Progress, cleared: bool | None) -> LoginError | None:
         if cleared is False:
             return may_remain()
         return cause.error if cause.error is not None else LoginError(SUCCESS_UNMET)
-    if cause is SUCCEEDED:
-        return may_remain() if cleared is False else None
-    return None
+    # An impossible internal state still owes the sensitive-field warning
+    # when clearing could not be confirmed.
+    return _invalid_finalization(cleared)
 
 __all__ = [
     "DEFAULT_LOGIN_TIMEOUT_MS",

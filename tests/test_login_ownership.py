@@ -387,6 +387,49 @@ class TestVerifyConnectedBrowser:
         assert "SENTINEL" not in str(error.value)
         assert error.value.__cause__ is None
 
+    async def test_a_query_that_exhausts_the_budget_is_the_operation_timeout(
+        self, live_identity
+    ):
+        """Round-four B7: deadline-expired outranks identity-unavailable.
+
+        A transport whose query runs past the operation's remaining budget
+        must surface as the operation timeout, never as a browser that
+        "did not report its process identity" - the budget fact is the
+        stronger, earlier one, and its fixed text already exists.
+        """
+
+        class ExhaustedTransport:
+            async def send(self, method, params=None, session_id=None, timeout=None):
+                await asyncio.sleep(0.18)  # outlives the 120 ms budget below
+                raise TimeoutError
+
+        with pytest.raises(
+            login_contract.DeadlineExpiredError, match="timeout"
+        ) as error:
+            await login_ownership.verify_connected_browser(
+                ExhaustedTransport(), snapshot(), login_contract.Deadline(120)
+            )
+        assert "identity" not in str(error.value)
+
+    async def test_a_query_timeout_with_budget_left_is_identity_unavailability(
+        self, live_identity
+    ):
+        """The other side of the same boundary: a query that fails while
+        budget remains is one operational fact - the browser could not be
+        asked - and keeps the identity-unavailable refusal."""
+
+        class TimingOutTransport:
+            async def send(self, method, params=None, session_id=None, timeout=None):
+                raise TimeoutError
+
+        with pytest.raises(
+            login_ownership.OwnershipError, match="did not report its process identity"
+        ) as error:
+            await login_ownership.verify_connected_browser(
+                TimingOutTransport(), snapshot(), login_contract.Deadline(30_000)
+            )
+        assert error.value.__cause__ is None
+
     async def test_the_identity_is_reproven_after_the_reply(self, monkeypatch):
         """A browser that died between registry read and reply must refuse."""
         monkeypatch.setattr(login_ownership, "process_is_ours", lambda **kwargs: True)
