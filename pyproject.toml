@@ -48,7 +48,7 @@ dependencies = [
 # it is moot when Camoufox is not installed, so it does not belong in the
 # default set.
 camoufox = [
-    "camoufox[geoip]>=0.4.11",
+    "camoufox[geoip]>=0.5.8",
     "aiohttp>=3.14.1",
 ]
 # pillow sharpens screenshot blank-frame detection; without it that check falls
@@ -115,7 +115,7 @@ dev = [
     # camoufox is a runtime extra, not a default dependency; it is in the dev
     # group so pyright can resolve `camoufox.sync_api` when type-checking the
     # optional Camoufox engine paths.
-    "camoufox[geoip]>=0.4.11",
+    "camoufox[geoip]>=0.5.8",
     "vulture>=2.16",
 ]
 
