@@ -22,6 +22,7 @@ import sys
 import textwrap
 import threading
 import time
+import traceback
 from pathlib import Path
 
 import pytest
@@ -433,19 +434,40 @@ class TestFailedReads:
 
 
 class TestMissingAndUnsupportedBinaries:
+    @staticmethod
+    def _assert_context_suppressed(
+        error: RelayMissingError, absent: Path
+    ) -> None:
+        """The missing-binary fact suppresses its operating-system cause.
+
+        Round-four T14: the spawn sites normalize ``FileNotFoundError``
+        into the fixed missing-binary diagnostic with the cause fully
+        suppressed - never chained - so no operating-system text, path or
+        traceback rides the fixed sentence in either spawn path.
+        """
+        assert error.__cause__ is None
+        assert error.__suppress_context__ is True
+        formatted = "".join(traceback.format_exception(error))
+        assert "FileNotFoundError" not in formatted
+        assert str(absent) not in formatted
+
     def test_missing_binary_has_its_own_fixed_diagnostic(self, tmp_path):
-        with pytest.raises(RelayMissingError, match="not installed"):
+        absent = tmp_path / "SENTINEL-absent-relay" / "opchain"
+        with pytest.raises(RelayMissingError, match="not installed") as error:
             read_reference(
-                binary=str(tmp_path / "no-such-opchain"),
+                binary=str(absent),
                 identity=IDENTITY,
                 vault=VAULT,
                 item=ITEM,
                 field="username",
             )
+        self._assert_context_suppressed(error.value, absent)
 
     def test_missing_binary_in_the_probe_too(self, tmp_path):
-        with pytest.raises(RelayMissingError, match="not installed"):
-            ensure_relay_supported(str(tmp_path / "no-such-opchain"), IDENTITY)
+        absent = tmp_path / "SENTINEL-absent-relay" / "opchain"
+        with pytest.raises(RelayMissingError, match="not installed") as error:
+            ensure_relay_supported(str(absent), IDENTITY)
+        self._assert_context_suppressed(error.value, absent)
 
     @pytest.mark.parametrize("call", ["probe", "read"])
     def test_an_unspawnable_binary_is_one_fixed_operational_error(
