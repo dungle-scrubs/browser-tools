@@ -192,6 +192,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--profile", metavar="NAME", help="Named profile to record for this instance"
     )
     launch.add_argument(
+        "--1password",
+        dest="onepassword",
+        action="store_true",
+        help=(
+            "Provision this named profile with the installed official 1Password "
+            "native-messaging host (macOS, Chrome engine; needs --profile)"
+        ),
+    )
+    launch.add_argument(
         "--name",
         metavar="NAME",
         help=(
@@ -997,6 +1006,7 @@ def _run(args: argparse.Namespace) -> int:
         instance = lifecycle.launch(
             engine=args.engine,
             profile=args.profile,
+            onepassword=args.onepassword,
             channel=args.channel,
             headless=args.headless,
             port=args.port,

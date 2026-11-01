@@ -1029,10 +1029,61 @@ def _safe_allocation_base() -> Generator[None]:
         core_registry.MAX_PORT = original_max
 
 
+def _check_onepassword_eligibility(*, engine: str, profile: str | None) -> None:
+    """Refuse unsupported ``--1password`` combinations before any write (#201).
+
+    macOS only (the desktop helper and its signing identity are the macOS
+    ones), Chrome only (the user-level native-messaging lookup this relies on
+    is Chrome's), Named Profiles only: an unbound launch's directory is
+    throwaway, and an external endpoint is not launched at all, so neither
+    can carry a registration. Checked before any filesystem work, so a
+    refusal creates no path and spawns no browser.
+
+    Raises:
+        LifecycleError: The combination is unsupported, with the remedy in
+            the message (CLI exit 1).
+    """
+    if sys.platform != "darwin":
+        raise LifecycleError(
+            "--1password is supported on macOS only. Launch without it on this "
+            "platform."
+        )
+    if engine != "chrome":
+        raise LifecycleError(
+            f"--1password requires the chrome engine (got {engine!r}). Drop "
+            "--engine, or launch without --1password."
+        )
+    if profile is None:
+        raise LifecycleError(
+            "--1password provisions a named profile's user-data directory. Add "
+            "--profile NAME, or launch without --1password."
+        )
+
+
+def _provision_onepassword(user_data_dir: Path) -> None:
+    """Register the validated 1Password helper in one profile directory (#201).
+
+    Imported lazily at this seam so a launch that never opts in loads nothing
+    from the module, the same cold-start property the Camoufox runner has.
+    The module's dedicated failure type is translated to the lifecycle's own;
+    its message already names the remedy and the flag.
+
+    Raises:
+        LifecycleError: Provisioning failed before any browser launched.
+    """
+    from . import onepassword
+
+    try:
+        onepassword.provision(user_data_dir)
+    except onepassword.OnePasswordProvisionError as exc:
+        raise LifecycleError(str(exc)) from exc
+
+
 def launch(
     *,
     engine: str = DEFAULT_ENGINE,
     profile: str | None = None,
+    onepassword: bool = False,
     channel: str | None = None,
     headless: bool = False,
     port: int | None = None,
@@ -1058,6 +1109,13 @@ def launch(
     so the correction lives at this call site: the requested name is validated
     here and then handed over as that value. The registered name is the
     sanitized form of what was asked for, and the launch result prints it.
+
+    ``onepassword`` (#201) opts a Named Profile into the installed official
+    1Password native-messaging registration: validated, code-signature
+    checked, and written narrowed to the stable extension origin, after the
+    profile lock and the live-holder refusal and before Chrome launches.
+    Unsupported combinations are refused before any filesystem work, and
+    without the flag nothing is provisioned or validated.
     """
     from . import task_lease
 
@@ -1086,6 +1144,11 @@ def launch(
             "the name and appends a two-digit numeric suffix."
         )
 
+    # --1password eligibility (#201) before any filesystem work: a refused
+    # combination creates no directory, takes no lock and spawns no browser.
+    if onepassword:
+        _check_onepassword_eligibility(engine=engine, profile=profile)
+
     # Hold the profile's launch lock for the WHOLE sequence: stale-lock
     # cleanup, the holder lookup, the launch, the registration and the
     # annotation. Checking for a holder and then launching is not atomic, so
@@ -1101,6 +1164,11 @@ def launch(
         if profile is not None:
             migrate_one_profile(profile, registry_path=registry_path)
             user_data_dir = profile_user_data_dir(profile)
+            if onepassword and user_data_dir.is_symlink():
+                raise LifecycleError(
+                    f"--1password requires a real profile directory, not the symlink "
+                    f"{user_data_dir}. Inspect it, or launch without --1password."
+                )
             user_data_dir.mkdir(parents=True, exist_ok=True)
             # Clean stale singleton locks (dead holder) BEFORE the exclusivity check
             # so a crashed previous run does not wedge the profile forever.
@@ -1111,6 +1179,12 @@ def launch(
                     f"Profile '{profile}' is already held by live instance '{holder}'. "
                     f"Stop it first, or launch a different profile."
                 )
+            # --1password (#201): after the lock and the holder refusal, before
+            # Chrome launches. A provisioning failure therefore never leaves a
+            # browser running, and a held profile is never provisioned.
+            if onepassword:
+                assert user_data_dir is not None
+                _provision_onepassword(user_data_dir)
         elif engine == "camoufox":
             base = ephemeral_root()
             base.mkdir(parents=True, exist_ok=True)
