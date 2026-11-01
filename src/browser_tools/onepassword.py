@@ -221,7 +221,17 @@ def _accept_existing(
 
 
 def _write_manifest(hosts_fd: int, filename: Path, canonical: dict[str, Any]) -> None:
-    """Publish a complete manifest without replacing an existing registration."""
+    """Publish a complete manifest without replacing an existing registration.
+
+    Args:
+        hosts_fd: The checked native-host directory descriptor.
+        filename: The registration filename, relative to hosts_fd.
+        canonical: The validated registration to publish.
+
+    Raises:
+        FileExistsError: A destination already exists and must be checked separately.
+        OSError: Staging or publishing the registration failed.
+    """
     staging = f".1password-{uuid.uuid4().hex}.json"
     fd = os.open(staging, os.O_WRONLY | os.O_CREAT | os.O_EXCL, MANIFEST_MODE, dir_fd=hosts_fd)
     try:

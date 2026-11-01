@@ -42,6 +42,7 @@ def test_onepassword_module_respects_the_written_line_limit() -> None:
     [
         (onepassword.source_manifest_path, ("Returns:",)),
         (onepassword._read_manifest, ("Args:", "Returns:", "Raises:")),
+        (onepassword._write_manifest, ("Args:", "Raises:")),
         (onepassword.provision, ("Args:", "Raises:")),
         (lifecycle._check_onepassword_eligibility, ("Args:", "Raises:")),
         (lifecycle._provision_onepassword, ("Args:", "Raises:")),
