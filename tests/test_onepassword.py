@@ -9,6 +9,7 @@ is proven to stay out of every diagnostic. No profile here is a real one.
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import stat
@@ -318,6 +319,22 @@ class TestHelperValidation:
         assert "/nonexistent/helper" in message
         assert "does not exist" in message
 
+    def test_helper_inspection_permission_failure_keeps_its_actual_cause(
+        self, installed, profile_dir: Path, monkeypatch
+    ):
+        real_stat = os.stat
+
+        def denied_stat(path, *args, **kwargs):
+            if str(path) == str(installed):
+                raise PermissionError(errno.EACCES, "Permission denied", str(path))
+            return real_stat(path, *args, **kwargs)
+
+        monkeypatch.setattr(os, "stat", denied_stat)
+        message = provision_fails(profile_dir)
+        assert "Cannot inspect the 1Password helper" in message
+        assert "Permission denied" in message
+        assert "does not exist" not in message
+
     def test_nonexecutable_helper_is_rejected(
         self, write_source, profile_dir: Path, helper_binary: Path
     ):
@@ -361,6 +378,8 @@ class TestCodesignBoundary:
         codesign.exit_code = 1
         message = provision_fails(profile_dir)
         assert "did not pass code-signature verification" in message
+        assert "update browser-tools" in message
+        assert "signing identity changed" in message
         assert "without --1password" in message
         assert codesign.marker not in message
         assert not (profile_dir / HOSTS).exists()
@@ -440,6 +459,9 @@ class TestProvisioning:
         message = provision_fails(profile_dir)
         assert "holds a conflicting registration" in message
         assert "Inspect this file" in message
+        assert "differs in fields: description" in message
+        assert "may have moved" not in message
+        assert "remove it yourself to re-provision" in message
         assert "without --1password" in message
         assert destination.read_bytes() == before
 
@@ -466,6 +488,8 @@ class TestProvisioning:
         before = destination.read_bytes()
         message = provision_fails(profile_dir)
         assert "holds a conflicting registration" in message
+        assert "cannot be read as a bounded JSON registration" in message
+        assert "may have moved" not in message
         assert destination.read_bytes() == before
 
     def test_official_source_link_is_preserved(
@@ -481,6 +505,48 @@ class TestProvisioning:
         assert os.readlink(destination) == str(onepassword.source_manifest_path())
         # The link was accepted after validation, not instead of it.
         assert len(codesign.calls) == 1
+
+    def test_relative_link_under_aliased_root_must_reach_the_actual_source(
+        self, installed, tmp_path: Path
+    ):
+        root = tmp_path / "physical" / "deep" / "profiles"
+        real_profile = root / "work"
+        (real_profile / HOSTS).mkdir(parents=True)
+        alias = tmp_path / "profiles"
+        alias.symlink_to(root)
+        profile = alias / "work"
+        destination = profile / HOSTS / DEST_NAME
+        source = onepassword.source_manifest_path()
+        relative = os.path.relpath(source, destination.parent)
+        # Lexically this spells the source. The kernel follows it from the
+        # physical parent, where it reaches this different registration.
+        actual_target = Path(os.path.abspath(real_profile / HOSTS / relative))
+        actual_target.parent.mkdir(parents=True, exist_ok=True)
+        actual_target.write_text("untrusted registration")
+        destination.symlink_to(relative)
+
+        assert "conflicting registration" in provision_fails(profile)
+        assert destination.is_symlink()
+        assert actual_target.read_text() == "untrusted registration"
+
+    def test_relative_source_link_uses_the_physical_parent_under_an_aliased_root(
+        self, installed, tmp_path: Path
+    ):
+        root = tmp_path / "physical" / "deep" / "profiles"
+        real_profile = root / "work"
+        (real_profile / HOSTS).mkdir(parents=True)
+        alias = tmp_path / "profiles"
+        alias.symlink_to(root)
+        profile = alias / "work"
+        destination = profile / HOSTS / DEST_NAME
+        relative = os.path.relpath(onepassword.source_manifest_path(), real_profile / HOSTS)
+        destination.symlink_to(relative)
+
+        onepassword.provision(profile)
+
+        assert destination.is_symlink()
+        assert os.readlink(destination) == relative
+        assert destination.stat().st_ino == onepassword.source_manifest_path().stat().st_ino
 
     def test_relative_official_source_link_is_preserved(
         self, installed, profile_dir: Path, destination: Path
@@ -504,6 +570,8 @@ class TestProvisioning:
         destination.symlink_to(elsewhere)
         message = provision_fails(profile_dir)
         assert "holds a conflicting registration" in message
+        assert "link does not point directly to the official source" in message
+        assert "may have moved" not in message
         assert destination.is_symlink()
         assert elsewhere.read_text() == "{}"
 
@@ -519,6 +587,8 @@ class TestProvisioning:
         destination.mkdir(parents=True)
         message = provision_fails(profile_dir)
         assert "holds a conflicting registration" in message
+        assert "destination is not a regular file" in message
+        assert "may have moved" not in message
         assert destination.is_dir()
 
     def test_symlinked_hosts_directory_is_rejected(self, installed, profile_dir, tmp_path):
@@ -565,6 +635,7 @@ class TestPlatformAndDeletion:
         monkeypatch.setattr(sys, "platform", "linux")
         message = provision_fails(profile_dir)
         assert "macOS only" in message
+        assert "Inspect the registration" not in message
         assert not (profile_dir / HOSTS).exists()
 
     def test_profile_deletion_leaves_the_external_registration(
@@ -606,11 +677,13 @@ class TestPublicationFailures:
         self, installed, profile_dir: Path, destination: Path, monkeypatch
     ):
         def fail_link(*args, **kwargs):
-            raise PermissionError("synthetic publication failure")
+            raise PermissionError(errno.EACCES, "Permission denied")
 
         monkeypatch.setattr(os, "link", fail_link)
         message = provision_fails(profile_dir)
         assert "Cannot provision" in message
+        assert "Permission denied" in message
+        assert "not symlinks" not in message
         assert not destination.exists()
         assert list(destination.parent.iterdir()) == []
 

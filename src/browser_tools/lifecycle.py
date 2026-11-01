@@ -1047,11 +1047,6 @@ def _check_onepassword_eligibility(*, engine: str, profile: str | None) -> None:
         LifecycleError: This platform is unsupported (CLI exit 1).
         UsageError: The engine or profile combination is invalid (CLI exit 2).
     """
-    if sys.platform != "darwin":
-        raise LifecycleError(
-            "--1password is supported on macOS only. Launch without it on this "
-            "platform."
-        )
     if engine != "chrome":
         raise UsageError(
             f"--1password requires the chrome engine (got {engine!r}). Drop "
@@ -1061,6 +1056,11 @@ def _check_onepassword_eligibility(*, engine: str, profile: str | None) -> None:
         raise UsageError(
             "--1password provisions a named profile's user-data directory. Add "
             "--profile NAME, or launch without --1password."
+        )
+    if sys.platform != "darwin":
+        raise LifecycleError(
+            "--1password is supported on macOS only. Launch without it on this "
+            "platform."
         )
 
 

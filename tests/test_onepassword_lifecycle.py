@@ -59,6 +59,14 @@ def _no_real_codesign(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _no_real_camoufox_runner(monkeypatch: pytest.MonkeyPatch) -> None:
+    def forbidden(*args, **kwargs):
+        raise AssertionError("a provisioning test attempted to launch a real Camoufox")
+
+    monkeypatch.setattr(lifecycle, "_spawn_camoufox_process", forbidden)
+
+
+@pytest.fixture(autouse=True)
 def _darwin(monkeypatch: pytest.MonkeyPatch) -> None:
     """Pin the platform so the positive paths run anywhere the suite runs."""
     monkeypatch.setattr(sys, "platform", "darwin")
@@ -147,6 +155,18 @@ class TestEligibilityBeforeWrites:
         assert fake_browser_launch == {}
         # Refused before filesystem work: nothing appeared under the root.
         assert not any(lifecycle.profiles_root().glob("*"))
+
+    @pytest.mark.parametrize("engine,profile", [("camoufox", "work"), ("chrome", None)])
+    def test_invalid_combinations_are_usage_errors_on_linux(
+        self, monkeypatch, registry_path, profiles_root, fake_browser_launch, engine, profile
+    ):
+        monkeypatch.setattr(sys, "platform", "linux")
+        with pytest.raises(UsageError):
+            lifecycle.launch(
+                engine=engine, profile=profile, onepassword=True, registry_path=registry_path
+            )
+        assert fake_browser_launch == {}
+        assert not any(profiles_root.glob("*"))
 
     def test_camoufox_never_spawns_its_runner(self, monkeypatch, registry_path):
         def boom(*args: object, **kwargs: object) -> None:

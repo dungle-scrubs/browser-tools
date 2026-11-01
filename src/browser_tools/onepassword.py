@@ -187,21 +187,30 @@ def _accept_existing(
     hosts_fd: int, filename: Path, destination: Path, source: Path, canonical: dict[str, Any]
 ) -> None:
     info = os.stat(filename, dir_fd=hosts_fd, follow_symlinks=False)
-    reason = "is not a regular file"
+    reason = "the destination is not a regular file"
     if stat.S_ISLNK(info.st_mode):
         target = Path(os.readlink(filename, dir_fd=hosts_fd))
         # Accept only the direct official-source link, without reading any
         # arbitrary destination chosen by a user-managed registration.
         if not target.is_absolute():
-            target = destination.parent / target
-        if os.path.abspath(target) == str(source.absolute()):
-            return
-        reason = "is a link that does not point directly to the official source"
+            target = destination.parent.resolve() / target
+        direct_target = target.parent.resolve() / target.name
+        direct_source = source.parent.resolve() / source.name
+        if direct_target == direct_source:
+            try:
+                actual = os.stat(filename, dir_fd=hosts_fd)
+                official = os.stat(source)
+            except OSError:
+                pass
+            else:
+                if (actual.st_dev, actual.st_ino) == (official.st_dev, official.st_ino):
+                    return
+        reason = "the link does not point directly to the official source"
     elif stat.S_ISREG(info.st_mode):
         try:
             existing = _read_manifest(filename, dir_fd=hosts_fd)
         except (OSError, OnePasswordProvisionError):
-            reason = "cannot be read as a bounded JSON registration"
+            reason = "the file cannot be read as a bounded JSON registration"
         else:
             if existing == canonical:
                 return
@@ -210,7 +219,7 @@ def _accept_existing(
                 for key in set(existing) | set(canonical)
                 if key not in existing or key not in canonical or existing[key] != canonical[key]
             )
-            reason = f"differs in fields: {', '.join(differing)}"
+            reason = f"the file differs in fields: {', '.join(differing)}"
             if existing.get("path") != canonical["path"]:
                 reason += "; the helper binary may have moved in a 1Password update"
     raise _refuse(
