@@ -1039,9 +1039,13 @@ def _check_onepassword_eligibility(*, engine: str, profile: str | None) -> None:
     can carry a registration. Checked before any filesystem work, so a
     refusal creates no path and spawns no browser.
 
+    Args:
+        engine: The normalized launch engine.
+        profile: The selected Named Profile, or None for an unbound launch.
+
     Raises:
-        LifecycleError: The combination is unsupported, with the remedy in
-            the message (CLI exit 1).
+        LifecycleError: This platform is unsupported (CLI exit 1).
+        UsageError: The engine or profile combination is invalid (CLI exit 2).
     """
     if sys.platform != "darwin":
         raise LifecycleError(
@@ -1049,12 +1053,12 @@ def _check_onepassword_eligibility(*, engine: str, profile: str | None) -> None:
             "platform."
         )
     if engine != "chrome":
-        raise LifecycleError(
+        raise UsageError(
             f"--1password requires the chrome engine (got {engine!r}). Drop "
             "--engine, or launch without --1password."
         )
     if profile is None:
-        raise LifecycleError(
+        raise UsageError(
             "--1password provisions a named profile's user-data directory. Add "
             "--profile NAME, or launch without --1password."
         )
@@ -1067,6 +1071,9 @@ def _provision_onepassword(user_data_dir: Path) -> None:
     from the module, the same cold-start property the Camoufox runner has.
     The module's dedicated failure type is translated to the lifecycle's own;
     its message already names the remedy and the flag.
+
+    Args:
+        user_data_dir: The selected Named Profile's directory, with its lock held.
 
     Raises:
         LifecycleError: Provisioning failed before any browser launched.
@@ -1183,7 +1190,6 @@ def launch(
             # Chrome launches. A provisioning failure therefore never leaves a
             # browser running, and a held profile is never provisioned.
             if onepassword:
-                assert user_data_dir is not None
                 _provision_onepassword(user_data_dir)
         elif engine == "camoufox":
             base = ephemeral_root()

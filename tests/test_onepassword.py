@@ -201,6 +201,44 @@ class TestSourceValidation:
         assert "larger than" in message
         assert str(onepassword.MAX_MANIFEST_BYTES) in message
 
+    def test_source_read_requests_only_the_bounded_payload(
+        self, installed, profile_dir: Path, monkeypatch
+    ):
+        real_fdopen = os.fdopen
+        requested_sizes = []
+
+        class BoundedReader:
+            def __init__(self, handle):
+                self.handle = handle
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                self.handle.close()
+
+            def fileno(self):
+                return self.handle.fileno()
+
+            def read(self, size=-1):
+                requested_sizes.append(size)
+                assert 0 <= size <= 65537, "Read only the 64 KiB limit plus one overflow byte"
+                return self.handle.read(size)
+
+        def guarded_fdopen(fd, mode, *args, **kwargs):
+            handle = real_fdopen(fd, mode, *args, **kwargs)
+            return BoundedReader(handle) if mode == "rb" else handle
+
+        monkeypatch.setattr(os, "fdopen", guarded_fdopen)
+        onepassword.provision(profile_dir)
+        assert requested_sizes == [65537]
+
+    def test_nul_in_helper_path_is_refused_before_stat(
+        self, write_source, profile_dir: Path, helper_binary
+    ):
+        write_source(source_document(helper_binary, path="/Applications/bad\u0000helper"))
+        assert "absolute helper path" in provision_fails(profile_dir)
+
     def test_malformed_json_is_rejected(self, write_source, profile_dir: Path):
         path = write_source(source_document(Path("/bin/true")))
         path.write_text("{not json")
@@ -401,7 +439,7 @@ class TestProvisioning:
         before = destination.read_bytes()
         message = provision_fails(profile_dir)
         assert "holds a conflicting registration" in message
-        assert "Inspect the registration" in message
+        assert "Inspect this file" in message
         assert "without --1password" in message
         assert destination.read_bytes() == before
 
@@ -444,12 +482,24 @@ class TestProvisioning:
         # The link was accepted after validation, not instead of it.
         assert len(codesign.calls) == 1
 
+    def test_relative_official_source_link_is_preserved(
+        self, installed, profile_dir: Path, destination: Path
+    ):
+        destination.parent.mkdir()
+        source = onepassword.source_manifest_path()
+        target = os.path.relpath(source, destination.parent)
+        destination.symlink_to(target)
+        onepassword.provision(profile_dir)
+        assert destination.is_symlink()
+        assert os.readlink(destination) == target
+
     def test_arbitrary_symlink_is_a_conflict(
         self, installed, profile_dir: Path, destination: Path, tmp_path: Path
     ):
         hosts = profile_dir / HOSTS
         hosts.mkdir()
-        elsewhere = tmp_path / "elsewhere.json"
+        elsewhere = tmp_path / "elsewhere" / DEST_NAME
+        elsewhere.parent.mkdir()
         elsewhere.write_text("{}")
         destination.symlink_to(elsewhere)
         message = provision_fails(profile_dir)
@@ -529,7 +579,7 @@ class TestPlatformAndDeletion:
         source_path = onepassword.source_manifest_path()
         source_before = source_path.read_bytes()
 
-        result = lifecycle.profile_delete("work")
+        result = lifecycle.profile_delete("work", registry_path=str(tmp_path / "registry.json"))
 
         assert result["deleted"] == "work"
         assert not profile_dir.exists()

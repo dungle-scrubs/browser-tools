@@ -8,6 +8,7 @@ repairs. Provisioning does not establish that the extension is connected.
 from __future__ import annotations
 
 import contextlib
+import errno
 import json
 import os
 import re
@@ -54,16 +55,32 @@ class _ValidatedSource:
 
 
 def source_manifest_path() -> Path:
-    """Return the single supported source registration for this user."""
+    """Return the single supported source registration for this user.
+
+    Returns:
+        The absolute path in everyday Chrome's user-data directory.
+    """
     return SOURCE_MANIFEST.expanduser()
 
 
 def _refuse(message: str) -> OnePasswordProvisionError:
-    return OnePasswordProvisionError(message + " Inspect the registration, or launch without --1password.")
+    return OnePasswordProvisionError(message + " Launch without --1password to skip provisioning.")
 
 
 def _read_manifest(path: Path, *, dir_fd: int | None = None) -> dict[str, Any]:
-    """Read a bounded regular file, refusing links and special files."""
+    """Read a bounded regular file, refusing links and special files.
+
+    Args:
+        path: The manifest path, relative to dir_fd when provided.
+        dir_fd: An open parent directory, or None for ordinary path lookup.
+
+    Returns:
+        The parsed manifest object.
+
+    Raises:
+        OnePasswordProvisionError: The file is not bounded regular JSON object data.
+        OSError: Opening or reading the manifest failed.
+    """
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dir_fd)
     with os.fdopen(fd, "rb") as handle:
         if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
@@ -104,7 +121,9 @@ def _validated_source(source: Path) -> _ValidatedSource:
     if document["type"] != "stdio":
         raise _refuse(f"{source} must have type 'stdio'.")
     description, helper_path, origins = (
-        document["description"], document["path"], document["allowed_origins"]
+        document["description"],
+        document["path"],
+        document["allowed_origins"],
     )
     if not isinstance(description, str):
         raise _refuse(f"{source} has a non-string description.")
@@ -112,7 +131,9 @@ def _validated_source(source: Path) -> _ValidatedSource:
         raise _refuse(f"{source} does not name an absolute helper path.")
     if not isinstance(origins, list) or not origins:
         raise _refuse(f"{source} has no non-empty allowed_origins list.")
-    if any(not isinstance(origin, str) or not _EXTENSION_ORIGIN.fullmatch(origin) for origin in origins):
+    if any(
+        not isinstance(origin, str) or not _EXTENSION_ORIGIN.fullmatch(origin) for origin in origins
+    ):
         raise _refuse(f"{source} allows a malformed extension origin.")
     if STABLE_EXTENSION_ORIGIN not in origins:
         raise _refuse(f"{source} does not allow the stable 1Password Chrome extension origin.")
@@ -122,29 +143,51 @@ def _validated_source(source: Path) -> _ValidatedSource:
 def _validate_helper(helper_path: str) -> None:
     try:
         info = os.stat(helper_path)
-    except OSError:
-        raise _refuse(f"The 1Password helper at {helper_path} does not exist. Reinstall 1Password.") from None
+    except FileNotFoundError:
+        raise _refuse(
+            f"The 1Password helper at {helper_path} does not exist. Reinstall 1Password."
+        ) from None
+    except OSError as exc:
+        raise _refuse(
+            f"Cannot inspect the 1Password helper at {helper_path}: {exc.strerror}."
+        ) from None
     if not stat.S_ISREG(info.st_mode) or not os.access(helper_path, os.X_OK):
         raise _refuse(f"The 1Password helper at {helper_path} is not an executable file.")
     try:
         result = subprocess.run(
-            [CODESIGN_BINARY, "--verify", "--strict", "-R", "=" + CODESIGN_REQUIREMENT, helper_path],
+            [
+                CODESIGN_BINARY,
+                "--verify",
+                "--strict",
+                "-R",
+                "=" + CODESIGN_REQUIREMENT,
+                helper_path,
+            ],
             capture_output=True,
             timeout=CODESIGN_TIMEOUT_SECONDS,
             check=False,
         )
     except TimeoutExpired:
-        raise _refuse("Verifying the 1Password helper timed out. Retry after checking the app.") from None
+        raise _refuse(
+            "Verifying the 1Password helper timed out. Retry after checking the app."
+        ) from None
     except OSError:
-        raise _refuse(f"{CODESIGN_BINARY} could not be run to verify the 1Password helper.") from None
+        raise _refuse(
+            f"{CODESIGN_BINARY} could not be run to verify the 1Password helper."
+        ) from None
     if result.returncode != 0:
-        raise _refuse("The 1Password helper did not pass code-signature verification. Reinstall 1Password.")
+        raise _refuse(
+            "The 1Password helper did not pass code-signature verification. "
+            "Repair the installation, or update browser-tools if 1Password's "
+            "signing identity changed."
+        )
 
 
 def _accept_existing(
     hosts_fd: int, filename: Path, destination: Path, source: Path, canonical: dict[str, Any]
 ) -> None:
     info = os.stat(filename, dir_fd=hosts_fd, follow_symlinks=False)
+    reason = "is not a regular file"
     if stat.S_ISLNK(info.st_mode):
         target = Path(os.readlink(filename, dir_fd=hosts_fd))
         # Accept only the direct official-source link, without reading any
@@ -153,15 +196,27 @@ def _accept_existing(
             target = destination.parent / target
         if os.path.abspath(target) == str(source.absolute()):
             return
+        reason = "is a link that does not point directly to the official source"
     elif stat.S_ISREG(info.st_mode):
         try:
-            if _read_manifest(filename, dir_fd=hosts_fd) == canonical:
-                return
+            existing = _read_manifest(filename, dir_fd=hosts_fd)
         except (OSError, OnePasswordProvisionError):
-            pass
+            reason = "cannot be read as a bounded JSON registration"
+        else:
+            if existing == canonical:
+                return
+            differing = sorted(
+                key
+                for key in set(existing) | set(canonical)
+                if key not in existing or key not in canonical or existing[key] != canonical[key]
+            )
+            reason = f"differs in fields: {', '.join(differing)}"
+            if existing.get("path") != canonical["path"]:
+                reason += "; the helper binary may have moved in a 1Password update"
     raise _refuse(
-        f"{destination} holds a conflicting registration. Nothing was replaced. "
-        "The helper binary may have moved in a 1Password update; resolve the difference and rerun."
+        f"{destination} holds a conflicting registration: {reason}. Nothing was replaced. "
+        "Inspect this file, including any registration browser-tools previously created. "
+        "Keep it, or remove it yourself to re-provision; resolve the difference and rerun."
     )
 
 
@@ -226,8 +281,9 @@ def provision(user_data_dir: Path) -> None:
                 except FileExistsError:
                     pass
             _accept_existing(hosts_fd, filename, destination, source, canonical)
-    except OSError:
-        raise _refuse(
-            f"Cannot provision {user_data_dir}. The profile and NativeMessagingHosts must be "
-            "real directories, not symlinks, and their files must be writable."
-        ) from None
+    except OSError as exc:
+        if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+            detail = "The profile and NativeMessagingHosts must be real directories, not symlinks."
+        else:
+            detail = f"Filesystem operation failed: {exc.strerror or type(exc).__name__}."
+        raise _refuse(f"Cannot provision {user_data_dir}. {detail}") from None

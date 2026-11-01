@@ -34,6 +34,7 @@ Chrome is the default engine. Without a channel or binary override, the launcher
 | `--headless` | Run without a visible window. The default is headed. |
 | `--name NAME` | Choose the instance's base name, independent of the current directory. |
 | `--profile NAME` | Reuse a persistent browser profile and its login state. |
+| `--1password` | With `--profile` on macOS, provision the signed installed 1Password desktop helper for the official stable extension. See `bt guide` for policy and limits. |
 | `--owner PID` | Close the browser when that process exits. |
 | `--engine camoufox` | Use the optional Camoufox engine. |
 | `--port PORT` | Use an explicit debugging port instead of auto-allocation from 9422 upward. |
@@ -159,6 +160,7 @@ Source files are under `src/browser_tools/`:
 ```text
 cli.py                     Argument parsing, dispatch, exit codes
 lifecycle.py               Launch, status, stop, cleanup, profiles
+  onepassword.py           Opt-in signed desktop-helper registration
   camoufox_runner.py       Camoufox host process
   process_utils.py         Process and port utilities
   task_lease.py            Owner-exit keeper and retain handoff

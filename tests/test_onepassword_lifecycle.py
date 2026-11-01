@@ -24,6 +24,7 @@ import pytest
 from browser_tools import cli, lifecycle, onepassword
 from browser_tools.core import registry as core_registry
 from browser_tools.lifecycle import LifecycleError, ProfileLockBusy
+from browser_tools.usage import UsageError
 
 STABLE = onepassword.STABLE_EXTENSION_ORIGIN
 OTHER_ORIGIN = "chrome-extension://" + "b" * 32 + "/"
@@ -136,12 +137,14 @@ class TestEligibilityBeforeWrites:
         ],
     )
     def test_unsupported_combinations_are_refused(
-        self, monkeypatch, registry_path, kwargs, fragment
+        self, monkeypatch, registry_path, profiles_root, fake_browser_launch, kwargs, fragment
     ):
         if fragment == "macOS only":
             monkeypatch.setattr(sys, "platform", "linux")
-        with pytest.raises(LifecycleError, match=fragment):
+        error = LifecycleError if fragment == "macOS only" else UsageError
+        with pytest.raises(error, match=fragment):
             lifecycle.launch(registry_path=registry_path, onepassword=True, **kwargs)
+        assert fake_browser_launch == {}
         # Refused before filesystem work: nothing appeared under the root.
         assert not any(lifecycle.profiles_root().glob("*"))
 
@@ -150,7 +153,7 @@ class TestEligibilityBeforeWrites:
             raise AssertionError("the camoufox runner spawned for a refused flag")
 
         monkeypatch.setattr(lifecycle, "_spawn_camoufox_process", boom)
-        with pytest.raises(LifecycleError, match="requires the chrome engine"):
+        with pytest.raises(UsageError, match="requires the chrome engine"):
             lifecycle.launch(
                 engine="camoufox", profile="work", onepassword=True, registry_path=registry_path
             )
@@ -162,6 +165,23 @@ class TestEligibilityBeforeWrites:
 
 
 class TestLaunchSeamOrdering:
+    def test_existing_profile_acquires_registration_without_losing_login(
+        self, registry_path, profiles_root, valid_installation, fake_browser_launch
+    ):
+        profile = profiles_root / "work"
+        login = profile / "Default" / "Login Data"
+        login.parent.mkdir(parents=True)
+        login.write_bytes(b"existing login sentinel")
+
+        instance = lifecycle.launch(profile="work", onepassword=True, registry_path=registry_path)
+
+        assert instance.profile == "work"
+        assert fake_browser_launch["user_data_dir"] == str(profile)
+        manifest = json.loads((profile / HOSTS / DEST_NAME).read_text())
+        assert manifest["allowed_origins"] == [STABLE]
+        assert manifest["path"] == str(valid_installation)
+        assert login.read_bytes() == b"existing login sentinel"
+
     def test_symlinked_profile_is_refused_before_singleton_cleanup(
         self, monkeypatch, registry_path, profiles_root, tmp_path, fake_browser_launch
     ):
@@ -191,25 +211,19 @@ class TestLaunchSeamOrdering:
             calls.append(user_data_dir)
 
         monkeypatch.setattr(onepassword, "provision", never)
-        instance = lifecycle.launch(
-            engine="chrome", profile="work", registry_path=registry_path
-        )
+        instance = lifecycle.launch(engine="chrome", profile="work", registry_path=registry_path)
         assert calls == []
         assert instance.profile == "work"
         assert not (profiles_root / "work" / HOSTS).exists()
 
-    def test_holder_refusal_precedes_provisioning(
-        self, monkeypatch, registry_path, profiles_root
-    ):
+    def test_holder_refusal_precedes_provisioning(self, monkeypatch, registry_path, profiles_root):
         calls: list[Path] = []
 
         def never(user_data_dir: Path) -> None:
             calls.append(user_data_dir)
 
         monkeypatch.setattr(onepassword, "provision", never)
-        monkeypatch.setattr(
-            lifecycle, "find_profile_holder", lambda *a, **k: "web-01"
-        )
+        monkeypatch.setattr(lifecycle, "find_profile_holder", lambda *a, **k: "web-01")
         with pytest.raises(LifecycleError, match="already held by live instance 'web-01'"):
             lifecycle.launch(
                 engine="chrome", profile="work", onepassword=True, registry_path=registry_path
@@ -324,11 +338,19 @@ class TestCliSurface:
             (["launch", "--1password"], "--1password provisions a named profile"),
         ],
     )
-    def test_unsupported_combinations_are_operational_errors(
-        self, monkeypatch, capsys, tmp_path, registry_path, profiles_root, argv, fragment
+    def test_unsupported_combinations_are_usage_errors(
+        self,
+        monkeypatch,
+        capsys,
+        tmp_path,
+        registry_path,
+        profiles_root,
+        fake_browser_launch,
+        argv,
+        fragment,
     ):
         monkeypatch.setenv(lifecycle.REGISTRY_ENV_VAR, registry_path)
-        assert cli.main(argv) == cli.EXIT_OPERATIONAL
+        assert cli.main(argv) == cli.EXIT_USAGE
         assert fragment in capsys.readouterr().err
         # Nothing was written on the way out.
         assert list(profiles_root.glob("*")) == []
