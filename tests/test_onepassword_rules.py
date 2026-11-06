@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import inspect
 import subprocess
 import sys
@@ -62,6 +63,66 @@ def test_integration_boundaries_have_google_style_sections(function, sections) -
             "from its Google-style docstring (CONTRIBUTING.md). "
             "Document the boundary's arguments, result, and failures."
         )
+
+
+def test_new_onepassword_test_classes_fully_annotate_public_methods() -> None:
+    """Keep the two #201 test classes' public methods fully annotated.
+
+    The repository's type-check command covers only ``src/``, so
+    CONTRIBUTING.md's annotation rule is unenforced in tests. The check is
+    scoped to the two classes the #201 work added; legacy test methods
+    elsewhere keep their shape.
+    """
+    scope = {
+        "test_core_launcher.py": "TestProfilePreferences",
+        "test_onepassword_lifecycle.py": "TestAutomaticRegistration",
+    }
+    problems: list[str] = []
+    for filename, class_name in scope.items():
+        source = (Path(__file__).parent / filename).read_text()
+        tree = ast.parse(source, filename=filename)
+        matches = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ClassDef) and node.name == class_name
+        ]
+        if not matches:
+            problems.append(f"{filename}: class {class_name} not found")
+            continue
+        methods = [
+            node
+            for node in matches[0].body
+            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+        ]
+        for method in methods:
+            if method.name.startswith("_"):
+                continue
+            unannotated = [
+                arg.arg
+                for arg in (
+                    *method.args.posonlyargs,
+                    *method.args.args,
+                    *method.args.kwonlyargs,
+                )
+                if arg.arg not in ("self", "cls") and arg.annotation is None
+            ]
+            for extra in (method.args.vararg, method.args.kwarg):
+                if extra is not None and extra.annotation is None:
+                    unannotated.append(extra.arg)
+            returns_none = isinstance(method.returns, ast.Constant) and method.returns.value is None
+            parts = []
+            if unannotated:
+                parts.append("missing annotations for " + ", ".join(unannotated))
+            if not returns_none:
+                parts.append("missing -> None")
+            if parts:
+                problems.append(f"{filename}::{class_name}.{method.name}: " + "; ".join(parts))
+    assert not problems, (
+        "CONTRIBUTING.md requires type annotations on all public functions. The "
+        "#201 test classes' public methods must annotate every parameter "
+        "(pytest.MonkeyPatch, Path, and the fixtures' return types) and use "
+        "-> None. Unannotated: " + "; ".join(problems)
+    )
 
 
 def test_the_guide_documents_the_new_registration_contract() -> None:

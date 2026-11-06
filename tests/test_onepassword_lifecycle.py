@@ -326,8 +326,12 @@ class TestAutomaticRegistration:
     """
 
     def test_fresh_profile_registers_automatically(
-        self, registry_path, profiles_root, valid_installation, fake_browser_launch
-    ):
+        self,
+        registry_path: str,
+        profiles_root: Path,
+        valid_installation: Path,
+        fake_browser_launch: dict[str, object],
+    ) -> None:
         instance = lifecycle.launch(profile="work", registry_path=registry_path)
 
         assert instance.profile == "work"
@@ -344,8 +348,12 @@ class TestAutomaticRegistration:
         assert manifest_path.stat().st_mode & 0o777 == 0o600
 
     def test_existing_profile_stays_unregistered_without_the_flag(
-        self, registry_path, profiles_root, valid_installation, fake_browser_launch
-    ):
+        self,
+        registry_path: str,
+        profiles_root: Path,
+        valid_installation: Path,
+        fake_browser_launch: dict[str, object],
+    ) -> None:
         profile = profiles_root / "work"
         login = profile / "Default" / "Login Data"
         login.parent.mkdir(parents=True)
@@ -359,8 +367,8 @@ class TestAutomaticRegistration:
         assert login.read_bytes() == b"existing login sentinel"
 
     def test_absent_source_keeps_a_plain_launch(
-        self, registry_path, profiles_root, fake_browser_launch
-    ):
+        self, registry_path: str, profiles_root: Path, fake_browser_launch: dict[str, object]
+    ) -> None:
         instance = lifecycle.launch(profile="work", registry_path=registry_path)
 
         assert instance.profile == "work"
@@ -368,8 +376,13 @@ class TestAutomaticRegistration:
         assert not (profiles_root / "work" / HOSTS).exists()
 
     def test_unsupported_platform_keeps_a_plain_launch(
-        self, monkeypatch, registry_path, profiles_root, valid_installation, fake_browser_launch
-    ):
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        registry_path: str,
+        profiles_root: Path,
+        valid_installation: Path,
+        fake_browser_launch: dict[str, object],
+    ) -> None:
         monkeypatch.setattr(sys, "platform", "linux")
 
         instance = lifecycle.launch(profile="work", registry_path=registry_path)
@@ -379,8 +392,12 @@ class TestAutomaticRegistration:
         assert not (profiles_root / "work" / HOSTS).exists()
 
     def test_camoufox_profile_keeps_a_plain_launch(
-        self, monkeypatch, registry_path, profiles_root, valid_installation
-    ):
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        registry_path: str,
+        profiles_root: Path,
+        valid_installation: Path,
+    ) -> None:
         captured: dict[str, object] = {}
 
         def fake_camoufox(**kwargs: object) -> lifecycle.ExtendedInstance:
@@ -407,8 +424,12 @@ class TestAutomaticRegistration:
         assert not (profiles_root / "work" / HOSTS).exists()
 
     def test_unnamed_launch_never_provisions(
-        self, monkeypatch, registry_path, valid_installation, fake_browser_launch
-    ):
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        registry_path: str,
+        valid_installation: Path,
+        fake_browser_launch: dict[str, object],
+    ) -> None:
         calls: list[Path] = []
 
         def never(user_data_dir: Path) -> None:
@@ -421,8 +442,13 @@ class TestAutomaticRegistration:
         assert fake_browser_launch
 
     def test_migrated_legacy_profile_is_not_new(
-        self, monkeypatch, registry_path, profiles_root, valid_installation, fake_browser_launch
-    ):
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        registry_path: str,
+        profiles_root: Path,
+        valid_installation: Path,
+        fake_browser_launch: dict[str, object],
+    ) -> None:
         legacy = profiles_root.parent / "legacy"
         monkeypatch.setenv(lifecycle.LEGACY_PROFILES_ENV_VAR, str(legacy))
         source = legacy / "work"
@@ -440,8 +466,13 @@ class TestAutomaticRegistration:
         assert not source.exists()
 
     def test_invalid_present_source_refuses_before_browser_spawn(
-        self, monkeypatch, tmp_path, registry_path, profiles_root, fake_browser_launch
-    ):
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        registry_path: str,
+        profiles_root: Path,
+        fake_browser_launch: dict[str, object],
+    ) -> None:
         invalid = tmp_path / HOSTS / DEST_NAME
         invalid.parent.mkdir(parents=True)
         invalid.write_text("{ not json")

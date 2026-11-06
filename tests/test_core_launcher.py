@@ -17,11 +17,15 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import pytest
 
 from browser_tools.core import launcher
 from browser_tools.core.connection import PortStatus
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 @dataclass
@@ -73,7 +77,12 @@ def _patch_launch_plumbing(monkeypatch, captured):
 
 
 class TestProfilePreferences:
-    def _launch(self, monkeypatch, tmp_path, captured):
+    def _launch(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        captured: dict[str, object],
+    ) -> object:
         _patch_launch_plumbing(monkeypatch, captured)
         return asyncio.run(
             launcher.launch_browser(
@@ -86,7 +95,9 @@ class TestProfilePreferences:
             )
         )
 
-    def test_existing_profile_settings_survive_launch(self, monkeypatch, tmp_path):
+    def test_existing_profile_settings_survive_launch(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
         path = tmp_path / "udd" / "Default" / "Preferences"
         path.parent.mkdir(parents=True)
         original = {
@@ -106,7 +117,9 @@ class TestProfilePreferences:
         assert json.loads(path.read_text()) == expected
         assert captured["args"][0] == "synthetic-chrome"
 
-    def test_missing_preferences_get_password_prompt_defaults(self, monkeypatch, tmp_path):
+    def test_missing_preferences_get_password_prompt_defaults(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
         self._launch(monkeypatch, tmp_path, {})
 
         path = tmp_path / "udd" / "Default" / "Preferences"
@@ -126,8 +139,8 @@ class TestProfilePreferences:
         ],
     )
     def test_invalid_preferences_abort_before_spawn_and_remain_intact(
-        self, monkeypatch, tmp_path, contents
-    ):
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, contents: bytes
+    ) -> None:
         path = tmp_path / "udd" / "Default" / "Preferences"
         path.parent.mkdir(parents=True)
         path.write_bytes(contents)
@@ -141,7 +154,9 @@ class TestProfilePreferences:
         assert "private_synthetic_marker" not in str(error.value)
         assert error.value.__suppress_context__ or error.value.__context__ is None
 
-    def test_failed_atomic_replace_preserves_existing_preferences(self, monkeypatch, tmp_path):
+    def test_failed_atomic_replace_preserves_existing_preferences(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
         path = tmp_path / "Default" / "Preferences"
         path.parent.mkdir(parents=True)
         contents = b'{"homepage": "https://example.test/"}'
