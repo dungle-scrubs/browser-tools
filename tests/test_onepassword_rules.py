@@ -125,6 +125,36 @@ def test_new_onepassword_test_classes_fully_annotate_public_methods() -> None:
     )
 
 
+def test_the_guide_documents_the_automatic_registration_default() -> None:
+    """Pin the automatic-default paragraph and its boundaries (Tests T4).
+
+    Replacing the automatic paragraph with the old opt-in wording survived
+    every round-one rules test; this contract kills that documentation
+    mutant and keeps the automatic default, its boundaries, and its retry
+    behavior stated.
+    """
+    guide = Path(onepassword.__file__).with_name("GUIDE.txt").read_text()
+    title = "1PASSWORD DESKTOP INTEGRATION."
+    section = " ".join(guide.split(title, 1)[1].split("Chrome looks for", 1)[0].split())
+    for requirement in (
+        "brand-new Named Chrome profile on macOS is registered automatically",
+        "An existing profile is never touched automatically",
+        "Without the flag, other platforms, the Camoufox engine, unnamed "
+        "launches, and machines without the official registration keep a plain launch",
+        "A present but invalid official registration, including a link whose target is gone",
+        "removes the empty new profile directory",
+        "unchanged invalid registration is refused again",
+        "a repaired one registers",
+        "is kept unchanged",
+        "provision the existing profile with --1password",
+    ):
+        assert requirement.lower() in section.lower(), (
+            f"bt guide's automatic-registration paragraph must state {requirement!r}. "
+            "Keep the automatic default, its boundaries, and its retry behavior "
+            "documented."
+        )
+
+
 def test_the_guide_documents_the_new_registration_contract() -> None:
     guide = Path(onepassword.__file__).with_name("GUIDE.txt").read_text()
     title = "1PASSWORD DESKTOP INTEGRATION."

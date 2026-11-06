@@ -112,10 +112,10 @@ LIFECYCLE VERBS
       No environment owner default, idle timeout or age expiry applies.
       Keeper setup failure is a launch failure (exit 1). Cleanup is truthful:
       any surviving or unverified browser keeps recoverable registry state.
-      A new --profile on macOS registers 1Password automatically when the
-      official source exists. --1password (with --profile, macOS, Chrome
-      engine) provisions an existing profile too, or revalidates. See the
-      profile section.
+      A new Chrome-engine --profile on macOS registers 1Password
+      automatically when the official source exists. --1password (with
+      --profile, macOS, Chrome engine) provisions an existing profile too,
+      or revalidates. See the profile section.
 
   retain INSTANCE [--note TEXT]
       Keep an instance beyond owner exit for handoff to a human or another
@@ -859,7 +859,7 @@ PROFILES AND LOGIN
   no browser survives one.
 
   1PASSWORD DESKTOP INTEGRATION. A brand-new Named Chrome profile on macOS
-  is connected automatically: when the official registration below exists,
+  is registered automatically: when the official registration below exists,
   its first launch provisions the installed desktop helper for that
   user-data directory before the browser starts. An existing profile is
   never touched automatically. Opt in for one of those, or revalidate the
@@ -874,8 +874,14 @@ PROFILES AND LOGIN
   (exit 2); an unsupported platform is an operational error (exit 1). Without
   the flag, other platforms, the Camoufox engine, unnamed launches, and
   machines without the official registration keep a plain launch. A present
-  but invalid official registration fails a new profile's first launch
-  (exit 1) before any browser starts. The selected Chrome build must also
+  but invalid official registration, including a link whose target is gone,
+  fails a new profile's first launch (exit 1) before any browser starts.
+  That failed launch removes the empty new profile directory it created, so
+  the next launch retries the registration: an unchanged invalid
+  registration is refused again, and a repaired one registers. A directory
+  that is no longer empty is kept unchanged, and the failure says to
+  provision the existing profile with --1password after the repair. The
+  selected Chrome build must also
   be supported by 1Password; provisioning does not grant trust to an unsupported
   browser. Install the extension in the Named Profile and enable desktop integration in
   both the extension and the app. browser-tools enters no credentials and
@@ -885,9 +891,12 @@ PROFILES AND LOGIN
   browser-tools reads only this registration, bounded to 64 KiB:
     ~/Library/Application Support/Google/Chrome/NativeMessagingHosts/
       com.1password.1password.json
-  Missing, symlinked, or malformed source registrations fail with an actionable
-  error. The executable must pass Apple's code-signature verification for
-  identifier com.1password.browser-support and team 2BUA8C4S2C. This identity was
+  With --1password, a missing, symlinked, or malformed source registration
+  fails with an actionable error; without the flag, a missing source keeps
+  the plain launch above, and a present invalid one fails the new profile's
+  first launch. The executable must pass Apple's code-signature
+  verification for identifier com.1password.browser-support and team
+  2BUA8C4S2C. This identity was
   checked on 1Password 8.12.42; a changed identity requires a policy update.
 
   New registrations are regular files, mode 0600, allowing only the stable

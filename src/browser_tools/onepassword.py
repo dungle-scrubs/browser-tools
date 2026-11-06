@@ -45,7 +45,17 @@ _ALLOWED_FIELDS = frozenset({"name", "description", "path", "type", "allowed_ori
 
 
 class OnePasswordProvisionError(Exception):
-    """A registration could not be safely provisioned."""
+    """A registration could not be safely provisioned.
+
+    The string form carries the explicit flag's opt-out remedy, because every
+    refusal this module raises reads as if the operator had passed
+    --1password. The automatic path surfaces ``reason`` with its own advice
+    instead of editing the string.
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(f"{reason} Launch without --1password to skip provisioning.")
+        self.reason = reason
 
 
 @dataclass(frozen=True)
@@ -63,8 +73,9 @@ def source_manifest_path() -> Path:
     return SOURCE_MANIFEST.expanduser()
 
 
-def _refuse(message: str) -> OnePasswordProvisionError:
-    return OnePasswordProvisionError(message + " Launch without --1password to skip provisioning.")
+def _refuse(reason: str) -> OnePasswordProvisionError:
+    """Build the module's refusal; the constructor owns the flag's remedy."""
+    return OnePasswordProvisionError(reason)
 
 
 def _read_manifest(path: Path, *, dir_fd: int | None = None) -> dict[str, Any]:

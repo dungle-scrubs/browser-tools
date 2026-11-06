@@ -1064,33 +1064,58 @@ def _check_onepassword_eligibility(*, engine: str, profile: str | None) -> None:
         )
 
 
-#: The remedy every provisioner refusal ends with, written for the explicit
-#: flag. The automatic path never shows it: its launch carried no flag, so the
-#: remedy it owes names the registration, not the flag.
-_EXPLICIT_OPT_OUT_REMEDY = "Launch without --1password to skip provisioning."
-_AUTOMATIC_REGISTRATION_REMEDY = (
-    "Repair the official registration named above, or remove it, before relaunching."
-)
+#: The provisioner's refusals are written for the explicit flag; the
+#: automatic path states its own recovery at the lifecycle boundary below,
+#: from the typed reason, never by editing the provisioner's English.
 
 
 def _official_onepassword_source_present() -> bool:
-    """Report whether the fixed official source registration exists, unread.
+    """Report whether the official source registration entry exists, unread.
 
-    The automatic path's single source check: existence, at the provisioner's
-    own fixed path. The manifest is never read here -- schema, signature,
-    origin and no-overwrite all stay inside the provisioner, which a present
-    but invalid source reaches and fails.
+    The automatic path's single source check: a directory entry at the
+    provisioner's own fixed path, detected without following links so a
+    dangling symlink counts as present. The manifest is never read or
+    trusted here -- schema, signature, origin and no-overwrite all stay
+    inside the provisioner, which a present but invalid source reaches and
+    fails.
 
     Imported lazily so a launch that can never take the automatic path loads
     nothing from the module, the same cold-start property the explicit path
     keeps.
 
     Returns:
-        True when the official source manifest exists at its fixed path.
+        True when any directory entry exists at the official source path.
     """
     from . import onepassword
 
-    return onepassword.source_manifest_path().exists()
+    return onepassword.source_manifest_path().exists(follow_symlinks=False)
+
+
+def _discard_empty_automatic_initialization(user_data_dir: Path) -> bool:
+    """Remove the empty directories an aborted automatic initialization made.
+
+    Only the profile's NativeMessagingHosts directory and the profile
+    directory itself are considered, each removed only when empty, so a
+    failed first launch never silently disables the next launch's automatic
+    registration while no existing profile, nonempty directory, or unrelated
+    data is ever deleted.
+
+    Args:
+        user_data_dir: The profile directory this launch created.
+
+    Returns:
+        True when the profile directory itself was removed.
+    """
+    from . import onepassword
+
+    hosts_dir = user_data_dir / onepassword.HOSTS_DIR_NAME
+    with contextlib.suppress(OSError):
+        hosts_dir.rmdir()
+    try:
+        user_data_dir.rmdir()
+    except OSError:
+        return False
+    return True
 
 
 def _provision_onepassword(user_data_dir: Path, *, automatic: bool = False) -> None:
@@ -1099,9 +1124,11 @@ def _provision_onepassword(user_data_dir: Path, *, automatic: bool = False) -> N
     Imported lazily at this seam so a launch that never reaches provisioning
     loads nothing from the module, the same cold-start property the Camoufox
     runner has. The module's dedicated failure type is translated to the
-    lifecycle's own. Its message ends with the flag's opt-out remedy; the
-    automatic path has no flag to name, so its copy swaps that remedy for the
-    registration's. Every check the provisioner made is kept verbatim.
+    lifecycle's own. The explicit flag keeps the provisioner's full message;
+    the automatic path keeps only the typed reason and states its own
+    recovery, discarding the empty initialization it created so a retry
+    registers instead of silently turning into an existing-profile launch.
+    Every check the provisioner made is kept verbatim.
 
     Args:
         user_data_dir: The selected Named Profile's directory, with its lock held.
@@ -1109,17 +1136,29 @@ def _provision_onepassword(user_data_dir: Path, *, automatic: bool = False) -> N
             without the explicit flag (a brand-new Named Chrome profile).
 
     Raises:
-        LifecycleError: Provisioning failed before any browser launched.
+        LifecycleError: Provisioning failed before any browser launched. An
+            automatic failure additionally reports whether the empty new
+            profile directory was discarded or had to be kept.
     """
     from . import onepassword
 
     try:
         onepassword.provision(user_data_dir)
     except onepassword.OnePasswordProvisionError as exc:
-        message = str(exc)
-        if automatic:
-            message = message.replace(_EXPLICIT_OPT_OUT_REMEDY, _AUTOMATIC_REGISTRATION_REMEDY)
-        raise LifecycleError(message) from exc
+        if not automatic:
+            raise LifecycleError(str(exc)) from exc
+        if _discard_empty_automatic_initialization(user_data_dir):
+            advice = (
+                " Fix the condition above and relaunch; the new profile is "
+                "provisioned automatically on the retry."
+            )
+        else:
+            advice = (
+                " The new profile directory was kept because it is not empty. "
+                "Fix the condition above, then relaunch with --1password to "
+                "provision the existing profile."
+            )
+        raise LifecycleError(exc.reason + advice) from exc
 
 
 def launch(
