@@ -197,7 +197,9 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "Provision this named profile with the installed official 1Password "
-            "native-messaging host (macOS, Chrome engine; needs --profile)"
+            "native-messaging host (macOS, Chrome engine; needs --profile). A new "
+            "named Chrome profile on macOS gets this automatically when the "
+            "official source exists"
         ),
     )
     launch.add_argument(

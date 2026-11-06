@@ -112,8 +112,10 @@ LIFECYCLE VERBS
       No environment owner default, idle timeout or age expiry applies.
       Keeper setup failure is a launch failure (exit 1). Cleanup is truthful:
       any surviving or unverified browser keeps recoverable registry state.
-      --1password (with --profile, macOS, Chrome engine) provisions the
-      profile for the 1Password desktop app first. See the profile section.
+      A new --profile on macOS registers 1Password automatically when the
+      official source exists. --1password (with --profile, macOS, Chrome
+      engine) provisions an existing profile too, or revalidates. See the
+      profile section.
 
   retain INSTANCE [--note TEXT]
       Keep an instance beyond owner exit for handoff to a human or another
@@ -856,15 +858,24 @@ PROFILES AND LOGIN
   stays in /tmp: a cleared registry after a reboot is self-consistent, because
   no browser survives one.
 
-  1PASSWORD DESKTOP INTEGRATION. Opt in for a new or existing Named Profile:
+  1PASSWORD DESKTOP INTEGRATION. A brand-new Named Chrome profile on macOS
+  is connected automatically: when the official registration below exists,
+  its first launch provisions the installed desktop helper for that
+  user-data directory before the browser starts. An existing profile is
+  never touched automatically. Opt in for one of those, or revalidate the
+  current installation, with:
 
     bt launch --profile shopify-admin --1password
 
-  This provisions the installed desktop helper for that user-data directory.
+  Both paths use the same provisioner for that user-data directory.
   Supported: macOS, the Chrome engine, and the official stable 1Password Chrome
-  extension. Other platforms and invalid engine/profile combinations fail before
-  any write. Invalid combinations are usage errors (exit 2); an unsupported
-  platform is an operational error (exit 1). The selected Chrome build must also
+  extension. For the flag, other platforms and invalid engine/profile
+  combinations fail before any write: invalid combinations are usage errors
+  (exit 2); an unsupported platform is an operational error (exit 1). Without
+  the flag, other platforms, the Camoufox engine, unnamed launches, and
+  machines without the official registration keep a plain launch. A present
+  but invalid official registration fails a new profile's first launch
+  (exit 1) before any browser starts. The selected Chrome build must also
   be supported by 1Password; provisioning does not grant trust to an unsupported
   browser. Install the extension in the Named Profile and enable desktop integration in
   both the extension and the app. browser-tools enters no credentials and
@@ -889,7 +900,8 @@ PROFILES AND LOGIN
   or an unlocked extension; Chrome policies can still block native messaging.
 
   Registrations persist across launches. Repeat --1password to validate against
-  the current installation; omitting it does not validate or remove anything.
+  the current installation; omitting it does not validate or remove anything,
+  and no existing profile is newly registered without it.
   Identical registrations and existing direct links to the official source are
   preserved. Those user-managed links retain the source's origin list and follow
   its future changes. No existing destination is overwritten. A conflicting
@@ -898,8 +910,8 @@ PROFILES AND LOGIN
   it yourself to re-provision. Resolve it before retrying, or launch without
   --1password.
   `profile delete` removes only the profile's registration, including its link
-  if present; the everyday Chrome source survives. External endpoints and
-  Camoufox profiles are never provisioned.
+  if present; the everyday Chrome source survives. External endpoints,
+  Camoufox profiles, and unnamed launches are never provisioned.
 
 
 APPROVED LOGINS (1PASSWORD)

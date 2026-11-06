@@ -34,13 +34,15 @@ Chrome is the default engine. Without a channel or binary override, the launcher
 | `--headless` | Run without a visible window. The default is headed. |
 | `--name NAME` | Choose the instance's base name, independent of the current directory. |
 | `--profile NAME` | Reuse a persistent browser profile and its login state. |
-| `--1password` | With `--profile` on macOS, provision the signed installed 1Password desktop helper for the official stable extension. See `bt guide` for policy and limits. |
+| `--1password` | With `--profile` on macOS, provision the signed installed 1Password desktop helper for the official stable extension. New named Chrome profiles on macOS get this automatically when the official source exists. See `bt guide` for policy and limits. |
 | `--owner PID` | Close the browser when that process exits. |
 | `--engine camoufox` | Use the optional Camoufox engine. |
 | `--port PORT` | Use an explicit debugging port instead of auto-allocation from 9422 upward. |
 | `--fingerprint FILE` | Pass a fingerprint profile's launch flags. This file is not a saved login. |
 | `--no-window-border` | Disable the border, badge, and tab-title marking for this launch. |
 | `-- BROWSER_ARGS` | Pass remaining arguments to the browser. |
+
+A brand-new named Chrome profile on macOS is registered with the installed official 1Password native host automatically: its first launch provisions it before the browser starts when the official source registration exists. Existing profiles are only provisioned with `--1password`, and a present but invalid official source fails that first launch before any browser starts.
 
 An instance name is the base name plus the first free two-digit suffix. A launch from a directory called `web` starts with `web-01`; `--name demo` starts with `demo-01`. Names are lowercased. Read the actual name from launch output rather than assuming a suffix.
 

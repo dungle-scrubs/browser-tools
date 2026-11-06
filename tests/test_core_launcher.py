@@ -72,6 +72,93 @@ def _patch_launch_plumbing(monkeypatch, captured):
     monkeypatch.setattr(launcher, "cleanup_sessions", lambda registry_path=None: [])
 
 
+class TestProfilePreferences:
+    def _launch(self, monkeypatch, tmp_path, captured):
+        _patch_launch_plumbing(monkeypatch, captured)
+        return asyncio.run(
+            launcher.launch_browser(
+                port_override=9337,
+                binary="synthetic-chrome",
+                headless=True,
+                working_dir=str(tmp_path),
+                registry_path=str(tmp_path / "registry.json"),
+                user_data_dir=str(tmp_path / "udd"),
+            )
+        )
+
+    def test_existing_profile_settings_survive_launch(self, monkeypatch, tmp_path):
+        path = tmp_path / "udd" / "Default" / "Preferences"
+        path.parent.mkdir(parents=True)
+        original = {
+            "homepage": "https://example.test/",
+            "browser": {"show_home_button": True},
+            "extensions": {"pinned_extensions": ["synthetic-extension"]},
+            "profile": {"name": "Automation", "password_manager_enabled": True},
+            "credentials_enable_service": True,
+        }
+        path.write_text(json.dumps(original))
+
+        captured = {}
+        self._launch(monkeypatch, tmp_path, captured)
+
+        expected = original | {"credentials_enable_service": False}
+        expected["profile"] = original["profile"] | {"password_manager_enabled": False}
+        assert json.loads(path.read_text()) == expected
+        assert captured["args"][0] == "synthetic-chrome"
+
+    def test_missing_preferences_get_password_prompt_defaults(self, monkeypatch, tmp_path):
+        self._launch(monkeypatch, tmp_path, {})
+
+        path = tmp_path / "udd" / "Default" / "Preferences"
+        assert json.loads(path.read_text()) == {
+            "credentials_enable_service": False,
+            "profile": {"password_manager_enabled": False},
+        }
+
+    @pytest.mark.parametrize(
+        "contents",
+        [
+            b'{"private_synthetic_marker":',
+            b'["private_synthetic_marker"]',
+            b'null',
+            b'{"profile": ["private_synthetic_marker"]}',
+            b'\xffprivate_synthetic_marker',
+        ],
+    )
+    def test_invalid_preferences_abort_before_spawn_and_remain_intact(
+        self, monkeypatch, tmp_path, contents
+    ):
+        path = tmp_path / "udd" / "Default" / "Preferences"
+        path.parent.mkdir(parents=True)
+        path.write_bytes(contents)
+        captured = {}
+
+        with pytest.raises(RuntimeError) as error:
+            self._launch(monkeypatch, tmp_path, captured)
+
+        assert path.read_bytes() == contents
+        assert "args" not in captured
+        assert "private_synthetic_marker" not in str(error.value)
+        assert error.value.__suppress_context__ or error.value.__context__ is None
+
+    def test_failed_atomic_replace_preserves_existing_preferences(self, monkeypatch, tmp_path):
+        path = tmp_path / "Default" / "Preferences"
+        path.parent.mkdir(parents=True)
+        contents = b'{"homepage": "https://example.test/"}'
+        path.write_bytes(contents)
+
+        def fail_replace(source, target):
+            raise OSError("synthetic atomic replacement failure")
+
+        monkeypatch.setattr(launcher.os, "replace", fail_replace)
+
+        with pytest.raises(OSError, match="synthetic atomic replacement failure"):
+            launcher._prepare_preferences(path)
+
+        assert path.read_bytes() == contents
+        assert list(path.parent.iterdir()) == [path]
+
+
 class TestFingerprintBecomesLaunchFlags:
     def test_fingerprint_file_becomes_chrome_flags(self, monkeypatch, tmp_path):
         captured: dict = {}

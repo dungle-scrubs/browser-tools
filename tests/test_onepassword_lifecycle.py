@@ -5,7 +5,9 @@ is faked (no browser starts), codesign is replaced at the subprocess boundary,
 and the official registration lives in a tmp tree. What these tests prove is
 the ordering the spec pins -- eligibility before any write, holder refusal
 before provisioning, provisioning under the profile lock and before Chrome --
-plus the CLI flag's plumbing and exit codes.
+plus the CLI flag's plumbing and exit codes. A brand-new Named Chrome profile
+on macOS is also registered automatically when the official source exists:
+that default's coverage lives in TestAutomaticRegistration.
 """
 
 from __future__ import annotations
@@ -222,9 +224,11 @@ class TestLaunchSeamOrdering:
         assert fake_browser_launch == {}
         assert not (external / HOSTS).exists()
 
-    def test_opt_out_never_calls_provisioning(
+    def test_absent_official_source_never_provisions(
         self, monkeypatch, registry_path, profiles_root, fake_browser_launch
     ):
+        # The autouse fixture keeps SOURCE_MANIFEST absent, so a launch with no
+        # flag has no official source to register from.
         calls: list[Path] = []
 
         def never(user_data_dir: Path) -> None:
@@ -306,6 +310,149 @@ class TestLaunchSeamOrdering:
         # The launch itself is unchanged: registered, extended fields written.
         assert instance.profile == "work"
         assert fake_browser_launch["user_data_dir"] == str(profiles_root / "work")
+
+
+# ---------------------------------------------------------------------------
+# Automatic registration of brand-new Named Profiles
+# ---------------------------------------------------------------------------
+
+
+class TestAutomaticRegistration:
+    """A fresh macOS Named Chrome profile registers itself; nothing else does.
+
+    The default is user-selected: no flag, no new seam. Everything the
+    explicit path checks stays inside the provisioner; these tests pin only
+    which launches reach it.
+    """
+
+    def test_fresh_profile_registers_automatically(
+        self, registry_path, profiles_root, valid_installation, fake_browser_launch
+    ):
+        instance = lifecycle.launch(profile="work", registry_path=registry_path)
+
+        assert instance.profile == "work"
+        assert fake_browser_launch["user_data_dir"] == str(profiles_root / "work")
+        manifest_path = profiles_root / "work" / HOSTS / DEST_NAME
+        written = json.loads(manifest_path.read_text())
+        assert written == {
+            "name": "com.1password.1password",
+            "description": "1Password native messaging host",
+            "path": str(valid_installation),
+            "type": "stdio",
+            "allowed_origins": [STABLE],
+        }
+        assert manifest_path.stat().st_mode & 0o777 == 0o600
+
+    def test_existing_profile_stays_unregistered_without_the_flag(
+        self, registry_path, profiles_root, valid_installation, fake_browser_launch
+    ):
+        profile = profiles_root / "work"
+        login = profile / "Default" / "Login Data"
+        login.parent.mkdir(parents=True)
+        login.write_bytes(b"existing login sentinel")
+
+        instance = lifecycle.launch(profile="work", registry_path=registry_path)
+
+        assert instance.profile == "work"
+        assert fake_browser_launch["user_data_dir"] == str(profile)
+        assert not (profile / HOSTS).exists()
+        assert login.read_bytes() == b"existing login sentinel"
+
+    def test_absent_source_keeps_a_plain_launch(
+        self, registry_path, profiles_root, fake_browser_launch
+    ):
+        instance = lifecycle.launch(profile="work", registry_path=registry_path)
+
+        assert instance.profile == "work"
+        assert fake_browser_launch  # the browser launched, nothing else happened
+        assert not (profiles_root / "work" / HOSTS).exists()
+
+    def test_unsupported_platform_keeps_a_plain_launch(
+        self, monkeypatch, registry_path, profiles_root, valid_installation, fake_browser_launch
+    ):
+        monkeypatch.setattr(sys, "platform", "linux")
+
+        instance = lifecycle.launch(profile="work", registry_path=registry_path)
+
+        assert instance.profile == "work"
+        assert fake_browser_launch
+        assert not (profiles_root / "work" / HOSTS).exists()
+
+    def test_camoufox_profile_keeps_a_plain_launch(
+        self, monkeypatch, registry_path, profiles_root, valid_installation
+    ):
+        captured: dict[str, object] = {}
+
+        def fake_camoufox(**kwargs: object) -> lifecycle.ExtendedInstance:
+            captured.update(kwargs)
+            return lifecycle.ExtendedInstance(
+                name="work-01",
+                port=9450,
+                pid=512,
+                browser_version="camoufox",
+                user_data_dir=str(profiles_root / "work"),
+                launched=None,
+                pid_start=None,
+                engine="camoufox",
+                profile="work",
+            )
+
+        monkeypatch.setattr(lifecycle, "_launch_camoufox", fake_camoufox)
+        instance = lifecycle.launch(
+            engine="camoufox", profile="work", registry_path=registry_path
+        )
+
+        assert instance.engine == "camoufox"
+        assert captured["user_data_dir"] == profiles_root / "work"
+        assert not (profiles_root / "work" / HOSTS).exists()
+
+    def test_unnamed_launch_never_provisions(
+        self, monkeypatch, registry_path, valid_installation, fake_browser_launch
+    ):
+        calls: list[Path] = []
+
+        def never(user_data_dir: Path) -> None:
+            calls.append(user_data_dir)
+
+        monkeypatch.setattr(onepassword, "provision", never)
+        lifecycle.launch(registry_path=registry_path)
+
+        assert calls == []
+        assert fake_browser_launch
+
+    def test_migrated_legacy_profile_is_not_new(
+        self, monkeypatch, registry_path, profiles_root, valid_installation, fake_browser_launch
+    ):
+        legacy = profiles_root.parent / "legacy"
+        monkeypatch.setenv(lifecycle.LEGACY_PROFILES_ENV_VAR, str(legacy))
+        source = legacy / "work"
+        login = source / "Default" / "Login Data"
+        login.parent.mkdir(parents=True)
+        login.write_bytes(b"legacy login sentinel")
+
+        instance = lifecycle.launch(profile="work", registry_path=registry_path)
+
+        assert instance.profile == "work"
+        assert not (profiles_root / "work" / HOSTS).exists()
+        assert (profiles_root / "work" / "Default" / "Login Data").read_bytes() == (
+            b"legacy login sentinel"
+        )
+        assert not source.exists()
+
+    def test_invalid_present_source_refuses_before_browser_spawn(
+        self, monkeypatch, tmp_path, registry_path, profiles_root, fake_browser_launch
+    ):
+        invalid = tmp_path / HOSTS / DEST_NAME
+        invalid.parent.mkdir(parents=True)
+        invalid.write_text("{ not json")
+        monkeypatch.setattr(onepassword, "SOURCE_MANIFEST", invalid)
+
+        with pytest.raises(LifecycleError, match="not valid JSON") as error:
+            lifecycle.launch(profile="work", registry_path=registry_path)
+
+        assert fake_browser_launch == {}
+        # The launch carried no flag, so the refusal cannot offer one.
+        assert "--1password" not in str(error.value)
 
 
 # ---------------------------------------------------------------------------

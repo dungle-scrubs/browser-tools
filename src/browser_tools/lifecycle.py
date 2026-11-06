@@ -1064,16 +1064,49 @@ def _check_onepassword_eligibility(*, engine: str, profile: str | None) -> None:
         )
 
 
-def _provision_onepassword(user_data_dir: Path) -> None:
+#: The remedy every provisioner refusal ends with, written for the explicit
+#: flag. The automatic path never shows it: its launch carried no flag, so the
+#: remedy it owes names the registration, not the flag.
+_EXPLICIT_OPT_OUT_REMEDY = "Launch without --1password to skip provisioning."
+_AUTOMATIC_REGISTRATION_REMEDY = (
+    "Repair the official registration named above, or remove it, before relaunching."
+)
+
+
+def _official_onepassword_source_present() -> bool:
+    """Report whether the fixed official source registration exists, unread.
+
+    The automatic path's single source check: existence, at the provisioner's
+    own fixed path. The manifest is never read here -- schema, signature,
+    origin and no-overwrite all stay inside the provisioner, which a present
+    but invalid source reaches and fails.
+
+    Imported lazily so a launch that can never take the automatic path loads
+    nothing from the module, the same cold-start property the explicit path
+    keeps.
+
+    Returns:
+        True when the official source manifest exists at its fixed path.
+    """
+    from . import onepassword
+
+    return onepassword.source_manifest_path().exists()
+
+
+def _provision_onepassword(user_data_dir: Path, *, automatic: bool = False) -> None:
     """Register the validated 1Password helper in one profile directory (#201).
 
-    Imported lazily at this seam so a launch that never opts in loads nothing
-    from the module, the same cold-start property the Camoufox runner has.
-    The module's dedicated failure type is translated to the lifecycle's own;
-    its message already names the remedy and the flag.
+    Imported lazily at this seam so a launch that never reaches provisioning
+    loads nothing from the module, the same cold-start property the Camoufox
+    runner has. The module's dedicated failure type is translated to the
+    lifecycle's own. Its message ends with the flag's opt-out remedy; the
+    automatic path has no flag to name, so its copy swaps that remedy for the
+    registration's. Every check the provisioner made is kept verbatim.
 
     Args:
         user_data_dir: The selected Named Profile's directory, with its lock held.
+        automatic: True when this launch reached provisioning automatically,
+            without the explicit flag (a brand-new Named Chrome profile).
 
     Raises:
         LifecycleError: Provisioning failed before any browser launched.
@@ -1083,7 +1116,10 @@ def _provision_onepassword(user_data_dir: Path) -> None:
     try:
         onepassword.provision(user_data_dir)
     except onepassword.OnePasswordProvisionError as exc:
-        raise LifecycleError(str(exc)) from exc
+        message = str(exc)
+        if automatic:
+            message = message.replace(_EXPLICIT_OPT_OUT_REMEDY, _AUTOMATIC_REGISTRATION_REMEDY)
+        raise LifecycleError(message) from exc
 
 
 def launch(
@@ -1121,8 +1157,12 @@ def launch(
     1Password native-messaging registration: validated, code-signature
     checked, and written narrowed to the stable extension origin, after the
     profile lock and the live-holder refusal and before Chrome launches.
-    Unsupported combinations are refused before any filesystem work, and
-    without the flag nothing is provisioned or validated.
+    Unsupported combinations are refused before any filesystem work. Without
+    the flag nothing is provisioned or validated, with one user-selected
+    exception: a brand-new Named Chrome profile on macOS is registered by the
+    same provisioner when the fixed official source manifest exists. An
+    existing profile never is, and a machine without the source keeps the
+    launch plain.
     """
     from . import task_lease
 
@@ -1176,6 +1216,20 @@ def launch(
                     f"--1password requires a real profile directory, not the symlink "
                     f"{user_data_dir}. Inspect it, or launch without --1password."
                 )
+            # Automatic registration (#201): a brand-new Named Chrome profile
+            # on macOS gets the official registration when the fixed official
+            # source exists. Newness is decided here -- after legacy migration
+            # (a migrated profile already existed) and before the directory is
+            # created below -- so an existing profile never acquires a
+            # registration on its own. Existence is this path's only source
+            # check; the provisioner keeps every other one.
+            automatic_registration = (
+                not onepassword
+                and engine == "chrome"
+                and sys.platform == "darwin"
+                and not user_data_dir.exists()
+                and _official_onepassword_source_present()
+            )
             user_data_dir.mkdir(parents=True, exist_ok=True)
             # Clean stale singleton locks (dead holder) BEFORE the exclusivity check
             # so a crashed previous run does not wedge the profile forever.
@@ -1188,9 +1242,11 @@ def launch(
                 )
             # --1password (#201): after the lock and the holder refusal, before
             # Chrome launches. A provisioning failure therefore never leaves a
-            # browser running, and a held profile is never provisioned.
-            if onepassword:
-                _provision_onepassword(user_data_dir)
+            # browser running, and a held profile is never provisioned. The
+            # automatic path reaches the same provisioner under the same rules;
+            # a present but invalid official source fails here, closed.
+            if onepassword or automatic_registration:
+                _provision_onepassword(user_data_dir, automatic=automatic_registration)
         elif engine == "camoufox":
             base = ephemeral_root()
             base.mkdir(parents=True, exist_ok=True)

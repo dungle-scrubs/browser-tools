@@ -18,6 +18,8 @@
 # registry entry so `bt status` can report a supervisor that has died (#65),
 # and the supervisor is told the browser's user-data-dir (#176) so it can
 # verify that the port it re-attaches to still serves its own browser.
+# Existing profile preferences are preserved while password-save prompts
+# remain disabled.
 # Intra-package imports are rewritten to
 # browser_tools.core. Otherwise unchanged from chrome-agent v0.5.7. See RFC-01,
 # section "Vendoring rules".
@@ -96,6 +98,41 @@ def _platform_candidates() -> list[str]:
     return []
 
 
+def _prepare_preferences(path: Path) -> None:
+    """Disable Chrome password prompts without discarding profile state."""
+    try:
+        with path.open(encoding="utf-8") as source:
+            prefs = json.load(source)
+    except FileNotFoundError:
+        prefs = {}
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        raise RuntimeError(f"Chrome preferences are invalid: {path}") from None
+
+    if not isinstance(prefs, dict):
+        raise RuntimeError(f"Chrome preferences must be a JSON object: {path}")
+    profile = prefs.setdefault("profile", {})
+    if not isinstance(profile, dict):
+        raise RuntimeError(f"Chrome profile preferences must be a JSON object: {path}")
+    prefs["credentials_enable_service"] = False
+    profile["password_manager_enabled"] = False
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", prefix=".Preferences-", dir=path.parent,
+            delete=False,
+        ) as target:
+            temporary_path = Path(target.name)
+            json.dump(prefs, target)
+            target.flush()
+            os.fsync(target.fileno())
+        os.replace(temporary_path, path)
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+
+
 async def launch_browser(
     port_override: int | None = None,
     fingerprint: str | None = None,
@@ -158,17 +195,7 @@ async def launch_browser(
         os.makedirs(_SESSION_ROOT, exist_ok=True)
         session_dir = tempfile.mkdtemp(prefix="session-", dir=_SESSION_ROOT)
 
-    # Write Chrome preferences to disable password save prompts
-    default_dir = os.path.join(session_dir, "Default")
-    os.makedirs(default_dir, exist_ok=True)
-    prefs = {
-        "credentials_enable_service": False,
-        "profile": {
-            "password_manager_enabled": False,
-        },
-    }
-    with open(os.path.join(default_dir, "Preferences"), "w") as f:
-        json.dump(prefs, f)
+    _prepare_preferences(Path(session_dir) / "Default" / "Preferences")
 
     args = [
         binary,
