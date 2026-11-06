@@ -69,19 +69,20 @@ def test_integration_boundaries_have_google_style_sections(function, sections) -
 
 
 def test_new_onepassword_test_classes_fully_annotate_public_methods() -> None:
-    """Keep the two #201 test classes' public methods fully annotated.
+    """Keep the three #201 test classes' public methods fully annotated.
 
     The repository's type-check command covers only ``src/``, so
     CONTRIBUTING.md's annotation rule is unenforced in tests. The check is
-    scoped to the two classes the #201 work added; legacy test methods
+    scoped to the three classes the #201 work added; legacy test methods
     elsewhere keep their shape.
     """
-    scope = {
-        "test_core_launcher.py": "TestProfilePreferences",
-        "test_onepassword_lifecycle.py": "TestAutomaticRegistration",
-    }
+    scope = (
+        ("test_core_launcher.py", "TestProfilePreferences"),
+        ("test_onepassword_lifecycle.py", "TestAutomaticRegistration"),
+        ("test_onepassword_cli.py", "TestCliSurface"),
+    )
     problems: list[str] = []
-    for filename, class_name in scope.items():
+    for filename, class_name in scope:
         source = (Path(__file__).parent / filename).read_text()
         tree = ast.parse(source, filename=filename)
         matches = [
@@ -126,6 +127,42 @@ def test_new_onepassword_test_classes_fully_annotate_public_methods() -> None:
         "(pytest.MonkeyPatch, Path, and the fixtures' return types) and use "
         "-> None. Unannotated: " + "; ".join(problems)
     )
+
+
+#: The 1Password lifecycle test modules, the long-lived one first so an
+#: oversized lifecycle module is named for extraction rather than reported as
+#: a missing new file.
+SIZE_MODULES = (
+    "test_onepassword_lifecycle.py",
+    "test_onepassword_cli.py",
+    "onepassword_lifecycle_fixtures.py",
+)
+SIZE_LIMIT = 800
+
+
+def test_onepassword_test_modules_stay_under_the_module_size_limit() -> None:
+    """Keep the 1Password lifecycle test modules within the written size limit.
+
+    Reads the actual files, the long-lived lifecycle module first. The #201
+    round-two review found it at 812 lines against CONTRIBUTING.md's ~800-line
+    limit (the same limit ``test_login_rules.py`` reads as 800).
+    """
+    tests = Path(__file__).parent
+    for name in SIZE_MODULES:
+        path = tests / name
+        assert path.is_file(), (
+            f"tests/{name} does not exist; the 1Password lifecycle tests are "
+            "organized as exactly these modules"
+        )
+        count = len(path.read_text(encoding="utf-8").splitlines())
+        assert count <= SIZE_LIMIT, (
+            f"tests/{name} is {count} lines, over the {SIZE_LIMIT}-line "
+            "module-size limit (CONTRIBUTING.md, Module Size): extract a "
+            "cohesive set of symbols into a new test module and migrate "
+            "the references to it, keeping every collected case exactly "
+            "once (do not re-export test classes; pytest would collect "
+            "them twice)"
+        )
 
 
 def test_the_guide_documents_the_automatic_registration_default() -> None:
