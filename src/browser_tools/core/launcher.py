@@ -99,7 +99,25 @@ def _platform_candidates() -> list[str]:
 
 
 def _prepare_preferences(path: Path) -> None:
-    """Disable Chrome password prompts without discarding profile state."""
+    """Disable Chrome password prompts without discarding profile state.
+
+    The existing document is validated, corrected in memory, and republished
+    by atomic replacement: ``path`` is only ever replaced whole, and a staging
+    file left behind by a failed write is removed.
+
+    Args:
+        path: The Chrome profile's ``Default/Preferences`` file. A missing file
+            is treated as an empty document; parent directories are created as
+            needed.
+
+    Raises:
+        RuntimeError: The existing document is not decodable JSON, is not a
+            JSON object, or its ``profile`` entry is not a JSON object. The
+            original file is left untouched.
+        OSError: Creating a parent directory, writing the staging file, or
+            atomically replacing ``path`` failed. The original file is left
+            untouched and the staging file is removed.
+    """
     try:
         with path.open(encoding="utf-8") as source:
             prefs = json.load(source)

@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from browser_tools import lifecycle, onepassword
+from browser_tools.core import launcher
 
 
 def test_onepassword_module_respects_the_written_line_limit() -> None:
@@ -46,6 +47,10 @@ def test_onepassword_module_respects_the_written_line_limit() -> None:
         (onepassword.provision, ("Args:", "Raises:")),
         (lifecycle._check_onepassword_eligibility, ("Args:", "Raises:")),
         (lifecycle._provision_onepassword, ("Args:", "Raises:")),
+        # The restored preference helper is this change's one vendored-launcher
+        # exception (#201), so its boundary documentation is enforced by the
+        # same scoped check rather than a whole-repo docstring sweep.
+        (launcher._prepare_preferences, ("Args:", "Raises:")),
     ],
 )
 def test_integration_boundaries_have_google_style_sections(function, sections) -> None:
