@@ -51,6 +51,12 @@ class OnePasswordProvisionError(Exception):
     refusal this module raises reads as if the operator had passed
     --1password. The automatic path surfaces ``reason`` with its own advice
     instead of editing the string.
+
+    Args:
+        reason: The operational failure and its recovery advice, stated
+            without file values. Stored unchanged as the ``reason`` attribute
+            for the automatic path, and followed by the explicit flag's
+            opt-out remedy in the string form.
     """
 
     def __init__(self, reason: str) -> None:
@@ -74,7 +80,15 @@ def source_manifest_path() -> Path:
 
 
 def _refuse(reason: str) -> OnePasswordProvisionError:
-    """Build the module's refusal; the constructor owns the flag's remedy."""
+    """Build the module's refusal; the constructor owns the flag's remedy.
+
+    Args:
+        reason: The operational failure and its recovery advice, stated
+            without file values.
+
+    Returns:
+        The refusal error; every caller raises it unchanged.
+    """
     return OnePasswordProvisionError(reason)
 
 

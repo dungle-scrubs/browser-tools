@@ -1064,11 +1064,6 @@ def _check_onepassword_eligibility(*, engine: str, profile: str | None) -> None:
         )
 
 
-#: The provisioner's refusals are written for the explicit flag; the
-#: automatic path states its own recovery at the lifecycle boundary below,
-#: from the typed reason, never by editing the provisioner's English.
-
-
 def _official_onepassword_source_present() -> bool:
     """Report whether the official source registration entry exists, unread.
 

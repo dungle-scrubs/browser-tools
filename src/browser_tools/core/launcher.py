@@ -108,6 +108,13 @@ def _reject_non_standard_json_constant(constant: str) -> NoReturn:
     JSON syntax and Chrome must never receive a document containing one. The
     raised ValueError becomes the caller's operational refusal; it names only
     the constant, never the file's other values.
+
+    Args:
+        constant: The decoded non-standard token, one of ``NaN``,
+            ``Infinity`` or ``-Infinity``.
+
+    Raises:
+        ValueError: Always, naming only the rejected constant.
     """
     raise ValueError(f"non-standard JSON constant {constant}")
 
