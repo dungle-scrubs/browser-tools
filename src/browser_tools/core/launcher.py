@@ -172,10 +172,14 @@ def _prepare_preferences(path: Path) -> None:
             temporary_path = Path(target.name)
             try:
                 json.dump(prefs, target, allow_nan=False)
-            except ValueError as exc:
+            except ValueError:
+                # The document parsed but holds a value with no standard JSON
+                # representation (for example a numeric overflow). The same
+                # operational refusal: the path only, never the parsed value
+                # or the serializer's text, and no cause chained below it.
                 raise RuntimeError(
-                    f"Chrome preferences cannot be written as standard JSON: {path} ({exc})"
-                ) from exc
+                    f"Chrome preferences cannot be written as standard JSON: {path}"
+                ) from None
             target.flush()
             os.fsync(target.fileno())
         os.replace(temporary_path, path)

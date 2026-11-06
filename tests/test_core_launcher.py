@@ -193,8 +193,9 @@ class TestProfilePreferences:
     ) -> None:
         """A value that parses but has no standard JSON representation
         (1e999 loads as infinity) fails the same operational way: no traceback
-        past the RuntimeError boundary, original bytes retained, no browser
-        spawn, and no staging file left behind.
+        past the RuntimeError boundary, no parsed non-finite value or serializer
+        text in the message and no chained cause, original bytes retained, no
+        browser spawn, and no staging file left behind.
         """
         path = tmp_path / "udd" / "Default" / "Preferences"
         path.parent.mkdir(parents=True)
@@ -207,7 +208,14 @@ class TestProfilePreferences:
 
         assert path.read_bytes() == contents
         assert "args" not in captured
-        assert "synthetic_overflow" not in str(error.value)
+        message = str(error.value)
+        assert "synthetic_overflow" not in message
+        # The parsed non-finite value and the serializer's exception text stay
+        # out of the operational message, and nothing chains below it.
+        assert "inf" not in message
+        assert "Out of range" not in message
+        assert error.value.__cause__ is None
+        assert error.value.__suppress_context__
         assert list(path.parent.iterdir()) == [path]
 
 
