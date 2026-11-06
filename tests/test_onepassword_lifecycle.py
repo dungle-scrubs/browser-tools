@@ -463,6 +463,105 @@ class TestAutomaticRegistration:
         assert manifest["allowed_origins"] == [STABLE]
         assert manifest["path"] == str(valid_installation)
 
+    def test_an_interrupted_validation_discards_the_new_directory_and_the_retry_registers(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        registry_path: str,
+        profiles_root: Path,
+        valid_installation: Path,
+        fake_browser_launch: dict[str, object],
+    ) -> None:
+        """Ctrl-C during the helper check must not turn the next launch plain.
+
+        The interruption propagates unchanged (the very same exception
+        object), the empty directory this launch created is gone, and the
+        retry still registers the profile automatically.
+        """
+        interrupt = KeyboardInterrupt()
+        real_validate = onepassword._validate_helper
+        state = {"interrupt": True}
+
+        def flaky_validate(helper_path: str) -> None:
+            if state["interrupt"]:
+                raise interrupt
+            real_validate(helper_path)
+
+        monkeypatch.setattr(onepassword, "_validate_helper", flaky_validate)
+
+        with pytest.raises(KeyboardInterrupt) as error:
+            lifecycle.launch(profile="work", registry_path=registry_path)
+
+        assert error.value is interrupt
+        assert not (profiles_root / "work").exists()
+        assert fake_browser_launch == {}
+
+        state["interrupt"] = False
+        lifecycle.launch(profile="work", registry_path=registry_path)
+
+        manifest = json.loads((profiles_root / "work" / HOSTS / DEST_NAME).read_text())
+        assert manifest["allowed_origins"] == [STABLE]
+        assert fake_browser_launch["user_data_dir"] == str(profiles_root / "work")
+
+    def test_a_live_holder_refusal_discards_the_new_directory_and_the_retry_registers(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        registry_path: str,
+        profiles_root: Path,
+        valid_installation: Path,
+        fake_browser_launch: dict[str, object],
+    ) -> None:
+        """A refusal before provisioning leaves no directory behind either.
+
+        The profile is still new on the retry, so once the holder is gone the
+        launch registers it instead of treating it as an existing profile.
+        """
+
+        def held(profile: str, *, registry_path: str | None = None) -> str | None:
+            return "other-01"
+
+        def free(profile: str, *, registry_path: str | None = None) -> str | None:
+            return None
+
+        monkeypatch.setattr(lifecycle, "find_profile_holder", held)
+
+        with pytest.raises(LifecycleError, match="already held by live instance 'other-01'"):
+            lifecycle.launch(profile="work", registry_path=registry_path)
+
+        assert not (profiles_root / "work").exists()
+        assert fake_browser_launch == {}
+
+        monkeypatch.setattr(lifecycle, "find_profile_holder", free)
+        lifecycle.launch(profile="work", registry_path=registry_path)
+
+        assert (profiles_root / "work" / HOSTS / DEST_NAME).is_file()
+        assert fake_browser_launch["user_data_dir"] == str(profiles_root / "work")
+
+    def test_an_interruption_never_deletes_data_the_launch_did_not_leave_empty(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        registry_path: str,
+        profiles_root: Path,
+        valid_installation: Path,
+        fake_browser_launch: dict[str, object],
+    ) -> None:
+        """Only empty directories are removed; anything inside is retained."""
+        sentinel = profiles_root / "work" / "Default" / "sentinel.txt"
+        interrupt = KeyboardInterrupt()
+
+        def interrupt_after_data_appears(user_data_dir: Path) -> None:
+            sentinel.parent.mkdir(parents=True)
+            sentinel.write_bytes(b"synthetic sentinel")
+            raise interrupt
+
+        monkeypatch.setattr(lifecycle, "clean_stale_singleton_lock", interrupt_after_data_appears)
+
+        with pytest.raises(KeyboardInterrupt) as error:
+            lifecycle.launch(profile="work", registry_path=registry_path)
+
+        assert error.value is interrupt
+        assert sentinel.read_bytes() == b"synthetic sentinel"
+        assert fake_browser_launch == {}
+
     def test_failed_publication_retry_can_register_while_the_profile_is_empty(
         self,
         monkeypatch: pytest.MonkeyPatch,

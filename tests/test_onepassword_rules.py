@@ -55,6 +55,7 @@ def test_onepassword_module_respects_the_written_line_limit() -> None:
         # same scoped check rather than a whole-repo docstring sweep.
         (launcher._prepare_preferences, ("Args:", "Raises:")),
         (launcher._reject_non_standard_json_constant, ("Args:", "Raises:")),
+        (launcher._parse_finite_json_float, ("Args:", "Returns:", "Raises:")),
     ],
 )
 def test_integration_boundaries_have_google_style_sections(function, sections) -> None:

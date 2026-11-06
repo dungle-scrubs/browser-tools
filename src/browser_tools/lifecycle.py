@@ -1263,23 +1263,34 @@ def launch(
                 and not user_data_dir.exists()
                 and _official_onepassword_source_present()
             )
-            user_data_dir.mkdir(parents=True, exist_ok=True)
-            # Clean stale singleton locks (dead holder) BEFORE the exclusivity check
-            # so a crashed previous run does not wedge the profile forever.
-            clean_stale_singleton_lock(user_data_dir)
-            holder = find_profile_holder(profile, registry_path=registry_path)
-            if holder is not None:
-                raise LifecycleError(
-                    f"Profile '{profile}' is already held by live instance '{holder}'. "
-                    f"Stop it first, or launch a different profile."
-                )
-            # --1password (#201): after the lock and the holder refusal, before
-            # Chrome launches. A provisioning failure therefore never leaves a
-            # browser running, and a held profile is never provisioned. The
-            # automatic path reaches the same provisioner under the same rules;
-            # a present but invalid official source fails here, closed.
-            if onepassword or automatic_registration:
-                _provision_onepassword(user_data_dir, automatic=automatic_registration)
+            try:
+                user_data_dir.mkdir(parents=True, exist_ok=True)
+                # Clean stale singleton locks (dead holder) BEFORE the exclusivity check
+                # so a crashed previous run does not wedge the profile forever.
+                clean_stale_singleton_lock(user_data_dir)
+                holder = find_profile_holder(profile, registry_path=registry_path)
+                if holder is not None:
+                    raise LifecycleError(
+                        f"Profile '{profile}' is already held by live instance '{holder}'. "
+                        f"Stop it first, or launch a different profile."
+                    )
+                # --1password (#201): after the lock and the holder refusal, before
+                # Chrome launches. A provisioning failure therefore never leaves a
+                # browser running, and a held profile is never provisioned. The
+                # automatic path reaches the same provisioner under the same rules;
+                # a present but invalid official source fails here, closed.
+                if onepassword or automatic_registration:
+                    _provision_onepassword(user_data_dir, automatic=automatic_registration)
+            except BaseException:
+                # Any abort of an automatic first launch -- a refusal, a failure
+                # or an interruption such as Ctrl-C -- must not leave the empty
+                # directory this launch created, or the next launch would see an
+                # existing profile and silently skip the automatic registration.
+                # Only empty directories go (repeating the provisioner's own
+                # cleanup is harmless); the abort propagates unchanged.
+                if automatic_registration:
+                    _discard_empty_automatic_initialization(user_data_dir)
+                raise
         elif engine == "camoufox":
             base = ephemeral_root()
             base.mkdir(parents=True, exist_ok=True)

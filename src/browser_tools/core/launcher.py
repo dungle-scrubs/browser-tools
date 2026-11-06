@@ -20,7 +20,7 @@
 # verify that the port it re-attaches to still serves its own browser.
 # Existing profile preferences are preserved while password-save prompts
 # remain disabled; a preferences document that is not standard JSON (including
-# NaN/Infinity constants and values with no JSON representation) is refused
+# NaN/Infinity constants and numeric overflow) is refused
 # before any browser spawn.
 # Intra-package imports are rewritten to
 # browser_tools.core. Otherwise unchanged from chrome-agent v0.5.7. See RFC-01,
@@ -36,6 +36,7 @@ No Playwright dependency -- uses subprocess directly.
 import asyncio
 import json
 import logging
+import math
 import os
 import shutil
 import subprocess
@@ -119,6 +120,30 @@ def _reject_non_standard_json_constant(constant: str) -> NoReturn:
     raise ValueError(f"non-standard JSON constant {constant}")
 
 
+def _parse_finite_json_float(token: str) -> float:
+    """Decode a JSON number with a fraction or exponent, refusing overflow.
+
+    Python's decoder turns a token such as ``1e999`` into ``inf``, which the
+    standard-JSON serializer rejects only after the two password settings
+    have overwritten any such value. Refusing it at decode time keeps the
+    refusal ahead of every preference mutation. The raised ValueError names
+    no value; the caller reports the path only.
+
+    Args:
+        token: The JSON number text, for example ``0.5`` or ``1e999``.
+
+    Returns:
+        The decoded finite float.
+
+    Raises:
+        ValueError: The token decodes to a non-finite float.
+    """
+    value = float(token)
+    if not math.isfinite(value):
+        raise ValueError("JSON number out of range")
+    return value
+
+
 def _prepare_preferences(path: Path) -> None:
     """Disable Chrome password prompts without discarding profile state.
 
@@ -135,8 +160,9 @@ def _prepare_preferences(path: Path) -> None:
         RuntimeError: The existing document is not decodable JSON, is not a
             JSON object, or its ``profile`` entry is not a JSON object.
             Also raised when the document contains a non-standard JSON
-            constant (NaN, Infinity, -Infinity) or a value with no standard
-            JSON representation (for example a numeric overflow). The
+            constant (NaN, Infinity, -Infinity) or a numeric overflow, both
+            refused while decoding and before any setting changes, or a
+            value the serializer cannot write as standard JSON. The
             original file is left untouched.
         OSError: Creating a parent directory, writing the staging file, or
             atomically replacing ``path`` failed. The original file is left
@@ -144,7 +170,11 @@ def _prepare_preferences(path: Path) -> None:
     """
     try:
         with path.open(encoding="utf-8") as source:
-            prefs = json.load(source, parse_constant=_reject_non_standard_json_constant)
+            prefs = json.load(
+                source,
+                parse_constant=_reject_non_standard_json_constant,
+                parse_float=_parse_finite_json_float,
+            )
     except FileNotFoundError:
         prefs = {}
     except ValueError:
@@ -173,8 +203,8 @@ def _prepare_preferences(path: Path) -> None:
             try:
                 json.dump(prefs, target, allow_nan=False)
             except ValueError:
-                # The document parsed but holds a value with no standard JSON
-                # representation (for example a numeric overflow). The same
+                # Defensive: decoding already refuses non-finite numbers, so
+                # this guards the serializer boundary itself. The same
                 # operational refusal: the path only, never the parsed value
                 # or the serializer's text, and no cause chained below it.
                 raise RuntimeError(
