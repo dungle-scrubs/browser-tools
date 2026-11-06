@@ -1059,8 +1059,7 @@ def _check_onepassword_eligibility(*, engine: str, profile: str | None) -> None:
         )
     if sys.platform != "darwin":
         raise LifecycleError(
-            "--1password is supported on macOS only. Launch without it on this "
-            "platform."
+            "--1password is supported on macOS only. Launch without it on this platform."
         )
 
 
