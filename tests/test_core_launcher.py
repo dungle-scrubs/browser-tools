@@ -136,6 +136,11 @@ class TestProfilePreferences:
             b'null',
             b'{"profile": ["private_synthetic_marker"]}',
             b'\xffprivate_synthetic_marker',
+            # Outside JSON syntax: the default Python decoder accepts them, so
+            # they must be rejected explicitly before Chrome ever sees them.
+            b'{"private_synthetic_marker": NaN}',
+            b'{"private_synthetic_marker": Infinity}',
+            b'{"private_synthetic_marker": -Infinity}',
         ],
     )
     def test_invalid_preferences_abort_before_spawn_and_remain_intact(
@@ -157,20 +162,52 @@ class TestProfilePreferences:
     def test_failed_atomic_replace_preserves_existing_preferences(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        path = tmp_path / "Default" / "Preferences"
+        """A failed atomic publication leaves the original document intact.
+
+        Proven through the public launch seam: the same Preferences file the
+        launch would publish is seeded, the atomic replacement fails, and the
+        original bytes, the absent browser spawn, and the absent staging file
+        are all asserted. Calling the private helper would prove nothing about
+        a launch.
+        """
+        path = tmp_path / "udd" / "Default" / "Preferences"
         path.parent.mkdir(parents=True)
         contents = b'{"homepage": "https://example.test/"}'
         path.write_bytes(contents)
 
-        def fail_replace(source, target):
+        def fail_replace(source: object, target: object) -> None:
             raise OSError("synthetic atomic replacement failure")
 
         monkeypatch.setattr(launcher.os, "replace", fail_replace)
+        captured: dict[str, object] = {}
 
         with pytest.raises(OSError, match="synthetic atomic replacement failure"):
-            launcher._prepare_preferences(path)
+            self._launch(monkeypatch, tmp_path, captured)
 
         assert path.read_bytes() == contents
+        assert "args" not in captured
+        assert list(path.parent.iterdir()) == [path]
+
+    def test_unrepresentable_numeric_overflow_aborts_before_spawn_and_leaves_no_staging(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A value that parses but has no standard JSON representation
+        (1e999 loads as infinity) fails the same operational way: no traceback
+        past the RuntimeError boundary, original bytes retained, no browser
+        spawn, and no staging file left behind.
+        """
+        path = tmp_path / "udd" / "Default" / "Preferences"
+        path.parent.mkdir(parents=True)
+        contents = b'{"homepage": "https://example.test/", "synthetic_overflow": 1e999}'
+        path.write_bytes(contents)
+        captured: dict[str, object] = {}
+
+        with pytest.raises(RuntimeError, match="standard JSON") as error:
+            self._launch(monkeypatch, tmp_path, captured)
+
+        assert path.read_bytes() == contents
+        assert "args" not in captured
+        assert "synthetic_overflow" not in str(error.value)
         assert list(path.parent.iterdir()) == [path]
 
 

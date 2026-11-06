@@ -19,7 +19,9 @@
 # and the supervisor is told the browser's user-data-dir (#176) so it can
 # verify that the port it re-attaches to still serves its own browser.
 # Existing profile preferences are preserved while password-save prompts
-# remain disabled.
+# remain disabled; a preferences document that is not standard JSON (including
+# NaN/Infinity constants and values with no JSON representation) is refused
+# before any browser spawn.
 # Intra-package imports are rewritten to
 # browser_tools.core. Otherwise unchanged from chrome-agent v0.5.7. See RFC-01,
 # section "Vendoring rules".
@@ -40,6 +42,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from typing import NoReturn
 from urllib.parse import urlsplit
 
 from .connection import check_cdp_port_async
@@ -98,6 +101,17 @@ def _platform_candidates() -> list[str]:
     return []
 
 
+def _reject_non_standard_json_constant(constant: str) -> NoReturn:
+    """Refuse a non-standard JSON constant (NaN, Infinity, -Infinity).
+
+    Python's default JSON decoder accepts these tokens, but they are outside
+    JSON syntax and Chrome must never receive a document containing one. The
+    raised ValueError becomes the caller's operational refusal; it names only
+    the constant, never the file's other values.
+    """
+    raise ValueError(f"non-standard JSON constant {constant}")
+
+
 def _prepare_preferences(path: Path) -> None:
     """Disable Chrome password prompts without discarding profile state.
 
@@ -112,7 +126,10 @@ def _prepare_preferences(path: Path) -> None:
 
     Raises:
         RuntimeError: The existing document is not decodable JSON, is not a
-            JSON object, or its ``profile`` entry is not a JSON object. The
+            JSON object, or its ``profile`` entry is not a JSON object.
+            Also raised when the document contains a non-standard JSON
+            constant (NaN, Infinity, -Infinity) or a value with no standard
+            JSON representation (for example a numeric overflow). The
             original file is left untouched.
         OSError: Creating a parent directory, writing the staging file, or
             atomically replacing ``path`` failed. The original file is left
@@ -120,10 +137,14 @@ def _prepare_preferences(path: Path) -> None:
     """
     try:
         with path.open(encoding="utf-8") as source:
-            prefs = json.load(source)
+            prefs = json.load(source, parse_constant=_reject_non_standard_json_constant)
     except FileNotFoundError:
         prefs = {}
-    except (json.JSONDecodeError, UnicodeDecodeError):
+    except ValueError:
+        # JSONDecodeError and UnicodeDecodeError are ValueError subclasses,
+        # and the non-standard-constant rejection raises ValueError: every
+        # malformed input becomes the same operational refusal, with the
+        # file's values kept out of the message.
         raise RuntimeError(f"Chrome preferences are invalid: {path}") from None
 
     if not isinstance(prefs, dict):
@@ -142,7 +163,12 @@ def _prepare_preferences(path: Path) -> None:
             delete=False,
         ) as target:
             temporary_path = Path(target.name)
-            json.dump(prefs, target)
+            try:
+                json.dump(prefs, target, allow_nan=False)
+            except ValueError as exc:
+                raise RuntimeError(
+                    f"Chrome preferences cannot be written as standard JSON: {path} ({exc})"
+                ) from exc
             target.flush()
             os.fsync(target.fileno())
         os.replace(temporary_path, path)
