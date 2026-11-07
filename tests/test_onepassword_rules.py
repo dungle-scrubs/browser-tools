@@ -105,6 +105,47 @@ def test_integration_boundaries_have_google_style_sections(function, sections) -
         )
 
 
+_SETUP_LAYERING_SCRIPT = (
+    "import sys; import browser_tools.onepassword_setup as setup; "
+    "assert 'browser_tools.lifecycle' not in sys.modules, ("
+    "'onepassword_setup imports the lifecycle layer above it; own the error "
+    "contract in the setup module and translate it at the lifecycle "
+    "boundary'); "
+    "assert issubclass(setup.SessionSetupError, RuntimeError), ("
+    "'SessionSetupError must stay a RuntimeError subtype so the lifecycle "
+    "launch boundary translates it to LifecycleError')"
+)
+
+
+def test_the_setup_module_owns_its_error_below_the_lifecycle_layer() -> None:
+    """The setup module never imports the lifecycle layer above it.
+
+    CONTRIBUTING.md's layering rule says there are no circular imports.
+    ``lifecycle`` may import ``onepassword_setup`` lazily at its adapter
+    seams; the reverse edge - the setup module importing
+    ``lifecycle.LifecycleError`` to subclass it - closed the cycle (round-4
+    Quality hard finding at ``4484568``). The check imports the setup
+    module in a fresh interpreter and refuses any ``lifecycle`` module in
+    its loaded set, so a re-introduced cycle fails however deeply it hides
+    (a lazy import inside the module would load it the same way only later,
+    which is why the guard is scoped to this one module's import surface
+    rather than a whole-repo cycle scanner). The setup-owned error must
+    stay a ``RuntimeError`` subtype: the lifecycle launch boundary
+    translates that shape to ``LifecycleError`` and the CLI's exit 1.
+    """
+    result = subprocess.run(
+        [sys.executable, "-c", _SETUP_LAYERING_SCRIPT],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, (
+        "onepassword_setup broke the layering contract (CONTRIBUTING.md: no "
+        "circular imports; the error is owned by the setup module and "
+        "translated at the lifecycle boundary).\n" + result.stderr
+    )
+
+
 def test_new_onepassword_test_classes_fully_annotate_public_methods() -> None:
     """Keep the three #201 test classes' public methods fully annotated.
 
