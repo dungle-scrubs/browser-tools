@@ -30,6 +30,9 @@
 # initialization marker held under a kernel flock stops a concurrent orphan
 # sweep from reaping the directory, and a callback or preference failure
 # before spawn removes only a throwaway directory this call allocated.
+# The marker protocol itself lives in browser_tools.session_initialization
+# (the repository's module-size rule moved it out of this adapted module);
+# this launcher is a thin caller of it.
 # Intra-package imports are rewritten to
 # browser_tools.core. Otherwise unchanged from chrome-agent v0.5.7. See RFC-01,
 # section "Vendoring rules".
@@ -42,14 +45,11 @@ No Playwright dependency -- uses subprocess directly.
 """
 
 import asyncio
-import errno
-import fcntl
 import json
 import logging
 import math
 import os
 import shutil
-import stat
 import subprocess
 import sys
 import tempfile
@@ -58,6 +58,7 @@ from pathlib import Path
 from typing import NoReturn
 from urllib.parse import urlsplit
 
+from browser_tools import session_initialization
 from .connection import check_cdp_port_async
 from .registry import REGISTRY_PATH, InstanceInfo, allocate_port, register, cleanup
 from .registry import _load_registry, _resolve_path
@@ -66,107 +67,6 @@ from .utils import process_is_ours, process_is_running, process_start_time
 logger = logging.getLogger(__name__)
 
 _SESSION_ROOT = "/tmp/chrome-agent"
-
-#: Name of the empty marker a launch holds while an initializer prepares a
-#: freshly allocated unbound session directory (#201). The marker is an empty
-#: regular file; ownership is the kernel flock on it, never its content.
-_INITIALIZING_MARKER = ".bt-initializing"
-
-
-def _publish_initialization_marker(session_dir: str) -> int | None:
-    """Create the session's initialization marker and hold its kernel flock.
-
-    The marker is staged under a private name, locked, and only then linked
-    into place, so a concurrent sweep that finds the published name always
-    sees an already-held lock rather than a lock about to be taken. An empty
-    regular file, mode 0600, with no content ever written or read.
-
-    Args:
-        session_dir: The freshly allocated session directory.
-
-    Returns:
-        The held marker's file descriptor, to pass to
-        :func:`_release_initialization_marker`, or None when the marker could
-        not be published. None degrades to today's unprotected window rather
-        than failing the launch.
-    """
-    marker = os.path.join(session_dir, _INITIALIZING_MARKER)
-    staging = os.path.join(session_dir, f"{_INITIALIZING_MARKER}-{os.getpid()}.tmp")
-    try:
-        fd = os.open(staging, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-    except OSError:
-        return None
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        os.link(staging, marker)
-    except OSError:
-        os.close(fd)
-        return None
-    finally:
-        try:
-            os.unlink(staging)
-        except OSError:
-            pass
-    return fd
-
-
-def _release_initialization_marker(session_dir: str, fd: int) -> None:
-    """Remove the session's initialization marker and drop its lock.
-
-    The name is removed before the lock is dropped, so a sweep that already
-    holds an open descriptor sees the lock held until this returns, and a
-    sweep arriving later finds no marker at all. Best-effort: a failure here
-    never fails the launch, and the kernel releases the flock when the
-    process exits regardless.
-
-    Args:
-        session_dir: The session directory the marker was published in.
-        fd: The descriptor :func:`_publish_initialization_marker` returned.
-    """
-    try:
-        os.unlink(os.path.join(session_dir, _INITIALIZING_MARKER))
-    except OSError:
-        pass
-    try:
-        fcntl.flock(fd, fcntl.LOCK_UN)
-    except OSError:
-        pass
-    os.close(fd)
-
-
-def _initialization_marker_holds(session_dir: str) -> bool:
-    """Report whether an initialization marker holds this session directory.
-
-    A marker that cannot be opened at all, or that is not an empty regular
-    file, is unverifiable and reported as holding the directory: the sweep
-    never follows a symlinked marker or blocks on a FIFO, and it never deletes
-    a directory whose initializer it cannot vouch is dead. A marker whose lock
-    can be taken was left by an initializer the kernel already reaped, so the
-    ordinary orphan sweep may proceed.
-
-    Args:
-        session_dir: An untracked candidate directory under the session root.
-
-    Returns:
-        True when the directory must be kept (held or unverifiable), False
-        when no marker exists or the marker's lock is free.
-    """
-    marker = os.path.join(session_dir, _INITIALIZING_MARKER)
-    try:
-        fd = os.open(marker, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-    except OSError as exc:
-        return exc.errno != errno.ENOENT
-    try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            return True
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            return True
-        fcntl.flock(fd, fcntl.LOCK_UN)
-        return False
-    finally:
-        os.close(fd)
 
 
 class BrowserNotFoundError(Exception):
@@ -408,7 +308,7 @@ async def launch_browser(
     # failure in the initializer or preference preparation removes only a
     # throwaway directory this call allocated (never a supplied one).
     marker_fd = (
-        _publish_initialization_marker(session_dir)
+        session_initialization.publish_initialization_marker(session_dir)
         if initialize_directory is not None and user_data_dir is None
         else None
     )
@@ -431,7 +331,7 @@ async def launch_browser(
         raise
     finally:
         if marker_fd is not None:
-            _release_initialization_marker(session_dir, marker_fd)
+            session_initialization.release_initialization_marker(session_dir, marker_fd)
 
     args = [
         binary,
@@ -699,7 +599,7 @@ def cleanup_sessions(registry_path: str | None = None) -> list[str]:
             # verification, publication) must not be swept away by another
             # registry's startup sweep. A marker the kernel has already
             # released (a dead initializer) leaves it sweepable as before.
-            if _initialization_marker_holds(session_dir):
+            if session_initialization.initialization_marker_holds(session_dir):
                 continue
 
             lock_file = os.path.join(session_dir, "SingletonLock")

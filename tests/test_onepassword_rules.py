@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from browser_tools import lifecycle, onepassword, onepassword_setup
+from browser_tools import lifecycle, onepassword, onepassword_setup, session_initialization
 from browser_tools.core import launcher
 
 
@@ -29,15 +29,16 @@ def test_onepassword_module_respects_the_written_line_limit() -> None:
             "100",
             onepassword.__file__,
             onepassword_setup.__file__,
+            session_initialization.__file__,
         ],
         capture_output=True,
         text=True,
         check=False,
     )
     assert result.returncode == 0, (
-        "onepassword.py or onepassword_setup.py breaks CONTRIBUTING.md's "
-        "100-character line limit. Run ruff format and split any remaining "
-        "long literals.\n" + result.stdout + result.stderr
+        "onepassword.py, onepassword_setup.py or session_initialization.py "
+        "breaks CONTRIBUTING.md's 100-character line limit. Run ruff format "
+        "and split any remaining long literals.\n" + result.stdout + result.stderr
     )
 
 
@@ -56,14 +57,14 @@ def test_onepassword_module_respects_the_written_line_limit() -> None:
         # The restored preference helper is this change's one vendored-launcher
         # exception (#201), so its boundary documentation is enforced by the
         # same scoped check rather than a whole-repo docstring sweep. The
-        # temporary-setup module and the launcher's initializer-marker helpers
-        # follow the same rule for the same reason.
+        # temporary-setup module and the extracted session-initialization
+        # marker protocol follow the same rule for the same reason.
         (launcher._prepare_preferences, ("Args:", "Raises:")),
         (launcher._reject_non_standard_json_constant, ("Args:", "Raises:")),
         (launcher._parse_finite_json_float, ("Args:", "Returns:", "Raises:")),
-        (launcher._publish_initialization_marker, ("Args:", "Returns:")),
-        (launcher._release_initialization_marker, ("Args:",)),
-        (launcher._initialization_marker_holds, ("Args:", "Returns:")),
+        (session_initialization.publish_initialization_marker, ("Args:", "Returns:")),
+        (session_initialization.release_initialization_marker, ("Args:",)),
+        (session_initialization.initialization_marker_holds, ("Args:", "Returns:")),
         (onepassword_setup.stable_extension_id, ("Returns:", "Raises:")),
         (onepassword_setup.pin_document, ("Returns:",)),
         (onepassword_setup.seed_pin, ("Args:", "Raises:")),
@@ -155,6 +156,42 @@ SIZE_MODULES = (
     "test_core_initializer.py",
 )
 SIZE_LIMIT = 800
+
+
+#: The #201 source modules the scoped size limit covers, the long-lived
+#: adapted launcher first so an oversized launcher is named for extraction
+#: rather than as a missing new module.
+SOURCE_SIZE_MODULES = (
+    "core/launcher.py",
+    "onepassword_setup.py",
+    "session_initialization.py",
+)
+
+
+def test_onepassword_source_modules_stay_under_the_module_size_limit() -> None:
+    """Keep the #201 source modules within CONTRIBUTING.md's written limit.
+
+    The adapted vendored launcher grew to 823 lines in 683749f, repeating the
+    module-size mistake class of the round-two 812-line lifecycle tests with
+    nothing enforcing it for the source modules. Reads the actual files, the
+    long-lived launcher first.
+    """
+    package = Path(onepassword.__file__).parent
+    for relative in SOURCE_SIZE_MODULES:
+        path = package / relative
+        assert path.is_file(), (
+            f"src/browser_tools/{relative} does not exist; the #201 setup "
+            "source is organized as exactly these modules"
+        )
+        count = len(path.read_text(encoding="utf-8").splitlines())
+        assert count <= SIZE_LIMIT, (
+            f"src/browser_tools/{relative} is {count} lines, over the "
+            f"{SIZE_LIMIT}-line module-size limit (CONTRIBUTING.md, Module "
+            "Size): extract a cohesive set of symbols into a new module and "
+            "migrate every caller and test reference to it, without a "
+            "re-export from the old module (a compatibility path would let "
+            "the size grow back unnoticed)"
+        )
 
 
 def test_onepassword_test_modules_stay_under_the_module_size_limit() -> None:

@@ -20,6 +20,7 @@ from pathlib import Path
 
 import pytest
 
+from browser_tools import session_initialization
 from browser_tools.core import launcher
 
 
@@ -127,7 +128,7 @@ class TestInitializerOrdering:
             # Freshly allocated: no Chrome state exists yet, and the only
             # permitted occupant is the initialization marker itself.
             entries = {entry.name for entry in user_data_dir.iterdir()}
-            assert entries <= {launcher._INITIALIZING_MARKER}
+            assert entries <= {session_initialization.INITIALIZING_MARKER}
 
         registry = str(tmp_path / "registry.json")
         info = _launch(registry, 9482, initialize_directory=record)
@@ -310,13 +311,13 @@ class TestInitializationMarker:
         session = sessions_root / "session-held"
         session.mkdir()
         monkeypatch.setattr(launcher, "_SESSION_ROOT", str(sessions_root))
-        marker_fd = launcher._publish_initialization_marker(str(session))
+        marker_fd = session_initialization.publish_initialization_marker(str(session))
         assert marker_fd is not None
         try:
             launcher.cleanup_sessions(registry_path=str(tmp_path / "registry.json"))
             assert session.is_dir()
         finally:
-            launcher._release_initialization_marker(str(session), marker_fd)
+            session_initialization.release_initialization_marker(str(session), marker_fd)
 
         launcher.cleanup_sessions(registry_path=str(tmp_path / "registry.json"))
         assert not session.exists()
@@ -330,7 +331,7 @@ class TestInitializationMarker:
         session.mkdir()
         # A dead initializer's leftover: published, then the process died and
         # the kernel released the flock.
-        (session / launcher._INITIALIZING_MARKER).write_text("")
+        (session / session_initialization.INITIALIZING_MARKER).write_text("")
         monkeypatch.setattr(launcher, "_SESSION_ROOT", str(sessions_root))
 
         removed = launcher.cleanup_sessions(registry_path=str(tmp_path / "registry.json"))
@@ -345,7 +346,7 @@ class TestInitializationMarker:
         sessions_root.mkdir(parents=True)
         session = sessions_root / "session-fifo"
         session.mkdir()
-        os.mkfifo(session / launcher._INITIALIZING_MARKER)
+        os.mkfifo(session / session_initialization.INITIALIZING_MARKER)
         monkeypatch.setattr(launcher, "_SESSION_ROOT", str(sessions_root))
 
         launcher.cleanup_sessions(registry_path=str(tmp_path / "registry.json"))
@@ -362,7 +363,7 @@ class TestInitializationMarker:
         session.mkdir()
         target = tmp_path / "marker-target"
         target.write_text("")
-        (session / launcher._INITIALIZING_MARKER).symlink_to(target)
+        (session / session_initialization.INITIALIZING_MARKER).symlink_to(target)
         monkeypatch.setattr(launcher, "_SESSION_ROOT", str(sessions_root))
 
         launcher.cleanup_sessions(registry_path=str(tmp_path / "registry.json"))
@@ -380,14 +381,14 @@ class TestInitializationMarker:
             registry, 9490, initialize_directory=lambda d: None, user_data_dir=str(supplied)
         )
         assert Path(info.user_data_dir) == supplied
-        assert not (supplied / launcher._INITIALIZING_MARKER).exists()
+        assert not (supplied / session_initialization.INITIALIZING_MARKER).exists()
 
     def test_a_successful_launch_leaves_no_marker_behind(
         self, monkeypatch: pytest.MonkeyPatch, stubbed_boundaries: dict[str, object], tmp_path: Path
     ) -> None:
         registry = str(tmp_path / "registry.json")
         info = _launch(registry, 9491, initialize_directory=lambda d: None)
-        assert not (Path(info.user_data_dir) / launcher._INITIALIZING_MARKER).exists()
+        assert not (Path(info.user_data_dir) / session_initialization.INITIALIZING_MARKER).exists()
 
 
 class TestGenericBoundary:
