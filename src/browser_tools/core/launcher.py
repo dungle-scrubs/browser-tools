@@ -28,9 +28,13 @@
 # nothing about 1Password; the lifecycle layer supplies the callback. While a
 # callback prepares a freshly allocated unbound session, an empty
 # initialization marker held under a kernel flock stops a concurrent orphan
-# sweep from reaping the directory, and a failure in marker publication, the
-# callback, or preference preparation before spawn aborts the launch and
-# removes only a throwaway directory this call allocated.
+# sweep from reaping the directory; the same lease spans browser startup and
+# successful registration and is released in one outer finally on every
+# outcome, because between the marker's release and registration no registry
+# tracks the session and no Chrome singleton lock exists yet. A failure in
+# marker publication, the callback, or preference preparation before spawn
+# aborts the launch and removes only a throwaway directory this call
+# allocated; once a spawn may have begun, no directory deletion happens.
 # The marker protocol itself lives in browser_tools.session_initialization
 # (the repository's module-size rule moved it out of this adapted module);
 # this launcher is a thin caller of it.
@@ -258,7 +262,10 @@ async def launch_browser(
     (adaptation, #201), when given, runs against the session directory after
     it is allocated and before preferences are prepared or Chrome is
     spawned; the launcher itself stays generic and knows no 1Password
-    policy.
+    policy. While the callback prepares a fresh session, an initialization
+    marker is held until startup has completed and the instance is
+    registered (released on every outcome), so a concurrent orphan sweep
+    cannot reap the directory.
 
     Returns InstanceInfo with name, port, pid, browser_version, user_data_dir.
 
@@ -312,182 +319,200 @@ async def launch_browser(
     # publication, the initializer, or preference preparation) removes only a
     # throwaway directory this call allocated - never a supplied one - while
     # the original error propagates and the marker release cannot mask it.
+    # The lease is NOT dropped here: the marker stays held through the spawn,
+    # CDP readiness and registration below (an unregistered session with no
+    # Chrome singleton lock yet is exactly what a concurrent sweep reaps),
+    # and one outer finally releases it on every outcome after that.
     marker_fd: int | None = None
     try:
-        if initialize_directory is not None and user_data_dir is None:
-            marker_fd = session_initialization.publish_initialization_marker(session_dir)
-        if initialize_directory is not None:
-            initialize_directory(Path(session_dir))
-        _prepare_preferences(Path(session_dir) / "Default" / "Preferences")
-    except BaseException:
-        if user_data_dir is None:
-            try:
-                shutil.rmtree(session_dir, ignore_errors=True)
-            except OSError:
-                # Even a cleanup that itself fails must not mask the original
-                # error; the retained path is reported instead.
-                pass
-            if os.path.isdir(session_dir):
-                logger.warning(
-                    "Retained session directory %s after a failed initialization", session_dir
+        try:
+            if initialize_directory is not None and user_data_dir is None:
+                marker_fd = session_initialization.publish_initialization_marker(session_dir)
+            if initialize_directory is not None:
+                initialize_directory(Path(session_dir))
+            _prepare_preferences(Path(session_dir) / "Default" / "Preferences")
+        except BaseException:
+            if user_data_dir is None:
+                try:
+                    shutil.rmtree(session_dir, ignore_errors=True)
+                except OSError:
+                    # Even a cleanup that itself fails must not mask the original
+                    # error; the retained path is reported instead.
+                    pass
+                if os.path.isdir(session_dir):
+                    logger.warning(
+                        "Retained session directory %s after a failed initialization", session_dir
+                    )
+            raise
+
+        args = [
+            binary,
+            f"--remote-debugging-port={port}",
+            f"--user-data-dir={session_dir}",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--password-store=basic",
+        ]
+        startup_urls: list[str] = []
+        if headless:
+            args.append("--headless=new")
+            if extra_args:
+                # Headless Chrome opens startup URL arguments itself, natively.
+                args.extend(extra_args)
+        else:
+            # A headed launch starts windowless (--no-startup-window) and opens
+            # its first window over CDP. --no-startup-window also suppresses every
+            # startup URL Chrome would have opened from the command line, so a URL
+            # passed after '--' (#179) never appeared: the browser came up on
+            # about:blank and the caller's page was gone. The URL arguments are
+            # therefore pulled out of Chrome's argv and opened by
+            # _open_first_window instead, which keeps the no-focus-steal property
+            # AND opens the caller's page. Non-argument flags pass through
+            # verbatim, as before.
+            args.append("--no-startup-window")
+            if extra_args:
+                chrome_flags, startup_urls = _partition_startup_urls(extra_args)
+                args.extend(chrome_flags)
+
+        # Apply fingerprint via Chrome command-line flags (persistent)
+        env = os.environ.copy()
+        fp_profile = None
+        if fingerprint is not None:
+            from .fingerprint import load_fingerprint
+            fp_profile = load_fingerprint(path=fingerprint)
+            args.append(f"--user-agent={fp_profile.user_agent}")
+            args.append(
+                f"--window-size={fp_profile.viewport['width']},{fp_profile.viewport['height']}"
+            )
+            args.append(f"--lang={fp_profile.locale}")
+            env["TZ"] = fp_profile.timezone
+
+        # Phase 4: Launch subprocess. start_new_session detaches the browser from
+        # the launching terminal's controlling tty (#177): without it Chrome kept
+        # the terminal as its controlling terminal even after reparenting to
+        # launchd, and closing that terminal pane killed the browser. The same
+        # detach the supervisor gets at spawn time.
+        process = subprocess.Popen(
+            args,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            env=env,
+            start_new_session=True,
+        )
+        # Capture the process's start-time identity token immediately, while the
+        # PID is guaranteed to still be this process (wrapper installs can exit
+        # fast). (pid, pid_start) lets liveness checks detect PID recycling.
+        pid_start = process_start_time(pid=process.pid)
+        logger.info("Launched Chrome PID %d on port %d", process.pid, port)
+
+        # Phase 5: Wait for CDP port to be ready
+        deadline = asyncio.get_event_loop().time() + 30.0
+        status = None
+        while asyncio.get_event_loop().time() < deadline:
+            # Check if process died
+            if process.poll() is not None:
+                stderr_output = (
+                    process.stderr.read().decode(errors="replace") if process.stderr else ""
                 )
-        raise
+                raise RuntimeError(
+                    f"Chrome exited immediately with code {process.returncode}. "
+                    f"stderr: {stderr_output[:500]}"
+                )
+            status = await check_cdp_port_async(port=port)
+            if status.listening:
+                break
+            await asyncio.sleep(0.2)
+        else:
+            # Timeout -- kill the process and fail
+            process.kill()
+            raise TimeoutError("Browser did not start within 30 seconds")
+
+        if not headless:
+            try:
+                await _open_first_window(
+                    port=port,
+                    url=startup_urls[0] if startup_urls else "about:blank",
+                    extra_urls=startup_urls[1:],
+                )
+            except BaseException as exc:
+                # Nothing is registered yet, so a browser left running here would be
+                # an orphan no verb can see or stop. BaseException, not Exception: a
+                # launch cancelled while this awaits (Ctrl-C, a cancelled task)
+                # leaves the same orphan, and CancelledError is not an Exception.
+                process.kill()
+                if isinstance(exc, asyncio.CancelledError):
+                    raise
+                raise RuntimeError(
+                    f"Browser started but its first window did not open: {exc}"
+                ) from exc
+
+        # Phase 6: Pin to desktop (Linux/X11, best-effort)
+        if pin_to_desktop and not headless:
+            await _move_to_launching_desktop(pid=process.pid)
+
+        # Phase 7: Register in the instance registry
+        if working_dir is None:
+            working_dir = os.getcwd()
+
+        instance_info = register(
+            working_dir=working_dir,
+            pid=process.pid,
+            browser_version=status.browser_version or "unknown",
+            user_data_dir=session_dir,
+            port_override=port,
+            registry_path=registry_path,
+            pid_start=pid_start,
+        )
+
+        # Phase 8: Spawn the per-instance supervisor (headed launches only). It is a
+        # detached process -- it must survive the caller exiting (fire-and-forget
+        # launch model) -- that holds a CDP connection and, when the browser/window
+        # closes, retires the instance from the registry (and removes its session
+        # dir). While the browser is alive it also marks the window (tab title
+        # prefix), unless:
+        #   - --no-window-border (window_border is False), or
+        #   - a fingerprint profile is active: the title prefix is page-observable
+        #     (a modified document.title), and bot-defended sites -- exactly where
+        #     fingerprinting is used -- are where title-diffing detectors live. See
+        #     the detection audit.
+        # Headless launches get no supervisor (no window to close or mark); their
+        # registry entries are reclaimed by the launch-time prune above / cleanup.
+        if not headless:
+            from browser_tools.lifecycle import record_supervisor
+
+            from .supervisor import spawn_supervisor
+            resolved_registry = _resolve_path(registry_path)
+            supervisor_process = spawn_supervisor(
+                port=port,
+                name=instance_info.name,
+                registry_path=resolved_registry,
+                draw_border=window_border and fp_profile is None,
+                # The browser's user-data-dir is the supervisor's identity anchor
+                # (#176): the port alone cannot tell "my browser came back" from
+                # "a different browser took the port".
+                user_data_dir=session_dir,
+            )
+            # Record it so a supervisor that later dies reads as missing rather
+            # than as an instance that never had one (#65). Same identity pair the
+            # browser's own liveness uses, so a recycled PID is not mistaken for it.
+            record_supervisor(
+                instance_info.name,
+                pid=supervisor_process.pid,
+                pid_start=process_start_time(pid=supervisor_process.pid),
+                registry_path=resolved_registry,
+            )
+
+        return instance_info
     finally:
+        # The same lease acquired above spans the entire remaining launch:
+        # spawn, CDP readiness, first window, pinning and registration. A
+        # concurrent orphan sweep - including another registry's - cannot reap
+        # a session no registry tracks yet. It is dropped here on every
+        # outcome (return, failure, cancellation), never earlier; and once a
+        # spawn may have begun, the directory itself is never deleted, the
+        # lease is only released.
         if marker_fd is not None:
             session_initialization.release_initialization_marker(session_dir, marker_fd)
-
-    args = [
-        binary,
-        f"--remote-debugging-port={port}",
-        f"--user-data-dir={session_dir}",
-        "--no-first-run",
-        "--no-default-browser-check",
-        "--password-store=basic",
-    ]
-    startup_urls: list[str] = []
-    if headless:
-        args.append("--headless=new")
-        if extra_args:
-            # Headless Chrome opens startup URL arguments itself, natively.
-            args.extend(extra_args)
-    else:
-        # A headed launch starts windowless (--no-startup-window) and opens
-        # its first window over CDP. --no-startup-window also suppresses every
-        # startup URL Chrome would have opened from the command line, so a URL
-        # passed after '--' (#179) never appeared: the browser came up on
-        # about:blank and the caller's page was gone. The URL arguments are
-        # therefore pulled out of Chrome's argv and opened by
-        # _open_first_window instead, which keeps the no-focus-steal property
-        # AND opens the caller's page. Non-argument flags pass through
-        # verbatim, as before.
-        args.append("--no-startup-window")
-        if extra_args:
-            chrome_flags, startup_urls = _partition_startup_urls(extra_args)
-            args.extend(chrome_flags)
-
-    # Apply fingerprint via Chrome command-line flags (persistent)
-    env = os.environ.copy()
-    fp_profile = None
-    if fingerprint is not None:
-        from .fingerprint import load_fingerprint
-        fp_profile = load_fingerprint(path=fingerprint)
-        args.append(f"--user-agent={fp_profile.user_agent}")
-        args.append(f"--window-size={fp_profile.viewport['width']},{fp_profile.viewport['height']}")
-        args.append(f"--lang={fp_profile.locale}")
-        env["TZ"] = fp_profile.timezone
-
-    # Phase 4: Launch subprocess. start_new_session detaches the browser from
-    # the launching terminal's controlling tty (#177): without it Chrome kept
-    # the terminal as its controlling terminal even after reparenting to
-    # launchd, and closing that terminal pane killed the browser. The same
-    # detach the supervisor gets at spawn time.
-    process = subprocess.Popen(
-        args,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-        env=env,
-        start_new_session=True,
-    )
-    # Capture the process's start-time identity token immediately, while the
-    # PID is guaranteed to still be this process (wrapper installs can exit
-    # fast). (pid, pid_start) lets liveness checks detect PID recycling.
-    pid_start = process_start_time(pid=process.pid)
-    logger.info("Launched Chrome PID %d on port %d", process.pid, port)
-
-    # Phase 5: Wait for CDP port to be ready
-    deadline = asyncio.get_event_loop().time() + 30.0
-    status = None
-    while asyncio.get_event_loop().time() < deadline:
-        # Check if process died
-        if process.poll() is not None:
-            stderr_output = process.stderr.read().decode(errors="replace") if process.stderr else ""
-            raise RuntimeError(
-                f"Chrome exited immediately with code {process.returncode}. "
-                f"stderr: {stderr_output[:500]}"
-            )
-        status = await check_cdp_port_async(port=port)
-        if status.listening:
-            break
-        await asyncio.sleep(0.2)
-    else:
-        # Timeout -- kill the process and fail
-        process.kill()
-        raise TimeoutError("Browser did not start within 30 seconds")
-
-    if not headless:
-        try:
-            await _open_first_window(
-                port=port,
-                url=startup_urls[0] if startup_urls else "about:blank",
-                extra_urls=startup_urls[1:],
-            )
-        except BaseException as exc:
-            # Nothing is registered yet, so a browser left running here would be
-            # an orphan no verb can see or stop. BaseException, not Exception: a
-            # launch cancelled while this awaits (Ctrl-C, a cancelled task)
-            # leaves the same orphan, and CancelledError is not an Exception.
-            process.kill()
-            if isinstance(exc, asyncio.CancelledError):
-                raise
-            raise RuntimeError(f"Browser started but its first window did not open: {exc}") from exc
-
-    # Phase 6: Pin to desktop (Linux/X11, best-effort)
-    if pin_to_desktop and not headless:
-        await _move_to_launching_desktop(pid=process.pid)
-
-    # Phase 7: Register in the instance registry
-    if working_dir is None:
-        working_dir = os.getcwd()
-
-    instance_info = register(
-        working_dir=working_dir,
-        pid=process.pid,
-        browser_version=status.browser_version or "unknown",
-        user_data_dir=session_dir,
-        port_override=port,
-        registry_path=registry_path,
-        pid_start=pid_start,
-    )
-
-    # Phase 8: Spawn the per-instance supervisor (headed launches only). It is a
-    # detached process -- it must survive the caller exiting (fire-and-forget
-    # launch model) -- that holds a CDP connection and, when the browser/window
-    # closes, retires the instance from the registry (and removes its session
-    # dir). While the browser is alive it also marks the window (tab title
-    # prefix), unless:
-    #   - --no-window-border (window_border is False), or
-    #   - a fingerprint profile is active: the title prefix is page-observable
-    #     (a modified document.title), and bot-defended sites -- exactly where
-    #     fingerprinting is used -- are where title-diffing detectors live. See
-    #     the detection audit.
-    # Headless launches get no supervisor (no window to close or mark); their
-    # registry entries are reclaimed by the launch-time prune above / cleanup.
-    if not headless:
-        from browser_tools.lifecycle import record_supervisor
-
-        from .supervisor import spawn_supervisor
-        resolved_registry = _resolve_path(registry_path)
-        supervisor_process = spawn_supervisor(
-            port=port,
-            name=instance_info.name,
-            registry_path=resolved_registry,
-            draw_border=window_border and fp_profile is None,
-            # The browser's user-data-dir is the supervisor's identity anchor
-            # (#176): the port alone cannot tell "my browser came back" from
-            # "a different browser took the port".
-            user_data_dir=session_dir,
-        )
-        # Record it so a supervisor that later dies reads as missing rather
-        # than as an instance that never had one (#65). Same identity pair the
-        # browser's own liveness uses, so a recycled PID is not mistaken for it.
-        record_supervisor(
-            instance_info.name,
-            pid=supervisor_process.pid,
-            pid_start=process_start_time(pid=supervisor_process.pid),
-            registry_path=resolved_registry,
-        )
-
-    return instance_info
 
 
 async def _open_first_window(

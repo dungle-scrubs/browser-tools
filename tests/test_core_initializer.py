@@ -24,6 +24,7 @@ import pytest
 
 from browser_tools import session_initialization
 from browser_tools.core import launcher
+from browser_tools.core.connection import PortStatus
 
 
 class _FakeProcess:
@@ -520,6 +521,183 @@ class TestInitializationMarker:
         registry = str(tmp_path / "registry.json")
         info = _launch(registry, 9491, initialize_directory=lambda d: None)
         assert not (Path(info.user_data_dir) / session_initialization.INITIALIZING_MARKER).exists()
+
+
+class TestStartupLease:
+    """The initialization lease spans startup, not just preparation.
+
+    A sweep fired by another registry from the spawn or CDP-readiness
+    boundary finds the same marker still held, and the lease is dropped only
+    after registration succeeds (or the launch unwinds) - with the directory
+    itself never deleted once a spawn may have begun.
+    """
+
+    def test_another_registry_cannot_sweep_prepared_files_at_spawn(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Preserve prepared files until startup has registered the browser."""
+        root = tmp_path / "sessions"
+        monkeypatch.setattr(launcher, "_SESSION_ROOT", str(root))
+        prepared: list[Path] = []
+
+        def initialize(directory: Path) -> None:
+            witness = directory / "prepared-registration.json"
+            witness.write_text('{"synthetic": true}')
+            prepared.append(witness)
+
+        def spawn(args: list[str], **kwargs: object) -> _FakeProcess:
+            if args[0] != "synthetic-chrome":
+                raise OSError("synthetic process metadata unavailable")
+            launcher.cleanup_sessions(registry_path=str(tmp_path / "other-registry.json"))
+            assert prepared[0].is_file(), "initializer files were swept before Chrome started"
+            return _FakeProcess()
+
+        async def ready(*, port: int) -> PortStatus:
+            return PortStatus(listening=True, browser_version="Chrome/999")
+
+        monkeypatch.setattr(launcher.subprocess, "Popen", spawn)
+        monkeypatch.setattr(launcher, "check_cdp_port_async", ready)
+        instance = asyncio.run(
+            launcher.launch_browser(
+                binary="synthetic-chrome",
+                port_override=9497,
+                headless=True,
+                window_border=False,
+                registry_path=str(tmp_path / "registry.json"),
+                working_dir=str(tmp_path),
+                initialize_directory=initialize,
+            )
+        )
+        assert Path(instance.user_data_dir).is_dir()
+        assert prepared[0].is_file()
+
+    def test_another_registry_cannot_sweep_prepared_files_during_readiness(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The lease outlives the spawn: a sweep fired while CDP readiness is
+        still being awaited finds the marker still held."""
+        root = tmp_path / "sessions"
+        monkeypatch.setattr(launcher, "_SESSION_ROOT", str(root))
+        prepared: list[Path] = []
+
+        def initialize(directory: Path) -> None:
+            witness = directory / "prepared-registration.json"
+            witness.write_text('{"synthetic": true}')
+            prepared.append(witness)
+
+        def spawn(args: list[str], **kwargs: object) -> _FakeProcess:
+            if args[0] != "synthetic-chrome":
+                raise OSError("synthetic process metadata unavailable")
+            return _FakeProcess()
+
+        async def ready(*, port: int) -> PortStatus:
+            launcher.cleanup_sessions(registry_path=str(tmp_path / "other-registry.json"))
+            assert prepared[0].is_file(), "initializer files were swept during readiness"
+            return PortStatus(listening=True, browser_version="Chrome/999")
+
+        monkeypatch.setattr(launcher.subprocess, "Popen", spawn)
+        monkeypatch.setattr(launcher, "check_cdp_port_async", ready)
+        instance = asyncio.run(
+            launcher.launch_browser(
+                binary="synthetic-chrome",
+                port_override=9494,
+                headless=True,
+                window_border=False,
+                registry_path=str(tmp_path / "registry.json"),
+                working_dir=str(tmp_path),
+                initialize_directory=initialize,
+            )
+        )
+        assert Path(instance.user_data_dir).is_dir()
+        assert prepared[0].is_file()
+
+    def test_the_lease_is_held_through_registration_and_released_on_return(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        stubbed_boundaries: dict[str, object],
+        tmp_path: Path,
+    ) -> None:
+        """The marker is still locked when the instance is registered, and no
+        marker file outlives the launch that published it."""
+        held_at_registration: list[bool] = []
+        real_register = launcher.register
+
+        def recording_register(**kwargs: object) -> object:
+            held_at_registration.append(
+                session_initialization.initialization_marker_holds(str(kwargs["user_data_dir"]))
+            )
+            return real_register(**kwargs)
+
+        monkeypatch.setattr(launcher, "register", recording_register)
+        registry = str(tmp_path / "registry.json")
+        info = _launch(registry, 9495, initialize_directory=lambda directory: None)
+
+        assert held_at_registration == [True]
+        marker = Path(info.user_data_dir) / session_initialization.INITIALIZING_MARKER
+        assert not marker.exists()
+
+    def test_a_readiness_failure_releases_the_lease_and_keeps_the_directory(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        stubbed_boundaries: dict[str, object],
+        tmp_path: Path,
+    ) -> None:
+        """After a spawn may have begun no directory deletion happens; the
+        lease itself is still dropped on the failure path."""
+
+        async def failing(*, port: int) -> PortStatus:
+            raise RuntimeError("synthetic readiness failure")
+
+        monkeypatch.setattr(launcher, "check_cdp_port_async", failing)
+        registry = str(tmp_path / "registry.json")
+
+        with pytest.raises(RuntimeError, match="synthetic readiness failure"):
+            _launch(registry, 9496, initialize_directory=lambda directory: None)
+
+        retained = list(stubbed_boundaries["sessions_root"].glob("session-*"))
+        assert len(retained) == 1
+        marker = retained[0] / session_initialization.INITIALIZING_MARKER
+        assert not marker.exists()
+
+    def test_a_readiness_cancellation_releases_the_lease_and_keeps_the_directory(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        stubbed_boundaries: dict[str, object],
+        tmp_path: Path,
+    ) -> None:
+        """A launch cancelled while readiness is awaited unwinds through the
+        lease release without deleting the spawned session's directory."""
+        gate = asyncio.Event()
+
+        async def blocked(*, port: int) -> PortStatus:
+            await gate.wait()
+            return PortStatus(listening=True, browser_version="Chrome/999")
+
+        monkeypatch.setattr(launcher, "check_cdp_port_async", blocked)
+        registry = str(tmp_path / "registry.json")
+
+        async def cancel_during_readiness() -> None:
+            task = asyncio.create_task(
+                launcher.launch_browser(
+                    port_override=9498,
+                    binary="synthetic-chrome",
+                    headless=True,
+                    working_dir=str(tmp_path),
+                    registry_path=registry,
+                    initialize_directory=lambda directory: None,
+                )
+            )
+            await asyncio.sleep(0.2)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        asyncio.run(cancel_during_readiness())
+
+        retained = list(stubbed_boundaries["sessions_root"].glob("session-*"))
+        assert len(retained) == 1
+        marker = retained[0] / session_initialization.INITIALIZING_MARKER
+        assert not marker.exists()
 
 
 class TestGenericBoundary:
