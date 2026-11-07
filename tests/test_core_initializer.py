@@ -11,6 +11,8 @@ rather than a lifecycle double.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import fcntl
 import os
 import subprocess
 import sys
@@ -94,6 +96,17 @@ def _launch(
             user_data_dir=user_data_dir,
             initialize_directory=initialize_directory,
         )
+    )
+
+
+def _is_marker_staging(path: object) -> bool:
+    """Report whether ``path`` is a marker publication staging name."""
+    try:
+        name = os.path.basename(os.fspath(path))
+    except TypeError:
+        return False
+    return name.startswith(f"{session_initialization.INITIALIZING_MARKER}-") and name.endswith(
+        ".tmp"
     )
 
 
@@ -245,6 +258,107 @@ class TestOwnedFailures:
         assert len(list(stubbed_boundaries["sessions_root"].glob("session-*"))) == 1
 
 
+class TestProtectedPublication:
+    """A session that cannot hold its marker aborts, never runs unprotected."""
+
+    @pytest.mark.parametrize(
+        ("boundary", "name"),
+        [(os, "open"), (fcntl, "flock"), (os, "link")],
+        ids=["staging", "lock", "publication"],
+    )
+    def test_a_publication_failure_aborts_before_the_initializer_and_spawn(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        stubbed_boundaries: dict[str, object],
+        tmp_path: Path,
+        boundary: types.ModuleType,
+        name: str,
+    ) -> None:
+        """Only the marker's own syscall fails; every unrelated real syscall
+        keeps working.
+
+        Replacing ``os.open`` wholesale would also break the owned cleanup's
+        directory opens inside ``shutil.rmtree``, retaining the directory and
+        passing the no-leak witness for the wrong reason; the staging fault is
+        therefore scoped to the marker's staging name alone.
+        """
+        real_open = os.open
+
+        def failing_open(path: object, flags: int, *args: object, **kwargs: object) -> object:
+            if _is_marker_staging(path):
+                raise OSError(f"synthetic {name} failure")
+            return real_open(path, flags, *args, **kwargs)
+
+        def failing(*args: object, **kwargs: object) -> None:
+            raise OSError(f"synthetic {name} failure")
+
+        # os.open is shared with the owned cleanup, so it is faulted narrowly;
+        # flock and link have no other caller in this window.
+        if (boundary, name) == (os, "open"):
+            monkeypatch.setattr(os, "open", failing_open)
+        else:
+            monkeypatch.setattr(boundary, name, failing)
+        ran: list[str] = []
+        registry = str(tmp_path / "registry.json")
+
+        with pytest.raises(OSError, match=f"synthetic {name} failure"):
+            _launch(
+                registry,
+                9492,
+                initialize_directory=lambda directory: ran.append("initializer"),
+            )
+
+        assert ran == []
+        assert stubbed_boundaries["order"] == ["cleanup"]
+        assert list(stubbed_boundaries["sessions_root"].glob("session-*")) == []
+
+    def test_a_publication_failure_preserves_its_error_when_cleanup_also_fails(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        stubbed_boundaries: dict[str, object],
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        def failing_link(src: object, dst: object, *args: object, **kwargs: object) -> None:
+            raise OSError("synthetic link failure")
+
+        def failing_rmtree(path: object, *args: object, **kwargs: object) -> None:
+            raise OSError("synthetic cleanup failure")
+
+        monkeypatch.setattr(os, "link", failing_link)
+        monkeypatch.setattr(launcher.shutil, "rmtree", failing_rmtree)
+        registry = str(tmp_path / "registry.json")
+
+        with pytest.raises(OSError, match="synthetic link failure"):
+            _launch(registry, 9493, initialize_directory=lambda directory: None)
+
+        retained = list(stubbed_boundaries["sessions_root"].glob("session-*"))
+        assert len(retained) == 1
+        assert str(retained[0]) in caplog.text
+
+    def test_a_release_close_failure_never_propagates(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        session = tmp_path / "session"
+        session.mkdir()
+        fd = session_initialization.publish_initialization_marker(str(session))
+        real_close = os.close
+
+        def failing_close(candidate: int) -> None:
+            if candidate == fd:
+                raise OSError("synthetic close failure")
+            real_close(candidate)
+
+        monkeypatch.setattr(os, "close", failing_close)
+        try:
+            # Must not raise: a release failure never masks the failure (if
+            # any) that is unwinding past it.
+            session_initialization.release_initialization_marker(str(session), fd)
+        finally:
+            with contextlib.suppress(OSError):
+                real_close(fd)
+
+
 class TestInitializationMarker:
     def test_an_active_initializer_is_not_swept_by_another_registry(
         self,
@@ -338,6 +452,23 @@ class TestInitializationMarker:
 
         assert not session.exists()
         assert removed == []
+
+    def test_a_nonempty_marker_preserves_the_directory_without_being_read(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        sessions_root = tmp_path / "sessions"
+        sessions_root.mkdir(parents=True)
+        session = sessions_root / "session-nonempty"
+        session.mkdir()
+        # A marker that claims to be a journal (or was tampered with) is
+        # unverifiable: emptiness is checked by size alone, never by reading.
+        (session / session_initialization.INITIALIZING_MARKER).write_text("pid=1\n")
+        monkeypatch.setattr(launcher, "_SESSION_ROOT", str(sessions_root))
+
+        launcher.cleanup_sessions(registry_path=str(tmp_path / "registry.json"))
+
+        assert session.is_dir()
+        assert (session / session_initialization.INITIALIZING_MARKER).read_text() == "pid=1\n"
 
     def test_a_fifo_marker_neither_blocks_the_sweep_nor_is_followed(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path

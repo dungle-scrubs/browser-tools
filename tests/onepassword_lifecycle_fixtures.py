@@ -16,6 +16,7 @@ and generated files rather than a policy double.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import types
@@ -66,6 +67,84 @@ def _no_real_camoufox_runner(monkeypatch: pytest.MonkeyPatch) -> None:
 def _darwin(monkeypatch: pytest.MonkeyPatch) -> None:
     """Pin the platform so the positive paths run anywhere the suite runs."""
     monkeypatch.setattr(sys, "platform", "darwin")
+
+
+def fail_pin_stat(monkeypatch: pytest.MonkeyPatch, error: OSError) -> None:
+    """Fault only the pin seed's own target verification (``os.stat``).
+
+    The seed stats the ``Preferences`` name relative to its ``Default``
+    directory descriptor; the provisioner stats the manifest name instead,
+    so the two never collide. Every unrelated real stat passes through.
+    """
+    real_stat = os.stat
+
+    def failing(path: object, *args: object, **kwargs: object) -> object:
+        if kwargs.get("dir_fd") is not None and path == "Preferences":
+            raise error
+        return real_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "stat", failing)
+
+
+def fail_pin_default_open(monkeypatch: pytest.MonkeyPatch, error: OSError) -> None:
+    """Fault only the pin seed's own ``Default`` directory open.
+
+    Scoped to the seed's exact open flags (``O_DIRECTORY | O_NOFOLLOW``) so
+    the owned cleanup's own directory opens - which use ``O_NONBLOCK``
+    without them - keep working and a leak witness stays honest.
+    """
+    seed_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    real_open = os.open
+
+    def failing(path: object, flags: int, *args: object, **kwargs: object) -> object:
+        if kwargs.get("dir_fd") is not None and path == "Default" and flags == seed_flags:
+            raise error
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", failing)
+
+
+def fail_pin_default_create(monkeypatch: pytest.MonkeyPatch, error: OSError) -> None:
+    """Fault only the pin seed's own ``Default`` directory creation.
+
+    The provisioner creates ``NativeMessagingHosts`` through its own
+    descriptor, so it keeps working and the failure stays the seed's.
+    """
+    real_mkdir = os.mkdir
+
+    def failing(path: object, *args: object, **kwargs: object) -> None:
+        if kwargs.get("dir_fd") is not None and path == "Default":
+            raise error
+        real_mkdir(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "mkdir", failing)
+
+
+def fail_pin_publication(monkeypatch: pytest.MonkeyPatch, kind: str, error: OSError) -> None:
+    """Fault only the pin seed's own staging open or atomic link.
+
+    ``kind`` selects the boundary: ``"staging"`` faults opening the seed's
+    ``.Preferences-*`` staging file, ``"link"`` faults linking it into
+    place. The provisioner's manifest publication uses its own names, and
+    the initialization marker's publication passes through untouched.
+    """
+    real_open = os.open
+    real_link = os.link
+
+    def failing_open(path: object, flags: int, *args: object, **kwargs: object) -> object:
+        if kwargs.get("dir_fd") is not None and str(path).startswith(".Preferences-"):
+            raise error
+        return real_open(path, flags, *args, **kwargs)
+
+    def failing_link(src: object, dst: object, *args: object, **kwargs: object) -> None:
+        if kwargs.get("src_dir_fd") is not None and dst == "Preferences":
+            raise error
+        real_link(src, dst, *args, **kwargs)
+
+    if kind == "staging":
+        monkeypatch.setattr(os, "open", failing_open)
+    else:
+        monkeypatch.setattr(os, "link", failing_link)
 
 
 @pytest.fixture

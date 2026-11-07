@@ -14,6 +14,7 @@ carries paths only, never document values.
 from __future__ import annotations
 
 import contextlib
+import errno
 import json
 import os
 import re
@@ -34,6 +35,13 @@ PREFERENCES_MODE = 0o600
 
 #: The extension-id shape of every ``chrome-extension://`` origin.
 _EXTENSION_ID_PATTERN = re.compile(r"[a-p]{32}")
+
+#: Errnos that prove a seed target itself redirects or is not a directory:
+#: a symlinked root or Default with ``O_NOFOLLOW`` (ELOOP) or a Default that
+#: is a plain file (ENOTDIR). Those keep the plain launch - an exotic
+#: profile must not fail over a preference seed. Every other inability to
+#: open, create, or verify the intended directory is an operational failure.
+_REDIRECTED_ERRNOS = frozenset({errno.ELOOP, errno.ENOTDIR})
 
 
 class SessionSetupError(LifecycleError):
@@ -86,44 +94,72 @@ def seed_pin(user_data_dir: Path) -> None:
     a document with a pin choice, an empty list, a symlink, anything - is
     left untouched and never read. No symlink on the path is followed, so a
     redirected Default or Preferences cannot make the seed land outside the
-    selected directory. An unresolvable target skips the seed rather than
-    writing somewhere it cannot verify; Chrome's own preference preparation
-    still runs after this and preserves the extensions field.
+    selected directory.
+
+    Absence is proved by FileNotFoundError alone: any other failure to open,
+    create, or verify the intended directory - the root, ``Default``, or the
+    name itself - aborts the seed as a typed operational error rather than
+    silently skipping, so a transient I/O failure never leaves a session
+    that looks seeded-up but never was. A root or Default that is itself a
+    symlink or a non-directory is the one skip: an exotic profile keeps its
+    plain launch.
 
     Args:
         user_data_dir: The session or profile directory Chrome will use.
 
     Raises:
-        SessionSetupError: Publishing the seed failed after the target name
-            was verified absent. The message names the directory and the
-            operating system's reason only, never document values.
+        SessionSetupError: The intended directory could not be opened,
+            created, or verified, or publishing the seed failed. The message
+            names the directory and the operating system's reason only,
+            never document values, and nothing already chosen is replaced.
     """
     with contextlib.ExitStack() as stack:
         try:
             profile_fd = os.open(user_data_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-        except OSError:
-            return
+        except OSError as exc:
+            if exc.errno in _REDIRECTED_ERRNOS:
+                return
+            raise SessionSetupError(
+                f"Cannot open {user_data_dir} for the 1Password extension pin: "
+                f"{exc.strerror or type(exc).__name__}."
+            ) from None
         stack.callback(os.close, profile_fd)
-        # An existing entry of any other kind is resolved below; a directory
-        # that cannot be created or held skips the seed.
-        with contextlib.suppress(OSError):
+        try:
             os.mkdir(DEFAULT_DIR_NAME, mode=0o700, dir_fd=profile_fd)
+        except FileExistsError:
+            pass
+        except OSError as exc:
+            raise SessionSetupError(
+                f"Cannot create {user_data_dir / DEFAULT_DIR_NAME} for the 1Password "
+                f"extension pin: {exc.strerror or type(exc).__name__}."
+            ) from None
         try:
             default_fd = os.open(
                 DEFAULT_DIR_NAME,
                 os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
                 dir_fd=profile_fd,
             )
-        except OSError:
-            return
+        except OSError as exc:
+            if exc.errno in _REDIRECTED_ERRNOS:
+                return
+            raise SessionSetupError(
+                f"Cannot open {user_data_dir / DEFAULT_DIR_NAME} for the 1Password "
+                f"extension pin: {exc.strerror or type(exc).__name__}."
+            ) from None
         stack.callback(os.close, default_fd)
         try:
             os.stat(PREFERENCES_NAME, dir_fd=default_fd, follow_symlinks=False)
-        except OSError:
+        except FileNotFoundError:
             # Only a name that is verifiably absent may be seeded; anything
-            # unreadable is treated as present so it is never overwritten.
+            # unreadable aborts below so it is never overwritten or skipped.
             pass
+        except OSError as exc:
+            raise SessionSetupError(
+                f"Cannot verify the pin target in {user_data_dir}: "
+                f"{exc.strerror or type(exc).__name__}."
+            ) from None
         else:
+            # An existing entry of any kind is never read and never replaced.
             return
 
         staging = f".{PREFERENCES_NAME}-{uuid.uuid4().hex}"
@@ -134,6 +170,12 @@ def seed_pin(user_data_dir: Path) -> None:
                 PREFERENCES_MODE,
                 dir_fd=default_fd,
             )
+        except OSError as exc:
+            raise SessionSetupError(
+                f"Cannot seed the 1Password extension pin in {user_data_dir}: "
+                f"{exc.strerror or type(exc).__name__}."
+            ) from None
+        try:
             try:
                 with os.fdopen(fd, "w", encoding="utf-8") as handle:
                     os.fchmod(handle.fileno(), PREFERENCES_MODE)
@@ -189,9 +231,12 @@ def temporary_session_initializer() -> Callable[[Path], None]:
     through the existing validated provisioner and then seeds the pin default,
     both before Chrome starts. A provisioner failure is re-raised as a
     :class:`SessionSetupError` carrying the provisioner's safe reason plus
-    retry advice that is valid for an unnamed launch: the failed throwaway
-    directory is discarded by the launcher, so relaunching retries the whole
-    setup. The explicit flag's remedy is deliberately absent, because
+    retry advice that is valid for an unnamed launch: the launcher owns the
+    failed throwaway directory's cleanup - removed when that succeeds,
+    retained with a logged path when even the cleanup fails, and never
+    reused either way - so relaunching retries the whole setup. A seeding
+    failure keeps its path-only reason and gains the same relaunch advice.
+    The explicit flag's remedy is deliberately absent, because
     ``--1password`` requires a named profile and cannot help here.
 
     Returns:
@@ -203,9 +248,12 @@ def temporary_session_initializer() -> Callable[[Path], None]:
             onepassword.provision(user_data_dir)
         except onepassword.OnePasswordProvisionError as exc:
             raise SessionSetupError(
-                f"{exc.reason} The failed temporary session is discarded; "
+                f"{exc.reason} The failed temporary session is never reused; "
                 "launch again to retry after fixing the condition above."
             ) from exc
-        seed_pin(user_data_dir)
+        try:
+            seed_pin(user_data_dir)
+        except SessionSetupError as exc:
+            raise SessionSetupError(f"{exc} Launch again to retry the temporary setup.") from exc
 
     return initialize

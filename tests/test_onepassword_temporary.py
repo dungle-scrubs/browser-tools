@@ -12,6 +12,7 @@ The shared synthetic-source and codesign fixtures come from
 
 from __future__ import annotations
 
+import errno
 import json
 import stat
 import sys
@@ -25,6 +26,16 @@ from onepassword_lifecycle_fixtures import (
 )
 from onepassword_lifecycle_fixtures import _no_real_camoufox_runner as _no_real_camoufox_runner
 from onepassword_lifecycle_fixtures import _no_real_codesign as _no_real_codesign
+from onepassword_lifecycle_fixtures import (
+    fail_pin_default_create as fail_pin_default_create,
+)
+from onepassword_lifecycle_fixtures import (
+    fail_pin_default_open as fail_pin_default_open,
+)
+from onepassword_lifecycle_fixtures import (
+    fail_pin_publication as fail_pin_publication,
+)
+from onepassword_lifecycle_fixtures import fail_pin_stat as fail_pin_stat
 from onepassword_lifecycle_fixtures import registry_path as registry_path
 from onepassword_lifecycle_fixtures import (
     stubbed_core_boundaries as stubbed_core_boundaries,
@@ -35,6 +46,7 @@ from onepassword_lifecycle_fixtures import (
 from onepassword_lifecycle_fixtures import valid_installation as valid_installation
 
 from browser_tools import lifecycle, onepassword
+from browser_tools.onepassword_setup import SessionSetupError
 
 PINNED_ID = "aeblfdkhhhdcdjpifhhbdiojplfjncoa"
 
@@ -201,3 +213,60 @@ class TestTemporarySetupBoundaries:
         assert ephemeral.is_dir()
         assert not (ephemeral / HOSTS).exists()
         assert not (ephemeral / "Default" / "Preferences").exists()
+
+
+_SEED_BOUNDARIES = {
+    "verify": lambda monkeypatch: fail_pin_stat(
+        monkeypatch, OSError(errno.EACCES, "synthetic verify failure")
+    ),
+    "default-open": lambda monkeypatch: fail_pin_default_open(
+        monkeypatch, OSError(errno.EACCES, "synthetic default read failure")
+    ),
+    "default-create": lambda monkeypatch: fail_pin_default_create(
+        monkeypatch, OSError(errno.EACCES, "synthetic default create failure")
+    ),
+    "staging": lambda monkeypatch: fail_pin_publication(
+        monkeypatch, "staging", OSError(errno.EACCES, "synthetic seed staging failure")
+    ),
+    "link": lambda monkeypatch: fail_pin_publication(
+        monkeypatch, "link", OSError(errno.EPERM, "synthetic seed link failure")
+    ),
+}
+
+
+class TestTemporarySeedBoundaries:
+    """A temporary session whose seed cannot be vouched for aborts closed.
+
+    The real provisioner runs first; only the seed's own filesystem boundary
+    fails, synthetically. The abort must happen before any spawn, remove the
+    owned throwaway directory, and keep the anonymous retry advice honest:
+    the failed session is never reused, whether its cleanup removed it or
+    retained it.
+    """
+
+    @pytest.mark.parametrize("boundary", sorted(_SEED_BOUNDARIES))
+    def test_a_seed_boundary_failure_aborts_and_removes_the_owned_session(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        boundary: str,
+        registry_path: str,
+        valid_installation: Path,
+        synthetic_chrome_binary: Path,
+        stubbed_core_boundaries: dict[str, object],
+    ) -> None:
+        _SEED_BOUNDARIES[boundary](monkeypatch)
+
+        with pytest.raises(SessionSetupError, match=r"synthetic .* failure") as error:
+            _temporary_launch(registry_path, 9475)
+
+        message = str(error.value)
+        # Path-only reason plus the anonymous remedy; the named-profile flag
+        # advice must not appear for a session that cannot use it.
+        assert "/session-" in message
+        assert "Launch again to retry the temporary setup." in message
+        assert "--1password" not in message
+        # Nothing was spawned, no preferences were prepared, and the owned
+        # throwaway setup was removed rather than leaked.
+        assert stubbed_core_boundaries["order"] == ["cleanup"]
+        sessions_root = stubbed_core_boundaries["sessions_root"]
+        assert list(sessions_root.glob("session-*")) == []

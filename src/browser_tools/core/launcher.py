@@ -28,8 +28,9 @@
 # nothing about 1Password; the lifecycle layer supplies the callback. While a
 # callback prepares a freshly allocated unbound session, an empty
 # initialization marker held under a kernel flock stops a concurrent orphan
-# sweep from reaping the directory, and a callback or preference failure
-# before spawn removes only a throwaway directory this call allocated.
+# sweep from reaping the directory, and a failure in marker publication, the
+# callback, or preference preparation before spawn aborts the launch and
+# removes only a throwaway directory this call allocated.
 # The marker protocol itself lives in browser_tools.session_initialization
 # (the repository's module-size rule moved it out of this adapted module);
 # this launcher is a thin caller of it.
@@ -304,15 +305,17 @@ async def launch_browser(
     # preference write or browser spawn -- so its files are in place before
     # Chrome first reads the directory. While it prepares a freshly allocated
     # unbound session, an empty initialization marker held under a kernel
-    # flock keeps a concurrent orphan sweep from reaping the directory, and a
-    # failure in the initializer or preference preparation removes only a
-    # throwaway directory this call allocated (never a supplied one).
-    marker_fd = (
-        session_initialization.publish_initialization_marker(session_dir)
-        if initialize_directory is not None and user_data_dir is None
-        else None
-    )
+    # flock keeps a concurrent orphan sweep from reaping the directory. The
+    # marker is never best-effort: publishing it happens inside the owned
+    # cleanup window below, so a session this call cannot protect aborts
+    # before the initializer or any spawn runs, and any failure there (in
+    # publication, the initializer, or preference preparation) removes only a
+    # throwaway directory this call allocated - never a supplied one - while
+    # the original error propagates and the marker release cannot mask it.
+    marker_fd: int | None = None
     try:
+        if initialize_directory is not None and user_data_dir is None:
+            marker_fd = session_initialization.publish_initialization_marker(session_dir)
         if initialize_directory is not None:
             initialize_directory(Path(session_dir))
         _prepare_preferences(Path(session_dir) / "Default" / "Preferences")

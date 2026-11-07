@@ -10,6 +10,7 @@ for real through the shared stubbed-boundary fixtures (#201).
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import stat
@@ -23,6 +24,16 @@ from onepassword_lifecycle_fixtures import (
 )
 from onepassword_lifecycle_fixtures import _no_real_camoufox_runner as _no_real_camoufox_runner
 from onepassword_lifecycle_fixtures import _no_real_codesign as _no_real_codesign
+from onepassword_lifecycle_fixtures import (
+    fail_pin_default_create as fail_pin_default_create,
+)
+from onepassword_lifecycle_fixtures import (
+    fail_pin_default_open as fail_pin_default_open,
+)
+from onepassword_lifecycle_fixtures import (
+    fail_pin_publication as fail_pin_publication,
+)
+from onepassword_lifecycle_fixtures import fail_pin_stat as fail_pin_stat
 from onepassword_lifecycle_fixtures import profiles_root as profiles_root
 from onepassword_lifecycle_fixtures import registry_path as registry_path
 from onepassword_lifecycle_fixtures import (
@@ -36,6 +47,7 @@ from onepassword_lifecycle_fixtures import valid_installation as valid_installat
 from browser_tools import lifecycle, onepassword, onepassword_setup
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
 PINNED_ID = "aeblfdkhhhdcdjpifhhbdiojplfjncoa"
@@ -45,6 +57,31 @@ PIN_DOCUMENT = {"extensions": {"pinned_extensions": [PINNED_ID]}}
 
 def _preferences(profile: Path) -> Path:
     return profile / "Default" / "Preferences"
+
+
+def _fail_os_open(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    matches: Callable[[object, dict[str, object]], bool],
+    error: OSError,
+) -> None:
+    """Make ``os.open`` raise ``error`` for the calls ``matches`` selects.
+
+    Unrelated real opens - including the test machinery's own - keep working,
+    so a failing witness proves the abort, not a broken harness.
+    """
+    real_open = os.open
+
+    def failing(path: object, flags: int, *args: object, **kwargs: object) -> object:
+        if matches(path, kwargs):
+            raise error
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", failing)
+
+
+def _no_dir_fd(kwargs: dict[str, object]) -> bool:
+    return kwargs.get("dir_fd") is None
 
 
 class TestSeedPin:
@@ -158,6 +195,178 @@ class TestSeedPin:
         assert not _preferences(session).exists()
         assert list((_preferences(session).parent).iterdir()) == []
 
+    def test_a_root_read_failure_aborts_path_only(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        session = tmp_path / "session"
+        session.mkdir()
+        _fail_os_open(
+            monkeypatch,
+            matches=lambda path, kwargs: _no_dir_fd(kwargs) and path == session,
+            error=OSError(errno.EACCES, "synthetic root read failure"),
+        )
+
+        with pytest.raises(
+            onepassword_setup.SessionSetupError, match="synthetic root read failure"
+        ) as error:
+            onepassword_setup.seed_pin(session)
+
+        assert str(session) in str(error.value)
+        assert "for the 1Password extension pin" in str(error.value)
+        assert not (session / "Default").exists()
+
+    def test_a_default_read_failure_aborts_path_only(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        session = tmp_path / "session"
+        session.mkdir()
+        (session / "Default").mkdir()
+        _fail_os_open(
+            monkeypatch,
+            matches=lambda path, kwargs: kwargs.get("dir_fd") is not None and path == "Default",
+            error=OSError(errno.EACCES, "synthetic default read failure"),
+        )
+
+        with pytest.raises(
+            onepassword_setup.SessionSetupError, match="synthetic default read failure"
+        ) as error:
+            onepassword_setup.seed_pin(session)
+
+        assert str(session) in str(error.value)
+        assert not _preferences(session).exists()
+
+    def test_a_default_preparation_failure_aborts_path_only(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        session = tmp_path / "session"
+        session.mkdir()
+        real_mkdir = os.mkdir
+
+        def failing_mkdir(path: object, *args: object, **kwargs: object) -> None:
+            if kwargs.get("dir_fd") is not None and path == "Default":
+                raise OSError(errno.EACCES, "synthetic default create failure")
+            real_mkdir(path, *args, **kwargs)
+
+        monkeypatch.setattr(os, "mkdir", failing_mkdir)
+
+        with pytest.raises(
+            onepassword_setup.SessionSetupError, match="synthetic default create failure"
+        ) as error:
+            onepassword_setup.seed_pin(session)
+
+        assert str(session / "Default") in str(error.value)
+        assert list(session.iterdir()) == []
+
+    @pytest.mark.parametrize("failure_errno", [errno.EACCES, errno.EPERM, errno.EIO])
+    def test_only_a_provably_absent_target_permits_publication(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure_errno: int
+    ) -> None:
+        """FileNotFoundError is the only absence proof; any other stat
+        failure aborts the seed instead of silently skipping it."""
+        session = tmp_path / "session"
+        session.mkdir()
+        (session / "Default").mkdir()
+        real_stat = os.stat
+
+        def failing_stat(path: object, *args: object, **kwargs: object):
+            if kwargs.get("dir_fd") is not None and path == "Preferences":
+                raise OSError(failure_errno, f"synthetic verify failure {failure_errno}")
+            return real_stat(path, *args, **kwargs)
+
+        monkeypatch.setattr(os, "stat", failing_stat)
+
+        with pytest.raises(
+            onepassword_setup.SessionSetupError, match=f"synthetic verify failure {failure_errno}"
+        ) as error:
+            onepassword_setup.seed_pin(session)
+
+        assert "Cannot verify the pin target" in str(error.value)
+        assert str(session) in str(error.value)
+        assert not _preferences(session).exists()
+        assert list((session / "Default").iterdir()) == []
+
+    @pytest.mark.parametrize(
+        ("kind", "message"),
+        [("staging", "synthetic seed staging failure"), ("link", "synthetic seed link failure")],
+    )
+    def test_publication_boundaries_abort_path_only(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        kind: str,
+        message: str,
+    ) -> None:
+        session = tmp_path / "session"
+        session.mkdir()
+        if kind == "staging":
+            _fail_os_open(
+                monkeypatch,
+                matches=lambda path, kwargs: (
+                    kwargs.get("dir_fd") is not None and str(path).startswith(".Preferences-")
+                ),
+                error=OSError(errno.EACCES, message),
+            )
+        else:
+            real_link = os.link
+
+            def failing_link(src: object, dst: object, *args: object, **kwargs: object) -> None:
+                if kwargs.get("src_dir_fd") is not None and dst == "Preferences":
+                    raise OSError(errno.EPERM, message)
+                real_link(src, dst, *args, **kwargs)
+
+            monkeypatch.setattr(os, "link", failing_link)
+
+        with pytest.raises(onepassword_setup.SessionSetupError, match=message) as error:
+            onepassword_setup.seed_pin(session)
+
+        assert "Cannot seed the 1Password extension pin" in str(error.value)
+        assert str(session) in str(error.value)
+        # No half-published document and no staging leftovers remain.
+        assert not _preferences(session).exists()
+        assert list((session / "Default").iterdir()) == []
+
+    def test_a_verification_failure_never_touches_an_existing_document(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        session = tmp_path / "session"
+        session.mkdir()
+        original = '{"extensions": {"pinned_extensions": []}, "homepage": "https://keep.test/"}'
+        _preferences(session).parent.mkdir(parents=True)
+        _preferences(session).write_text(original)
+        real_stat = os.stat
+
+        def failing_stat(path: object, *args: object, **kwargs: object):
+            if kwargs.get("dir_fd") is not None and path == "Preferences":
+                raise OSError(errno.EACCES, "synthetic verify failure")
+            return real_stat(path, *args, **kwargs)
+
+        monkeypatch.setattr(os, "stat", failing_stat)
+
+        with pytest.raises(onepassword_setup.SessionSetupError, match="synthetic verify failure"):
+            onepassword_setup.seed_pin(session)
+
+        assert _preferences(session).read_text() == original
+
+    def test_a_redirected_root_keeps_a_plain_seed_skip(self, tmp_path: Path) -> None:
+        outside = tmp_path / "outside-root"
+        outside.mkdir()
+        session = tmp_path / "session"
+        session.symlink_to(outside)
+
+        onepassword_setup.seed_pin(session)
+
+        assert list(outside.iterdir()) == []
+
+    def test_a_plain_file_default_keeps_a_plain_seed_skip(self, tmp_path: Path) -> None:
+        session = tmp_path / "session"
+        session.mkdir()
+        (session / "Default").write_text("not a directory")
+
+        onepassword_setup.seed_pin(session)
+
+        assert (session / "Default").read_text() == "not a directory"
+        assert list(session.iterdir()) == [session / "Default"]
+
 
 class TestNewProfilePolicy:
     def test_a_provisioned_new_profile_gets_the_pin_default(
@@ -234,3 +443,129 @@ class TestNewProfilePolicy:
         preferences = json.loads(_preferences(profile).read_text())
         assert preferences["extensions"] == {"pinned_extensions": [PINNED_ID]}
         assert (profile / HOSTS / DEST_NAME).is_file()
+
+
+_NAMED_SEED_BOUNDARIES = {
+    "verify": lambda monkeypatch: fail_pin_stat(
+        monkeypatch, OSError(errno.EACCES, "synthetic verify failure")
+    ),
+    "default-open": lambda monkeypatch: fail_pin_default_open(
+        monkeypatch, OSError(errno.EACCES, "synthetic default read failure")
+    ),
+    "default-create": lambda monkeypatch: fail_pin_default_create(
+        monkeypatch, OSError(errno.EACCES, "synthetic default create failure")
+    ),
+    "staging": lambda monkeypatch: fail_pin_publication(
+        monkeypatch, "staging", OSError(errno.EACCES, "synthetic seed staging failure")
+    ),
+    "link": lambda monkeypatch: fail_pin_publication(
+        monkeypatch, "link", OSError(errno.EPERM, "synthetic seed link failure")
+    ),
+}
+
+
+class TestNamedSeedBoundaries:
+    """A Named Profile whose seed cannot be vouched for aborts closed.
+
+    The real provisioner and the real core launcher run; only the seed's own
+    filesystem boundary fails, synthetically. The abort happens before any
+    spawn, the Named directory and everything already in it - registration,
+    existing documents, symlinks - are retained untouched, and the error
+    carries the remedy a named profile can actually use.
+    """
+
+    @pytest.mark.parametrize("boundary", sorted(_NAMED_SEED_BOUNDARIES))
+    def test_a_seed_boundary_failure_retains_the_named_profile(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        boundary: str,
+        registry_path: str,
+        profiles_root: Path,
+        valid_installation: Path,
+        synthetic_chrome_binary: Path,
+        stubbed_core_boundaries: dict[str, object],
+    ) -> None:
+        _NAMED_SEED_BOUNDARIES[boundary](monkeypatch)
+
+        with pytest.raises(
+            onepassword_setup.SessionSetupError, match=r"synthetic .* failure"
+        ) as error:
+            lifecycle.launch(
+                headless=True,
+                port=9477,
+                profile="work",
+                registry_path=registry_path,
+            )
+
+        message = str(error.value)
+        assert str(profiles_root / "work") in message
+        assert "Relaunch with --1password to retry the setup." in message
+        # Provisioning really ran (its registration survives), nothing was
+        # spawned or re-prepared, and the Named data is retained in place.
+        assert (profiles_root / "work" / HOSTS / DEST_NAME).is_file()
+        assert stubbed_core_boundaries["order"] == ["cleanup"]
+        assert (profiles_root / "work").is_dir()
+
+    def test_a_seed_boundary_failure_keeps_an_existing_document(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        registry_path: str,
+        profiles_root: Path,
+        valid_installation: Path,
+        synthetic_chrome_binary: Path,
+        stubbed_core_boundaries: dict[str, object],
+    ) -> None:
+        profile = profiles_root / "work"
+        original = '{"extensions": {"pinned_extensions": []}, "homepage": "https://keep.test/"}'
+        _preferences(profile).parent.mkdir(parents=True)
+        _preferences(profile).write_text(original)
+        fail_pin_stat(monkeypatch, OSError(errno.EACCES, "synthetic verify failure"))
+
+        with pytest.raises(onepassword_setup.SessionSetupError, match="synthetic verify failure"):
+            lifecycle.launch(
+                headless=True,
+                port=9478,
+                profile="work",
+                onepassword=True,
+                registry_path=registry_path,
+            )
+
+        assert _preferences(profile).read_text() == original
+        assert stubbed_core_boundaries["order"] == ["cleanup"]
+
+    def test_a_symlinked_default_keeps_a_plain_named_launch(
+        self,
+        registry_path: str,
+        profiles_root: Path,
+        valid_installation: Path,
+        synthetic_chrome_binary: Path,
+        stubbed_core_boundaries: dict[str, object],
+    ) -> None:
+        """A redirected Default is the safe skip: no seed, plain launch.
+
+        The seed never follows the symlink and never writes through it; the
+        launch itself continues, because this witness redirects Default to a
+        real directory the rest of the launch can still use.
+        """
+        profile = profiles_root / "work"
+        redirected = profiles_root / "redirected-default"
+        redirected.mkdir(parents=True)
+        profile.mkdir(parents=True)
+        (profile / "Default").symlink_to(redirected)
+
+        lifecycle.launch(
+            headless=True,
+            port=9479,
+            profile="work",
+            onepassword=True,
+            registry_path=registry_path,
+        )
+
+        # No pin was seeded through the redirect: what landed there is core's
+        # own reviewed preference document, with no extensions choice in it.
+        written = list(redirected.iterdir())
+        assert written == [redirected / "Preferences"]
+        assert "extensions" not in json.loads((redirected / "Preferences").read_text())
+        # The registration still landed in the real profile directory.
+        assert (profile / HOSTS / DEST_NAME).is_file()
+        assert stubbed_core_boundaries["order"] == ["cleanup", "preferences", "spawn"]
