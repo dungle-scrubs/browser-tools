@@ -22,7 +22,6 @@ import uuid
 from typing import TYPE_CHECKING
 
 from . import onepassword
-from .lifecycle import LifecycleError
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -44,8 +43,14 @@ _EXTENSION_ID_PATTERN = re.compile(r"[a-p]{32}")
 _REDIRECTED_ERRNOS = frozenset({errno.ELOOP, errno.ENOTDIR})
 
 
-class SessionSetupError(LifecycleError):
+class SessionSetupError(RuntimeError):
     """An automatic session setup step failed before the browser started.
+
+    The error contract is owned here, below the lifecycle layer, so this
+    module never imports :mod:`browser_tools.lifecycle` back (the layering
+    rule forbids the cycle). The lifecycle launch boundary translates it to
+    its own ``LifecycleError`` - and the CLI's exit 1 - without altering the
+    path-only message or its retry advice.
 
     The message is path-only: which directory failed and what to do next,
     never a preference document's values.

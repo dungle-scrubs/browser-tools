@@ -46,7 +46,6 @@ from onepassword_lifecycle_fixtures import (
 from onepassword_lifecycle_fixtures import valid_installation as valid_installation
 
 from browser_tools import lifecycle, onepassword
-from browser_tools.onepassword_setup import SessionSetupError
 
 PINNED_ID = "aeblfdkhhhdcdjpifhhbdiojplfjncoa"
 
@@ -256,10 +255,14 @@ class TestTemporarySeedBoundaries:
     ) -> None:
         _SEED_BOUNDARIES[boundary](monkeypatch)
 
-        with pytest.raises(SessionSetupError, match=r"synthetic .* failure") as error:
+        # The setup module owns its error below the lifecycle layer; the
+        # launch boundary translates it to a LifecycleError (CLI exit 1)
+        # keeping the path-only reason and the retry advice verbatim.
+        with pytest.raises(lifecycle.LifecycleError, match=r"synthetic .* failure") as error:
             _temporary_launch(registry_path, 9475)
 
         message = str(error.value)
+        assert message.startswith("Launch failed: ")
         # Path-only reason plus the anonymous remedy; the named-profile flag
         # advice must not appear for a session that cannot use it.
         assert "/session-" in message

@@ -487,9 +487,10 @@ class TestNamedSeedBoundaries:
     ) -> None:
         _NAMED_SEED_BOUNDARIES[boundary](monkeypatch)
 
-        with pytest.raises(
-            onepassword_setup.SessionSetupError, match=r"synthetic .* failure"
-        ) as error:
+        # The setup module owns its error below the lifecycle layer; the
+        # launch boundary translates it to a LifecycleError (CLI exit 1)
+        # keeping the path-only reason and the retry advice verbatim.
+        with pytest.raises(lifecycle.LifecycleError, match=r"synthetic .* failure") as error:
             lifecycle.launch(
                 headless=True,
                 port=9477,
@@ -498,6 +499,7 @@ class TestNamedSeedBoundaries:
             )
 
         message = str(error.value)
+        assert message.startswith("Launch failed: ")
         assert str(profiles_root / "work") in message
         assert "Relaunch with --1password to retry the setup." in message
         # Provisioning really ran (its registration survives), nothing was
@@ -521,7 +523,9 @@ class TestNamedSeedBoundaries:
         _preferences(profile).write_text(original)
         fail_pin_stat(monkeypatch, OSError(errno.EACCES, "synthetic verify failure"))
 
-        with pytest.raises(onepassword_setup.SessionSetupError, match="synthetic verify failure"):
+        # The same translation at the launch boundary: the setup-owned error
+        # becomes a LifecycleError with the path-only reason kept verbatim.
+        with pytest.raises(lifecycle.LifecycleError, match="synthetic verify failure"):
             lifecycle.launch(
                 headless=True,
                 port=9478,
