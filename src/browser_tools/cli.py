@@ -199,7 +199,7 @@ def build_parser() -> argparse.ArgumentParser:
             "Provision this named profile with the installed official 1Password "
             "native-messaging host (macOS, Chrome engine; needs --profile). Fresh "
             "macOS Chrome sessions, named or temporary, get the registration and "
-            "a pinned 1Password extension automatically when the official source "
+            "the extension-pin default automatically when the official source "
             "exists"
         ),
     )
@@ -401,9 +401,7 @@ def _add_login_verb(
     flow through this one path only, over a registered Chrome instance. No
     flag accepts a secret, a field name, or an endpoint.
     """
-    login_parser = sub.add_parser(
-        "login", help="Fill and submit one configured login form"
-    )
+    login_parser = sub.add_parser("login", help="Fill and submit one configured login form")
     login_parser.add_argument(
         "instance", nargs="?", metavar="INSTANCE", help="Instance (omit if only one)"
     )

@@ -66,7 +66,7 @@ bt launch
 # The session is provisioned for 1Password; its preferences pin the extension.
 ```
 
-On macOS with the 1Password desktop app installed, every fresh Chrome session this tool launches, named or temporary, is provisioned with the official 1Password native-messaging host and its new preferences pin the 1Password extension. Existing profiles and pin choices are never changed, and unpinning works as usual. Other platforms, the Camoufox engine, and machines without the official registration keep a plain launch. See `bt guide` for boundaries and the `--1password` flag.
+On macOS with the 1Password desktop app installed, every fresh Chrome session this tool launches, named or temporary, is provisioned with the official 1Password native-messaging host and its new preferences pin the 1Password extension. Existing pin choices are never changed, the password-manager preference updates every launch performs still apply, and unpinning works as usual. Other platforms, the Camoufox engine, and machines without the official registration keep a plain launch. See `bt guide` for boundaries and the `--1password` flag.
 
 ### Run dependent steps in one connection
 

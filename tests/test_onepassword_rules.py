@@ -302,14 +302,18 @@ def test_the_guide_documents_the_automatic_registration_default() -> None:
     for requirement in (
         "a brand-new Named profile or a temporary unnamed launch is provisioned",
         "pins the official stable 1Password Chrome extension",
-        "An existing profile is never touched automatically",
-        "no existing preference document, pin choice, or pinned list is read or rewritten",
+        "An existing profile is not registered automatically",
+        "the pin seed never reads or rewrites an existing preference document, "
+        "pin choice, or pinned list",
+        "The password-manager preference updates that every launch already performs",
         "Without the flag, other platforms, the Camoufox engine, and machines "
         "without the official registration entry keep a plain launch",
         "A present but invalid official registration, including a link whose target is gone",
         "removes the empty new profile directory",
         "unchanged invalid registration is refused again",
         "a repaired one registers",
+        "A cleanup that itself fails leaves the failed session directory in place",
+        "it is never reused",
         "is kept unchanged",
         "provision the existing profile with --1password",
         "relaunching creates a fresh one",

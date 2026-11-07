@@ -863,11 +863,13 @@ PROFILES AND LOGIN
   Named profile or a temporary unnamed launch is provisioned with the
   installed desktop helper for its user-data directory before the browser
   starts, and its new preference document pins the official stable 1Password
-  Chrome extension. An existing profile is never touched automatically: no
-  registration is added, and no existing preference document, pin choice, or
-  pinned list is read or rewritten, so an unpinned profile stays unpinned. A
-  pinned extension can be unpinned in the toolbar like any other. Opt in
-  for one of those, or revalidate the current installation, with:
+  Chrome extension. An existing profile is not registered automatically,
+  and the pin seed never reads or rewrites an existing preference document,
+  pin choice, or pinned list, so an unpinned profile stays unpinned. The
+  password-manager preference updates that every launch already performs
+  still apply to an existing profile's document. A pinned extension can be
+  unpinned in the toolbar like any other. Opt in for one of those, or
+  revalidate the current installation, with:
 
     bt launch --profile shopify-admin --1password
 
@@ -881,12 +883,14 @@ PROFILES AND LOGIN
   official registration, including a link whose target is gone, fails the
   first launch of a new profile or a temporary session (exit 1) before any
   browser starts. That failed launch removes the empty new profile directory
-  or the failed temporary session it created, so the next launch retries the
-  registration: an unchanged invalid registration is refused again, and a
-  repaired one registers. A profile directory that is no longer empty is
-  kept unchanged, and the failure says to provision the existing profile
-  with --1password after the repair; a failed temporary session needs no
-  flag, because relaunching creates a fresh one. The selected Chrome build
+  and cleans up the failed temporary session it created, so the next launch
+  retries the registration: an unchanged invalid registration is refused
+  again, and a repaired one registers. A cleanup that itself fails leaves the
+  failed session directory in place with its path logged; it is never reused.
+  A profile directory that is no longer empty is kept unchanged, and the
+  failure says to provision the existing profile with --1password after the
+  repair; a failed temporary session needs no flag, because relaunching
+  creates a fresh one. The selected Chrome build
   must also be supported by 1Password; provisioning does not grant trust to
   an unsupported browser. Install the extension in the session and enable
   desktop integration in both the extension and the app. browser-tools
