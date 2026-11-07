@@ -55,7 +55,7 @@ camoufox = [
 # back to a byte-ratio heuristic (screenshot_utils), so it is optional rather
 # than required. Grouped under `profiling` per RFC-01 Question 4.
 profiling = [
-    "pillow>=10.0.0",
+    "pillow>=13.0.0",
 ]
 # Everything at once.
 all = [
