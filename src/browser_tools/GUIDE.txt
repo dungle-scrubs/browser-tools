@@ -858,12 +858,16 @@ PROFILES AND LOGIN
   stays in /tmp: a cleared registry after a reboot is self-consistent, because
   no browser survives one.
 
-  1PASSWORD DESKTOP INTEGRATION. A brand-new Named Chrome profile on macOS
-  is registered automatically: when the official registration below exists,
-  its first launch provisions the installed desktop helper for that
-  user-data directory before the browser starts. An existing profile is
-  never touched automatically. Opt in for one of those, or revalidate the
-  current installation, with:
+  1PASSWORD DESKTOP INTEGRATION. A fresh Chrome session on macOS is set up
+  automatically when the official registration below exists: a brand-new
+  Named profile or a temporary unnamed launch is provisioned with the
+  installed desktop helper for its user-data directory before the browser
+  starts, and its new preference document pins the official stable 1Password
+  Chrome extension. An existing profile is never touched automatically: no
+  registration is added, and no existing preference document, pin choice, or
+  pinned list is read or rewritten, so an unpinned profile stays unpinned. A
+  pinned extension can be unpinned in the toolbar like any other. Opt in
+  for one of those, or revalidate the current installation, with:
 
     bt launch --profile shopify-admin --1password
 
@@ -872,20 +876,21 @@ PROFILES AND LOGIN
   extension. For the flag, other platforms and invalid engine/profile
   combinations fail before any write: invalid combinations are usage errors
   (exit 2); an unsupported platform is an operational error (exit 1). Without
-  the flag, other platforms, the Camoufox engine, unnamed launches, and
-  machines without the official registration keep a plain launch. A present
-  but invalid official registration, including a link whose target is gone,
-  fails a new profile's first launch (exit 1) before any browser starts.
-  That failed launch removes the empty new profile directory it created, so
-  the next launch retries the registration: an unchanged invalid
-  registration is refused again, and a repaired one registers. A directory
-  that is no longer empty is kept unchanged, and the failure says to
-  provision the existing profile with --1password after the repair. The
-  selected Chrome build must also
-  be supported by 1Password; provisioning does not grant trust to an unsupported
-  browser. Install the extension in the Named Profile and enable desktop integration in
-  both the extension and the app. browser-tools enters no credentials and
-  changes no lock settings or browser trust lists.
+  the flag, other platforms, the Camoufox engine, and machines without the
+  official registration entry keep a plain launch. A present but invalid
+  official registration, including a link whose target is gone, fails the
+  first launch of a new profile or a temporary session (exit 1) before any
+  browser starts. That failed launch removes the empty new profile directory
+  or the failed temporary session it created, so the next launch retries the
+  registration: an unchanged invalid registration is refused again, and a
+  repaired one registers. A profile directory that is no longer empty is
+  kept unchanged, and the failure says to provision the existing profile
+  with --1password after the repair; a failed temporary session needs no
+  flag, because relaunching creates a fresh one. The selected Chrome build
+  must also be supported by 1Password; provisioning does not grant trust to
+  an unsupported browser. Install the extension in the session and enable
+  desktop integration in both the extension and the app. browser-tools
+  enters no credentials and changes no lock settings or browser trust lists.
 
   Chrome looks for user-level native hosts in the active user-data directory.
   browser-tools reads only this registration, bounded to 64 KiB:
@@ -919,8 +924,8 @@ PROFILES AND LOGIN
   it yourself to re-provision. Resolve it before retrying, or launch without
   --1password.
   `profile delete` removes only the profile's registration, including its link
-  if present; the everyday Chrome source survives. External endpoints,
-  Camoufox profiles, and unnamed launches are never provisioned.
+  if present; the everyday Chrome source survives. External endpoints
+  and Camoufox profiles are never provisioned.
 
 
 APPROVED LOGINS (1PASSWORD)

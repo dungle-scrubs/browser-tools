@@ -59,6 +59,15 @@ bt snapshot
 
 A named profile keeps cookies and login state across restarts. Without `--profile`, each launch starts with a fresh temporary profile; one live instance can hold a named profile at a time.
 
+### Use 1Password in a fresh session
+
+```bash
+bt launch
+# The session is provisioned for 1Password; its preferences pin the extension.
+```
+
+On macOS with the 1Password desktop app installed, every fresh Chrome session this tool launches, named or temporary, is provisioned with the official 1Password native-messaging host and its new preferences pin the 1Password extension. Existing profiles and pin choices are never changed, and unpinning works as usual. Other platforms, the Camoufox engine, and machines without the official registration keep a plain launch. See `bt guide` for boundaries and the `--1password` flag.
+
 ### Run dependent steps in one connection
 
 ```bash

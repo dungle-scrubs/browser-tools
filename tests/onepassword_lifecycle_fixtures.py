@@ -6,6 +6,11 @@ launcher, and the platform/codesign/Camoufox guards. Extracted from
 and CLI test modules import what they use explicitly, so the autouse guards
 apply only to the modules that import them. Everything here is synthetic;
 no real registration, browser or codesign is touched.
+
+The ``stubbed_core_boundaries`` fixtures run the vendored launcher for real
+with only the process spawn, the CDP readiness probe and the startup sweep
+stubbed, for the tests that must prove the launcher's own initializer hook
+and generated files rather than a policy double.
 """
 
 from __future__ import annotations
@@ -19,7 +24,9 @@ from typing import TYPE_CHECKING, NoReturn
 import pytest
 
 from browser_tools import lifecycle, onepassword
+from browser_tools.core import launcher as core_launcher
 from browser_tools.core import registry as core_registry
+from browser_tools.core.connection import PortStatus
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -117,3 +124,63 @@ def fake_browser_launch(monkeypatch: pytest.MonkeyPatch, registry_path: str) -> 
 
     monkeypatch.setattr(lifecycle.core_launcher, "launch_browser", fake_launch_browser)
     return captured
+
+
+class _FakeProcess:
+    """Stands in for the spawned Chrome process."""
+
+    pid: int = 424242
+
+    def poll(self) -> None:
+        return None
+
+
+@pytest.fixture
+def synthetic_chrome_binary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A plain executable the environment override accepts as the browser."""
+    binary = tmp_path / "synthetic-chrome"
+    binary.write_text("#!/bin/sh\nexit 0\n")
+    binary.chmod(0o755)
+    monkeypatch.setenv(lifecycle.CHROME_BINARY_ENV_VAR, str(binary))
+    return binary
+
+
+@pytest.fixture
+def stubbed_core_boundaries(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, object]:
+    """Stub the spawn/CDP/sweep seams; keep allocation, preferences, registry.
+
+    The vendored launcher itself runs. ``order`` records the launch sequence
+    (cleanup sweep, initializer, preference preparation, spawn), and
+    ``sessions_root`` is the isolated session root fresh directories are
+    allocated under.
+    """
+    order: list[str] = []
+    sessions_root = tmp_path / "sessions"
+    monkeypatch.setattr(core_launcher, "_SESSION_ROOT", str(sessions_root))
+
+    def fake_popen(args, stdout=None, stderr=None, env=None, **kwargs):
+        # The first spawn is Chrome; the process-identity probe after it runs
+        # `ps` through Popen too, and is not a browser spawn.
+        if "spawn" not in order:
+            order.append("spawn")
+        return _FakeProcess()
+
+    async def fake_check_cdp_port_async(*, port):
+        return PortStatus(listening=True, browser_version="Chrome/999.0.0.0")
+
+    def fake_cleanup_sessions(registry_path=None):
+        order.append("cleanup")
+        return []
+
+    monkeypatch.setattr(core_launcher.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(core_launcher, "check_cdp_port_async", fake_check_cdp_port_async)
+    monkeypatch.setattr(core_launcher, "cleanup_sessions", fake_cleanup_sessions)
+
+    real_prepare = core_launcher._prepare_preferences
+
+    def recording_prepare(path):
+        order.append("preferences")
+        real_prepare(path)
+
+    monkeypatch.setattr(core_launcher, "_prepare_preferences", recording_prepare)
+    return {"order": order, "sessions_root": sessions_root}

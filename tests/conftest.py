@@ -71,6 +71,30 @@ def isolated_profile_roots(tmp_path_factory, monkeypatch):
     monkeypatch.setenv(lifecycle.LEGACY_PROFILES_ENV_VAR, str(root / "legacy"))
 
 
+@pytest.fixture(autouse=True)
+def isolated_official_onepassword_source(tmp_path, monkeypatch):
+    """Point the official 1Password source at an absent synthetic path.
+
+    The profile roots are isolated per test, but the automatic paths' source
+    check reads a fixed path in the developer's own ``~/Library``: on a
+    machine with the desktop app installed, a general unit test that launches
+    a fresh Chrome session would otherwise read the real registration and run
+    a real codesign against it. Every test starts with the source absent; the
+    positive fixtures (``valid_installation`` and the tests that plant their
+    own source) override it with a synthetic one.
+    """
+    from browser_tools import onepassword
+
+    monkeypatch.setattr(
+        onepassword,
+        "SOURCE_MANIFEST",
+        tmp_path
+        / "absent-official-source"
+        / onepassword.HOSTS_DIR_NAME
+        / f"{onepassword.HOST_NAME}.json",
+    )
+
+
 #: The port a person's own Chrome is most likely to be on, and the port every
 #: DevTools default names. A test that reaches it drives the developer's real
 #: browser: it opens an unauthenticated CDP session to whatever they had open
@@ -110,7 +134,6 @@ def _suite_ports_start_above_the_default_port():
     finally:
         registry.BASE_PORT = original_base
         registry.MAX_PORT = original_max
-
 
 
 @pytest.fixture(autouse=True)

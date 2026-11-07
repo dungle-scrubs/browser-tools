@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from browser_tools import lifecycle, onepassword
+from browser_tools import lifecycle, onepassword, onepassword_setup
 from browser_tools.core import launcher
 
 
@@ -28,14 +28,16 @@ def test_onepassword_module_respects_the_written_line_limit() -> None:
             "--line-length",
             "100",
             onepassword.__file__,
+            onepassword_setup.__file__,
         ],
         capture_output=True,
         text=True,
         check=False,
     )
     assert result.returncode == 0, (
-        "onepassword.py breaks CONTRIBUTING.md's 100-character line limit. "
-        "Run ruff format and split any remaining long literals.\n" + result.stdout + result.stderr
+        "onepassword.py or onepassword_setup.py breaks CONTRIBUTING.md's "
+        "100-character line limit. Run ruff format and split any remaining "
+        "long literals.\n" + result.stdout + result.stderr
     )
 
 
@@ -50,12 +52,23 @@ def test_onepassword_module_respects_the_written_line_limit() -> None:
         (onepassword.provision, ("Args:", "Raises:")),
         (lifecycle._check_onepassword_eligibility, ("Args:", "Raises:")),
         (lifecycle._provision_onepassword, ("Args:", "Raises:")),
+        (lifecycle._temporary_setup_initializer, ("Args:", "Returns:")),
         # The restored preference helper is this change's one vendored-launcher
         # exception (#201), so its boundary documentation is enforced by the
-        # same scoped check rather than a whole-repo docstring sweep.
+        # same scoped check rather than a whole-repo docstring sweep. The
+        # temporary-setup module and the launcher's initializer-marker helpers
+        # follow the same rule for the same reason.
         (launcher._prepare_preferences, ("Args:", "Raises:")),
         (launcher._reject_non_standard_json_constant, ("Args:", "Raises:")),
         (launcher._parse_finite_json_float, ("Args:", "Returns:", "Raises:")),
+        (launcher._publish_initialization_marker, ("Args:", "Returns:")),
+        (launcher._release_initialization_marker, ("Args:",)),
+        (launcher._initialization_marker_holds, ("Args:", "Returns:")),
+        (onepassword_setup.stable_extension_id, ("Returns:", "Raises:")),
+        (onepassword_setup.pin_document, ("Returns:",)),
+        (onepassword_setup.seed_pin, ("Args:", "Raises:")),
+        (onepassword_setup.new_profile_initializer, ("Returns:",)),
+        (onepassword_setup.temporary_session_initializer, ("Returns:",)),
     ],
 )
 def test_integration_boundaries_have_google_style_sections(function, sections) -> None:
@@ -137,6 +150,9 @@ SIZE_MODULES = (
     "test_onepassword_lifecycle.py",
     "test_onepassword_cli.py",
     "onepassword_lifecycle_fixtures.py",
+    "test_onepassword_temporary.py",
+    "test_onepassword_pin.py",
+    "test_core_initializer.py",
 )
 SIZE_LIMIT = 800
 
@@ -178,21 +194,24 @@ def test_the_guide_documents_the_automatic_registration_default() -> None:
     title = "1PASSWORD DESKTOP INTEGRATION."
     section = " ".join(guide.split(title, 1)[1].split("Chrome looks for", 1)[0].split())
     for requirement in (
-        "brand-new Named Chrome profile on macOS is registered automatically",
+        "a brand-new Named profile or a temporary unnamed launch is provisioned",
+        "pins the official stable 1Password Chrome extension",
         "An existing profile is never touched automatically",
-        "Without the flag, other platforms, the Camoufox engine, unnamed "
-        "launches, and machines without the official registration keep a plain launch",
+        "no existing preference document, pin choice, or pinned list is read or rewritten",
+        "Without the flag, other platforms, the Camoufox engine, and machines "
+        "without the official registration entry keep a plain launch",
         "A present but invalid official registration, including a link whose target is gone",
         "removes the empty new profile directory",
         "unchanged invalid registration is refused again",
         "a repaired one registers",
         "is kept unchanged",
         "provision the existing profile with --1password",
+        "relaunching creates a fresh one",
     ):
         assert requirement.lower() in section.lower(), (
             f"bt guide's automatic-registration paragraph must state {requirement!r}. "
-            "Keep the automatic default, its boundaries, and its retry behavior "
-            "documented."
+            "Keep the automatic default, its boundaries, the pin default, and its "
+            "retry behavior documented."
         )
 
 

@@ -80,7 +80,7 @@ from .process_utils import (
 from .usage import UsageError
 
 if TYPE_CHECKING:
-    from collections.abc import Generator
+    from collections.abc import Callable, Generator
 
 logger = logging.getLogger(__name__)
 
@@ -1066,7 +1066,7 @@ def _check_onepassword_eligibility(*, engine: str, profile: str | None) -> None:
 def _official_onepassword_source_present() -> bool:
     """Report whether the official source registration entry exists, unread.
 
-    The automatic path's single source check: a directory entry at the
+    The automatic paths' single source check: a directory entry at the
     provisioner's own fixed path, detected without following links so a
     dangling symlink counts as present. The manifest is never read or
     trusted here -- schema, signature, origin and no-overwrite all stay
@@ -1083,6 +1083,38 @@ def _official_onepassword_source_present() -> bool:
     from . import onepassword
 
     return onepassword.source_manifest_path().exists(follow_symlinks=False)
+
+
+def _temporary_setup_initializer(
+    *, engine: str, profile: str | None
+) -> Callable[[Path], None] | None:
+    """Build the automatic setup initializer for an anonymous Chrome launch.
+
+    A temporary session has no directory until the vendored launcher
+    allocates one, so its setup runs through the launcher's generic
+    directory-initializer hook rather than the lifecycle-owned sequence a
+    named profile uses. Only an anonymous macOS Chrome launch whose machine
+    carries an official source entry gets one: any other platform, the
+    Camoufox engine, a named profile (whose policy lives in ``launch``) and a
+    machine without the source entry keep today's plain launch. A present
+    but invalid source still reaches the provisioner, so its failure stays
+    visible.
+
+    Args:
+        engine: The normalized launch engine.
+        profile: The selected Named Profile, or None for an anonymous launch.
+
+    Returns:
+        The initializer the vendored launcher invokes on the freshly allocated
+        session directory, or None when this launch keeps a plain launch.
+    """
+    if profile is not None or engine != "chrome" or sys.platform != "darwin":
+        return None
+    if not _official_onepassword_source_present():
+        return None
+    from . import onepassword_setup
+
+    return onepassword_setup.temporary_session_initializer()
 
 
 def _discard_empty_automatic_initialization(user_data_dir: Path) -> bool:
@@ -1191,9 +1223,11 @@ def launch(
     checked, and written narrowed to the stable extension origin, after the
     profile lock and the live-holder refusal and before Chrome launches.
     Unsupported combinations are refused before any filesystem work. Without
-    the flag nothing is provisioned or validated, with one user-selected
-    exception: a brand-new Named Chrome profile on macOS is registered by the
-    same provisioner when the fixed official source manifest exists. An
+    the flag nothing is provisioned or validated, with two user-selected
+    exceptions: a brand-new Named Chrome profile on macOS, and an anonymous
+    macOS Chrome session, are registered by the same provisioner when the
+    fixed official source entry exists; the launcher's initializer hook then
+    seeds the new-profile pin default into the same directory. An
     existing profile never is, and a machine without the source keeps the
     launch plain.
     """
@@ -1228,6 +1262,12 @@ def launch(
     # combination creates no directory, takes no lock and spawns no browser.
     if onepassword:
         _check_onepassword_eligibility(engine=engine, profile=profile)
+
+    # The vendored launcher's directory-initializer hook (#201): None for
+    # every ordinary launch; set below by the paths that earn it -- a named
+    # profile right after its provisioning succeeded, an anonymous macOS
+    # Chrome session just before the launcher call.
+    initialize_directory: Callable[[Path], None] | None = None
 
     # Hold the profile's launch lock for the WHOLE sequence: stale-lock
     # cleanup, the holder lookup, the launch, the registration and the
@@ -1281,6 +1321,12 @@ def launch(
                 # a present but invalid official source fails here, closed.
                 if onepassword or automatic_registration:
                     _provision_onepassword(user_data_dir, automatic=automatic_registration)
+                    # After successful provisioning, the launcher hook seeds
+                    # the new-profile pin default into the same directory
+                    # before Chrome starts (#201).
+                    from . import onepassword_setup
+
+                    initialize_directory = onepassword_setup.new_profile_initializer()
             except BaseException:
                 # Any abort of an automatic first launch -- a refusal, a failure
                 # or an interruption such as Ctrl-C -- must not leave the empty
@@ -1327,6 +1373,14 @@ def launch(
         # property rather than a preference.
         binary = chrome_binary_from_env() or resolve_channel_binary(channel)
 
+        # Automatic temporary-session setup (#201): an anonymous macOS Chrome
+        # launch whose machine carries an official source entry runs its setup
+        # through the vendored launcher's generic initializer hook. A named
+        # profile instead set ``initialize_directory`` above, right after its
+        # provisioning succeeded; every other launch keeps None.
+        if initialize_directory is None:
+            initialize_directory = _temporary_setup_initializer(engine=engine, profile=profile)
+
         try:
             with _safe_allocation_base():
                 info = asyncio.run(
@@ -1345,6 +1399,7 @@ def launch(
                         window_border=window_border,
                         binary=binary,
                         user_data_dir=str(user_data_dir) if user_data_dir is not None else None,
+                        initialize_directory=initialize_directory,
                     )
                 )
         except BrowserNotFoundError as exc:
