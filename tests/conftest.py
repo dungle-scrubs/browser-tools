@@ -4,10 +4,14 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
 from browser_tools import lifecycle
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 
 #: Set for the whole session so no test can launch the developer's own browser.
@@ -71,28 +75,50 @@ def isolated_profile_roots(tmp_path_factory, monkeypatch):
     monkeypatch.setenv(lifecycle.LEGACY_PROFILES_ENV_VAR, str(root / "legacy"))
 
 
-@pytest.fixture(autouse=True)
-def isolated_official_onepassword_source(tmp_path, monkeypatch):
-    """Point the official 1Password source at an absent synthetic path.
+@pytest.fixture(scope="session", autouse=True)
+def isolated_official_onepassword_source(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> Iterator[None]:
+    """Point the official 1Password source at one absent synthetic path.
 
     The profile roots are isolated per test, but the automatic paths' source
     check reads a fixed path in the developer's own ``~/Library``: on a
     machine with the desktop app installed, a general unit test that launches
     a fresh Chrome session would otherwise read the real registration and run
-    a real codesign against it. Every test starts with the source absent; the
-    positive fixtures (``valid_installation`` and the tests that plant their
-    own source) override it with a synthetic one.
+    a real codesign against it. The isolation is session-scoped so it is in
+    force before any module-scoped fixture runs (``curated_browser`` is
+    module-scoped and set up before any function-scoped patch could apply).
+    Every test therefore starts with the source absent; the positive fixtures
+    (``valid_installation`` and the tests that plant their own source)
+    override it with a synthetic one for their own scope, and pytest's
+    monkeypatch nesting restores this absent session source when each
+    override is torn down.
     """
     from browser_tools import onepassword
 
-    monkeypatch.setattr(
-        onepassword,
-        "SOURCE_MANIFEST",
-        tmp_path
-        / "absent-official-source"
+    absent = (
+        tmp_path_factory.mktemp("absent-official-source")
         / onepassword.HOSTS_DIR_NAME
-        / f"{onepassword.HOST_NAME}.json",
+        / f"{onepassword.HOST_NAME}.json"
     )
+    with pytest.MonkeyPatch.context() as patches:
+        patches.setattr(onepassword, "SOURCE_MANIFEST", absent)
+        yield
+
+
+@pytest.fixture(scope="module")
+def official_source_at_module_scope() -> Path:
+    """Capture the official source path before any function-scoped fixture.
+
+    Module-scoped fixtures (``curated_browser`` among them) are set up before
+    the function-scoped fixtures of their first test, so what this captures
+    is exactly what a module-scoped browser launch would read. The witness
+    test asserts the session-level isolation above was already in force at
+    that point; the fixture itself never touches the real source.
+    """
+    from browser_tools import onepassword
+
+    return onepassword.source_manifest_path()
 
 
 #: The port a person's own Chrome is most likely to be on, and the port every

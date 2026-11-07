@@ -14,6 +14,24 @@ from browser_tools import lifecycle, onepassword, onepassword_setup, session_ini
 from browser_tools.core import launcher
 
 
+def test_module_scoped_fixtures_already_see_the_absent_synthetic_source(
+    official_source_at_module_scope: Path,
+) -> None:
+    """Prove the session-level source isolation precedes module-scope setup.
+
+    ``curated_browser`` is module-scoped and set up before any
+    function-scoped fixture of its module, so the pre-683749f function-scoped
+    patch could not stop a module-scoped browser launch from reading the
+    developer's real registration. The module-scoped witness fixture captured
+    the path before any function-scoped fixture of this module ran; it must
+    already be the session's absent synthetic source. The assertion never
+    stats or reads anything under the developer's home.
+    """
+    assert official_source_at_module_scope == onepassword.source_manifest_path()
+    assert "Library/Application Support" not in str(official_source_at_module_scope)
+    assert not official_source_at_module_scope.exists()
+
+
 def test_onepassword_module_respects_the_written_line_limit() -> None:
     """Enable E501 for the new module without changing the legacy exclusions."""
     result = subprocess.run(
@@ -141,6 +159,57 @@ def test_new_onepassword_test_classes_fully_annotate_public_methods() -> None:
         "#201 test classes' public methods must annotate every parameter "
         "(pytest.MonkeyPatch, Path, and the fixtures' return types) and use "
         "-> None. Unannotated: " + "; ".join(problems)
+    )
+
+
+def test_conftest_source_isolation_fixture_is_fully_annotated() -> None:
+    """Keep the suite's official-source isolation fixture fully annotated.
+
+    The fixture is the suite-wide boundary between general unit tests and the
+    developer's real 1Password installation, so CONTRIBUTING.md's annotation
+    rule applies to it even though the repository's type-check command covers
+    only ``src/``. Scoped to this one public conftest fixture; the legacy
+    conftest functions keep their shape.
+    """
+    source = (Path(__file__).parent / "conftest.py").read_text(encoding="utf-8")
+    tree = ast.parse(source, filename="conftest.py")
+    matches = [
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+        and node.name == "isolated_official_onepassword_source"
+    ]
+    problems: list[str] = []
+    if not matches:
+        problems.append("tests/conftest.py: fixture isolated_official_onepassword_source not found")
+    else:
+        fixture = matches[0]
+        unannotated = [
+            arg.arg
+            for arg in (*fixture.args.posonlyargs, *fixture.args.args, *fixture.args.kwonlyargs)
+            if arg.annotation is None
+        ]
+        for extra in (fixture.args.vararg, fixture.args.kwarg):
+            if extra is not None and extra.annotation is None:
+                unannotated.append(extra.arg)
+        parts = []
+        if unannotated:
+            parts.append("missing annotations for " + ", ".join(unannotated))
+        if fixture.returns is None:
+            parts.append("missing return annotation")
+        elif isinstance(fixture.returns, ast.Constant) and fixture.returns.value is None:
+            parts.append(
+                "return annotation must name the fixture's yield type "
+                "(e.g. Iterator[None]), not None"
+            )
+        if parts:
+            problems.append(
+                "tests/conftest.py::isolated_official_onepassword_source: " + "; ".join(parts)
+            )
+    assert not problems, (
+        "CONTRIBUTING.md requires type annotations on all public functions. "
+        "The suite's official-source isolation fixture is a public boundary: "
+        "annotate every parameter and the generator return. Unannotated: " + "; ".join(problems)
     )
 
 
