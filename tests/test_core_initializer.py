@@ -21,7 +21,7 @@ import types
 from pathlib import Path
 
 import pytest
-from conftest import discard_spawn_environment
+from launcher_spawn_helpers import discard_spawn_environment
 
 from browser_tools import session_initialization
 from browser_tools.core import launcher

@@ -23,7 +23,7 @@ import types
 from typing import TYPE_CHECKING, NoReturn
 
 import pytest
-from conftest import discard_spawn_environment
+from launcher_spawn_helpers import discard_spawn_environment
 
 from browser_tools import lifecycle, onepassword
 from browser_tools.core import launcher as core_launcher

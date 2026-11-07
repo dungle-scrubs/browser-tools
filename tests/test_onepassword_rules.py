@@ -258,9 +258,57 @@ def test_conftest_source_isolation_fixture_is_fully_annotated() -> None:
     )
 
 
+def test_launcher_spawn_helpers_reject_guard_is_fully_annotated() -> None:
+    """Keep the spawn-environment reject guard annotated in its own module.
+
+    The guard moved from ``tests/conftest.py`` to the uniquely named
+    ``tests/launcher_spawn_helpers.py`` because a flat ``conftest`` import
+    is ambiguous in a whole-suite run (``tests/parity/conftest.py`` puts its
+    directory on ``sys.path``). The same scoped annotation rule as the
+    conftest isolation fixture applies, plus its boundary documentation:
+    the guard's docstring must keep documenting what it refuses.
+    """
+    source = (Path(__file__).parent / "launcher_spawn_helpers.py").read_text(encoding="utf-8")
+    tree = ast.parse(source, filename="launcher_spawn_helpers.py")
+    matches = [
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+        and node.name == "discard_spawn_environment"
+    ]
+    problems: list[str] = []
+    if not matches:
+        problems.append("tests/launcher_spawn_helpers.py: discard_spawn_environment not found")
+    else:
+        guard = matches[0]
+        unannotated = [
+            arg.arg
+            for arg in (*guard.args.posonlyargs, *guard.args.args, *guard.args.kwonlyargs)
+            if arg.annotation is None
+        ]
+        for extra in (guard.args.vararg, guard.args.kwarg):
+            if extra is not None and extra.annotation is None:
+                unannotated.append(extra.arg)
+        if unannotated:
+            problems.append("missing annotations for " + ", ".join(unannotated))
+        if guard.returns is None:
+            problems.append("missing return annotation")
+        doc = ast.get_docstring(guard) or ""
+        for section in ("Args:", "Raises:"):
+            if section not in doc:
+                problems.append(f"docstring missing {section}")
+    assert not problems, (
+        "CONTRIBUTING.md requires type annotations on all public functions. "
+        "The suite-wide spawn reject guard is a public boundary shared by "
+        "every spawn double. Unannotated or undocumented: " + "; ".join(problems)
+    )
+
+
 #: The 1Password lifecycle test modules, the long-lived one first so an
 #: oversized lifecycle module is named for extraction rather than reported as
-#: a missing new file.
+#: a missing new file. The spawn-helper module joined the group when the
+#: reject guard moved out of ``conftest.py`` (whole-suite collection), so its
+#: size is held to the same written limit.
 SIZE_MODULES = (
     "test_onepassword_lifecycle.py",
     "test_onepassword_cli.py",
@@ -269,6 +317,7 @@ SIZE_MODULES = (
     "test_onepassword_pin.py",
     "test_core_initializer.py",
     "test_session_root_mutex.py",
+    "launcher_spawn_helpers.py",
 )
 SIZE_LIMIT = 800
 
