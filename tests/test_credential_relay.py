@@ -646,24 +646,38 @@ class TestMissingAndUnsupportedBinaries:
                     os.killpg(proc.pid, signal.SIGKILL)
                 original_wait(proc, timeout=5)
 
-    def test_a_hung_probe_is_bounded_and_its_group_torn_down(self, bin_dir):
-        marker = bin_dir / "probe-pid"
+    @pytest.mark.parametrize("startup_delay", [0.0, 1.0], ids=["prompt", "slow-start"])
+    def test_a_hung_probe_is_bounded_and_its_group_torn_down(
+        self, bin_dir, monkeypatch, startup_delay
+    ):
+        # The probe's PID comes from the parent's Popen, not from a marker the
+        # child writes: the first exec of a freshly written script can take
+        # most of the 0.5 s deadline on macOS, so the child may be killed
+        # before its own code runs (#205). ``slow-start`` pins that case.
         binary = write_fake(
             bin_dir,
             "opchain",
             f"""
             #!/usr/bin/env python3
-            import os, sys, time
-            with open({str(marker)!r}, "w") as fh:
-                fh.write(str(os.getpid()))
+            import time
+            time.sleep({startup_delay})
             time.sleep(30)
             """,
         )
+        original_wait = subprocess.Popen.wait
+        processes = []
+
+        def record(proc, timeout=None):
+            if not processes:
+                processes.append(proc)
+            return original_wait(proc, timeout=timeout)
+
+        monkeypatch.setattr(subprocess.Popen, "wait", record)
         start = time.monotonic()
         with pytest.raises(RelayError, match="did not answer in time"):
             ensure_relay_supported(str(binary), IDENTITY, timeout=0.5)
         assert time.monotonic() - start < 10
-        pid = int(marker.read_text())
+        pid = processes[0].pid
         gone = False
         for _ in range(100):
             try:
