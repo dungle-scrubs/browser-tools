@@ -209,6 +209,72 @@ def no_test_talks_devtools_on_the_default_port(monkeypatch):
     monkeypatch.setattr(CDPClient, "__init__", guarded_init)
 
 
+def discard_spawn_environment(env: object, synthetic: dict[str, str]) -> None:
+    """Drop a spawned process's environment before any assertion can print it.
+
+    The reject guard for every spawn double: the copy boundary is stubbed to
+    ``synthetic`` (see the ``synthetic_spawn_environment`` fixture), so an
+    environment that is not exactly that mapping means the real-copy path was
+    reached. The refusal names no values - it never prints or compares the
+    received environment against the real one, it only refuses it.
+
+    Args:
+        env: The ``env`` the launch handed the spawn boundary, if any.
+        synthetic: The one synthetic mapping the copy boundary may produce.
+
+    Raises:
+        AssertionError: The environment is neither absent nor the synthetic
+            mapping, so a real environment reached a spawn double.
+    """
+    if env is not None and env != synthetic:
+        raise AssertionError(
+            "a spawn double received an environment that is not the synthetic "
+            "mapping; the OS-environment copy boundary was not stubbed"
+        )
+
+
+@pytest.fixture
+def isolated_default_registry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Path:
+    """Point BOTH default-registry aliases at one synthetic path.
+
+    The session root is shared by every registry, so the real orphan sweep
+    honors the default registry's instances even when the caller passed an
+    isolated registry path. A real-sweep test that leaves an alias at the
+    developer's own ``/tmp/chrome-agent/registry.json`` reads the
+    developer's registry: ``launcher.REGISTRY_PATH`` (the imported alias the
+    sweep compares and falls back against) and ``core.registry.REGISTRY_PATH``
+    (the module-global fallback a None path resolves through) both need the
+    synthetic path (round-4 tests F1).
+    """
+    from browser_tools.core import launcher as core_launcher
+    from browser_tools.core import registry as core_registry
+
+    synthetic = tmp_path / "synthetic-default-registry.json"
+    monkeypatch.setattr(core_launcher, "REGISTRY_PATH", str(synthetic))
+    monkeypatch.setattr(core_registry, "REGISTRY_PATH", str(synthetic))
+    return synthetic
+
+
+@pytest.fixture
+def synthetic_spawn_environment(monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
+    """Stub the OS-environment copy boundary to one synthetic mapping.
+
+    ``launch_browser`` builds the spawned process's environment with
+    ``os.environ.copy()``; a spawn double that receives that mapping would
+    copy the developer's real environment into the process, and a failing
+    assertion inside the double would print it into the failure trace
+    (round-4 tests: abbreviated environment data in long traces). The stub
+    replaces the copy boundary itself with a small known mapping, so no real
+    value is ever read, copied, or printed, and a spawn double can reject any
+    environment that is not this mapping without ever seeing a real one.
+    """
+    mapping = {"BROWSER_TOOLS_TEST_ENV": "synthetic"}
+    monkeypatch.setattr(os.environ, "copy", lambda: dict(mapping))
+    return mapping
+
+
 @pytest.fixture
 def sample_mcp_response():
     """Sample MCP tool response."""

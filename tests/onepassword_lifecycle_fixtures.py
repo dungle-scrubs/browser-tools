@@ -23,6 +23,7 @@ import types
 from typing import TYPE_CHECKING, NoReturn
 
 import pytest
+from conftest import discard_spawn_environment
 
 from browser_tools import lifecycle, onepassword
 from browser_tools.core import launcher as core_launcher
@@ -225,7 +226,11 @@ def synthetic_chrome_binary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
 
 
 @pytest.fixture
-def stubbed_core_boundaries(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, object]:
+def stubbed_core_boundaries(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    synthetic_spawn_environment: dict[str, str],
+) -> dict[str, object]:
     """Stub the spawn/CDP/sweep seams; keep allocation, preferences, registry.
 
     The vendored launcher itself runs. ``order`` records the launch sequence
@@ -238,6 +243,10 @@ def stubbed_core_boundaries(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> 
     monkeypatch.setattr(core_launcher, "_SESSION_ROOT", str(sessions_root))
 
     def fake_popen(args, stdout=None, stderr=None, env=None, **kwargs):
+        # The environment never reaches a double: it is the synthetic mapping
+        # (the copy boundary is stubbed) or the double refuses it, and either
+        # way it is discarded before any assertion can print it.
+        discard_spawn_environment(env, synthetic_spawn_environment)
         # The first spawn is Chrome; the process-identity probe after it runs
         # `ps` through Popen too, and is not a browser spawn.
         if "spawn" not in order:

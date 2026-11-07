@@ -21,6 +21,7 @@ import types
 from pathlib import Path
 
 import pytest
+from conftest import discard_spawn_environment
 
 from browser_tools import session_initialization
 from browser_tools.core import launcher
@@ -40,13 +41,21 @@ class _FakeProcess:
 
 
 @pytest.fixture
-def stubbed_boundaries(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, object]:
+def stubbed_boundaries(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    synthetic_spawn_environment: dict[str, str],
+) -> dict[str, object]:
     """Stub spawn/CDP/sweep; keep allocation, preferences and the registry real."""
     order: list[str] = []
     sessions_root = tmp_path / "sessions"
     monkeypatch.setattr(launcher, "_SESSION_ROOT", str(sessions_root))
 
     def fake_popen(args, stdout=None, stderr=None, env=None, **kwargs):
+        # The environment never reaches a double: it is the synthetic mapping
+        # (the copy boundary is stubbed) or the double refuses it, and either
+        # way it is discarded before any assertion can print it.
+        discard_spawn_environment(env, synthetic_spawn_environment)
         if "spawn" not in order:
             order.append("spawn")
         return _FakeProcess()
@@ -365,6 +374,8 @@ class TestInitializationMarker:
         self,
         monkeypatch: pytest.MonkeyPatch,
         tmp_path: Path,
+        isolated_default_registry: Path,
+        synthetic_spawn_environment: dict[str, str],
     ) -> None:
         sessions_root = tmp_path / "sessions"
         sessions_root.mkdir(parents=True, exist_ok=True)
@@ -380,6 +391,7 @@ class TestInitializationMarker:
             assert release.wait(timeout=10)
 
         def fake_popen(args, stdout=None, stderr=None, env=None, **kwargs):
+            discard_spawn_environment(env, synthetic_spawn_environment)
             return _FakeProcess()
 
         async def fake_check_cdp_port_async(*, port):
@@ -419,7 +431,10 @@ class TestInitializationMarker:
         assert outcome[0].user_data_dir == str(seen[0])
 
     def test_a_held_marker_blocks_the_sweep_until_released(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        isolated_default_registry: Path,
     ) -> None:
         sessions_root = tmp_path / "sessions"
         sessions_root.mkdir(parents=True)
@@ -438,7 +453,10 @@ class TestInitializationMarker:
         assert not session.exists()
 
     def test_a_stale_marker_permits_the_ordinary_orphan_sweep(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        isolated_default_registry: Path,
     ) -> None:
         sessions_root = tmp_path / "sessions"
         sessions_root.mkdir(parents=True)
@@ -455,7 +473,10 @@ class TestInitializationMarker:
         assert removed == []
 
     def test_a_nonempty_marker_preserves_the_directory_without_being_read(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        isolated_default_registry: Path,
     ) -> None:
         sessions_root = tmp_path / "sessions"
         sessions_root.mkdir(parents=True)
@@ -472,7 +493,10 @@ class TestInitializationMarker:
         assert (session / session_initialization.INITIALIZING_MARKER).read_text() == "pid=1\n"
 
     def test_a_fifo_marker_neither_blocks_the_sweep_nor_is_followed(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        isolated_default_registry: Path,
     ) -> None:
         sessions_root = tmp_path / "sessions"
         sessions_root.mkdir(parents=True)
@@ -487,7 +511,10 @@ class TestInitializationMarker:
         assert session.is_dir()
 
     def test_a_symlinked_marker_is_never_followed(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        isolated_default_registry: Path,
     ) -> None:
         sessions_root = tmp_path / "sessions"
         sessions_root.mkdir(parents=True)
@@ -533,7 +560,11 @@ class TestStartupLease:
     """
 
     def test_another_registry_cannot_sweep_prepared_files_at_spawn(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        isolated_default_registry: Path,
+        synthetic_spawn_environment: dict[str, str],
     ) -> None:
         """Preserve prepared files until startup has registered the browser."""
         root = tmp_path / "sessions"
@@ -546,6 +577,7 @@ class TestStartupLease:
             prepared.append(witness)
 
         def spawn(args: list[str], **kwargs: object) -> _FakeProcess:
+            discard_spawn_environment(kwargs.pop("env", None), synthetic_spawn_environment)
             if args[0] != "synthetic-chrome":
                 raise OSError("synthetic process metadata unavailable")
             launcher.cleanup_sessions(registry_path=str(tmp_path / "other-registry.json"))
@@ -572,7 +604,11 @@ class TestStartupLease:
         assert prepared[0].is_file()
 
     def test_another_registry_cannot_sweep_prepared_files_during_readiness(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        isolated_default_registry: Path,
+        synthetic_spawn_environment: dict[str, str],
     ) -> None:
         """The lease outlives the spawn: a sweep fired while CDP readiness is
         still being awaited finds the marker still held."""
@@ -586,6 +622,7 @@ class TestStartupLease:
             prepared.append(witness)
 
         def spawn(args: list[str], **kwargs: object) -> _FakeProcess:
+            discard_spawn_environment(kwargs.pop("env", None), synthetic_spawn_environment)
             if args[0] != "synthetic-chrome":
                 raise OSError("synthetic process metadata unavailable")
             return _FakeProcess()
