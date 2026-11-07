@@ -83,6 +83,10 @@ def test_onepassword_module_respects_the_written_line_limit() -> None:
         (session_initialization.publish_initialization_marker, ("Args:", "Returns:")),
         (session_initialization.release_initialization_marker, ("Args:",)),
         (session_initialization.initialization_marker_holds, ("Args:", "Returns:")),
+        (session_initialization.session_root_mutex_path, ("Args:", "Returns:")),
+        (session_initialization.acquire_session_root_mutex, ("Args:", "Returns:", "Raises:")),
+        (session_initialization.release_session_root_mutex, ("Args:",)),
+        (session_initialization.session_root_exclusion, ("Args:", "Yields:", "Raises:")),
         (onepassword_setup.stable_extension_id, ("Returns:", "Raises:")),
         (onepassword_setup.pin_document, ("Returns:",)),
         (onepassword_setup.seed_pin, ("Args:", "Raises:")),
@@ -223,6 +227,7 @@ SIZE_MODULES = (
     "test_onepassword_temporary.py",
     "test_onepassword_pin.py",
     "test_core_initializer.py",
+    "test_session_root_mutex.py",
 )
 SIZE_LIMIT = 800
 

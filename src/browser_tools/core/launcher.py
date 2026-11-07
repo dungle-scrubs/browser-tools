@@ -31,10 +31,16 @@
 # sweep from reaping the directory; the same lease spans browser startup and
 # successful registration and is released in one outer finally on every
 # outcome, because between the marker's release and registration no registry
-# tracks the session and no Chrome singleton lock exists yet. A failure in
-# marker publication, the callback, or preference preparation before spawn
-# aborts the launch and removes only a throwaway directory this call
-# allocated; once a spawn may have begun, no directory deletion happens.
+# tracks the session and no Chrome singleton lock exists yet. The directory's
+# visible allocation and the marker's publication happen inside one short
+# session-root-mutex critical section (S4-1), and the orphan sweep holds the
+# same mutex across its whole check-and-delete transaction, so a sweep can
+# never act on an absent-marker observation that predates the publication;
+# neither critical section touches the callback, preferences, startup, or any
+# registry lock. A failure in mutex acquisition, marker publication, the
+# callback, or preference preparation before spawn aborts the launch and
+# removes only a throwaway directory this call allocated; once a spawn may
+# have begun, no directory deletion happens.
 # The marker protocol itself lives in browser_tools.session_initialization
 # (the repository's module-size rule moved it out of this adapted module);
 # this launcher is a thin caller of it.
@@ -265,7 +271,9 @@ async def launch_browser(
     policy. While the callback prepares a fresh session, an initialization
     marker is held until startup has completed and the instance is
     registered (released on every outcome), so a concurrent orphan sweep
-    cannot reap the directory.
+    cannot reap the directory; the allocation and the marker's publication
+    are serialized against that sweep's whole check-and-delete transaction
+    by the session-root mutex in ``browser_tools.session_initialization``.
 
     Returns InstanceInfo with name, port, pid, browser_version, user_data_dir.
 
@@ -297,42 +305,48 @@ async def launch_browser(
         registry_data = _load_registry(reg_path)
         port = allocate_port(registry=registry_data)
 
-    # Phase 3: Prepare launch arguments. The CLI front (#36) may bind a
-    # persistent per-profile user-data-dir; otherwise a throwaway session dir
-    # under _SESSION_ROOT is created (and later reaped on stop/cleanup).
-    if user_data_dir is not None:
-        session_dir = user_data_dir
-        os.makedirs(session_dir, exist_ok=True)
-    else:
-        os.makedirs(_SESSION_ROOT, exist_ok=True)
-        session_dir = tempfile.mkdtemp(prefix="session-", dir=_SESSION_ROOT)
-
-    # Phase 3.5 (adaptation, #201): a caller-supplied initializer runs inside
-    # the launch window -- after the session directory exists, before any
-    # preference write or browser spawn -- so its files are in place before
-    # Chrome first reads the directory. While it prepares a freshly allocated
-    # unbound session, an empty initialization marker held under a kernel
-    # flock keeps a concurrent orphan sweep from reaping the directory. The
-    # marker is never best-effort: publishing it happens inside the owned
-    # cleanup window below, so a session this call cannot protect aborts
-    # before the initializer or any spawn runs, and any failure there (in
-    # publication, the initializer, or preference preparation) removes only a
-    # throwaway directory this call allocated - never a supplied one - while
-    # the original error propagates and the marker release cannot mask it.
-    # The lease is NOT dropped here: the marker stays held through the spawn,
-    # CDP readiness and registration below (an unregistered session with no
-    # Chrome singleton lock yet is exactly what a concurrent sweep reaps),
-    # and one outer finally releases it on every outcome after that.
+    # Phase 3 + 3.5: Prepare the session directory. A supplied user_data_dir
+    # is created as-is. A throwaway session directory is allocated under
+    # _SESSION_ROOT; when an initializer will prepare it, the allocation runs
+    # inside one short session-root-mutex critical section together with the
+    # marker's publication, so the directory becomes visible and protected
+    # atomically with respect to any orphan sweep (which holds the same mutex
+    # across its check-and-delete transaction) and a launch that cannot
+    # acquire the mutex fails operationally rather than allocating
+    # unprotected. The critical section covers allocation and publication
+    # only - never the initializer callback, preferences, or startup, which
+    # stay protected by the per-directory marker's kernel flock. Allocation
+    # sits inside the owned cleanup window below, so any failure there (in
+    # the mutex, allocation, publication, the initializer, or preference
+    # preparation) removes only a throwaway directory this call allocated -
+    # never a supplied one - while the original error propagates and nothing
+    # masks it. The lease is NOT dropped inside the window: the marker stays
+    # held through the spawn, CDP readiness and registration below (an
+    # unregistered session with no Chrome singleton lock yet is exactly what
+    # a concurrent sweep reaps), and one outer finally releases it on every
+    # outcome after that.
     marker_fd: int | None = None
+    session_dir: str | None = None
     try:
         try:
-            if initialize_directory is not None and user_data_dir is None:
-                marker_fd = session_initialization.publish_initialization_marker(session_dir)
+            if user_data_dir is not None:
+                session_dir = user_data_dir
+                os.makedirs(session_dir, exist_ok=True)
+            else:
+                os.makedirs(_SESSION_ROOT, exist_ok=True)
+                if initialize_directory is None:
+                    session_dir = tempfile.mkdtemp(prefix="session-", dir=_SESSION_ROOT)
+                else:
+                    with session_initialization.session_root_exclusion(_SESSION_ROOT):
+                        session_dir = tempfile.mkdtemp(prefix="session-", dir=_SESSION_ROOT)
+                        marker_fd = session_initialization.publish_initialization_marker(
+                            session_dir
+                        )
             if initialize_directory is not None:
                 initialize_directory(Path(session_dir))
             _prepare_preferences(Path(session_dir) / "Default" / "Preferences")
         except BaseException:
-            if user_data_dir is None:
+            if user_data_dir is None and session_dir is not None:
                 try:
                     shutil.rmtree(session_dir, ignore_errors=True)
                 except OSError:
@@ -511,7 +525,7 @@ async def launch_browser(
         # outcome (return, failure, cancellation), never earlier; and once a
         # spawn may have begun, the directory itself is never deleted, the
         # lease is only released.
-        if marker_fd is not None:
+        if marker_fd is not None and session_dir is not None:
             session_initialization.release_initialization_marker(session_dir, marker_fd)
 
 
@@ -610,40 +624,63 @@ def cleanup_sessions(registry_path: str | None = None) -> list[str]:
         default_data = _load_registry(REGISTRY_PATH)
         tracked_dirs |= {e.get("user_data_dir") for e in default_data.values()}
 
-    # Legacy cleanup: remove session dirs not tracked by the registry
+    # Legacy cleanup: remove session dirs not tracked by the registry. The
+    # whole check-and-delete transaction runs under the same session-root
+    # mutex a launch holds from the moment its fresh directory becomes
+    # visible until its marker is published, so a sweep can never act on an
+    # absent-marker observation that predates that publication (S4-1). The
+    # registry cleanup and loads above stay outside the mutex region, and no
+    # registry lock is ever taken inside it. A sweep that cannot hold the
+    # mutex skips the orphan walk entirely rather than deleting without the
+    # serialization.
     if os.path.isdir(_SESSION_ROOT):
-        for entry in os.listdir(_SESSION_ROOT):
-            session_dir = os.path.join(_SESSION_ROOT, entry)
-            if not os.path.isdir(session_dir):
-                continue
-            # Skip the registry file itself
-            if entry == "registry.json" or entry.endswith(".tmp"):
-                continue
-            if session_dir in tracked_dirs:
-                continue
+        mutex_fd: int | None = None
+        try:
+            mutex_fd = session_initialization.acquire_session_root_mutex(_SESSION_ROOT)
+        except OSError as exc:
+            logger.warning(
+                "Skipping the orphan sweep; the session-root mutex is unavailable: %s", exc
+            )
+        if mutex_fd is not None:
+            try:
+                for entry in os.listdir(_SESSION_ROOT):
+                    session_dir = os.path.join(_SESSION_ROOT, entry)
+                    if not os.path.isdir(session_dir):
+                        continue
+                    # Skip the registry file itself
+                    if entry == "registry.json" or entry.endswith(".tmp"):
+                        continue
+                    if session_dir in tracked_dirs:
+                        continue
 
-            # An initializer still preparing this untracked directory holds an
-            # empty marker under a kernel flock (#201): a slow setup (signature
-            # verification, publication) must not be swept away by another
-            # registry's startup sweep. A marker the kernel has already
-            # released (a dead initializer) leaves it sweepable as before.
-            if session_initialization.initialization_marker_holds(session_dir):
-                continue
+                    # An initializer still preparing this untracked directory holds an
+                    # empty marker under a kernel flock (#201): a slow setup (signature
+                    # verification, publication) must not be swept away by another
+                    # registry's startup sweep. A marker the kernel has already
+                    # released (a dead initializer) leaves it sweepable as before.
+                    if session_initialization.initialization_marker_holds(session_dir):
+                        continue
 
-            lock_file = os.path.join(session_dir, "SingletonLock")
-            if not os.path.exists(lock_file) and not os.path.islink(lock_file):
-                logger.info("Removing orphaned session directory: %s", session_dir)
-                shutil.rmtree(session_dir, ignore_errors=True)
-            else:
-                # Identity check, not bare existence: the lock's PID is written
-                # by Chrome as it saw itself, so a sandboxed (PID-namespaced)
-                # ghost's lock aliases to a foreign host process. A PID that is
-                # not our own live process cannot be a browser holding this
-                # (untracked) profile.
-                pid = _read_lock_pid(lock_file=lock_file)
-                if pid is not None and not process_is_ours(pid=pid):
-                    logger.info("Removing orphaned session directory (PID %d not ours): %s", pid, session_dir)
-                    shutil.rmtree(session_dir, ignore_errors=True)
+                    lock_file = os.path.join(session_dir, "SingletonLock")
+                    if not os.path.exists(lock_file) and not os.path.islink(lock_file):
+                        logger.info("Removing orphaned session directory: %s", session_dir)
+                        shutil.rmtree(session_dir, ignore_errors=True)
+                    else:
+                        # Identity check, not bare existence: the lock's PID is written
+                        # by Chrome as it saw itself, so a sandboxed (PID-namespaced)
+                        # ghost's lock aliases to a foreign host process. A PID that is
+                        # not our own live process cannot be a browser holding this
+                        # (untracked) profile.
+                        pid = _read_lock_pid(lock_file=lock_file)
+                        if pid is not None and not process_is_ours(pid=pid):
+                            logger.info(
+                                "Removing orphaned session directory (PID %d not ours): %s",
+                                pid,
+                                session_dir,
+                            )
+                            shutil.rmtree(session_dir, ignore_errors=True)
+            finally:
+                session_initialization.release_session_root_mutex(mutex_fd)
 
     return removed
 
