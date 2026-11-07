@@ -122,13 +122,20 @@ def acquire_session_root_mutex(session_root: str) -> int:
 
     The mutex is an empty regular file, mode 0600, created on first use; no
     content is ever written or read and symlinks are never followed, so the
-    lock is the kernel flock alone. Acquisition blocks while another launch
-    or sweep holds it - both critical sections are short and wait on nothing
-    but the filesystem - so inability to hold it is an :class:`OSError` each
-    caller maps to its own failure policy: a launch that cannot serialize
-    its allocation fails operationally rather than proceeding unprotected,
-    and a sweep that cannot hold it skips the orphan walk rather than
-    deleting without the serialization.
+    lock is the kernel flock alone. The descriptor's own metadata is
+    validated before the lock is taken: a name that is not an empty regular
+    0600 file is not this mutex, so it is refused untouched - never
+    chmod'ed, unlinked, or truncated - because repairing an unknown file at
+    the protocol name would act on something this protocol never owned. The
+    open itself is nonblocking so a malformed special file parked at the
+    name cannot hold the open indefinitely; the flag never makes the flock
+    below non-blocking, which is ``LOCK_NB``'s decision alone. Acquisition
+    blocks while another launch or sweep holds it - both critical sections
+    are short and wait on nothing but the filesystem - so inability to hold
+    it is an :class:`OSError` each caller maps to its own failure policy:
+    a launch that cannot serialize its allocation fails operationally
+    rather than proceeding unprotected, and a sweep that cannot hold it
+    skips the orphan walk rather than deleting without the serialization.
 
     Args:
         session_root: The shared session root directory; it must exist.
@@ -138,14 +145,29 @@ def acquire_session_root_mutex(session_root: str) -> int:
         :func:`release_session_root_mutex`.
 
     Raises:
-        OSError: The mutex could not be opened or locked. Nothing was held.
+        OSError: The mutex could not be opened or locked, or an existing
+            name is not an empty regular file with mode 0600. Nothing was
+            held; a descriptor the refusal opened is closed, and an invalid
+            existing file is left exactly as it was.
     """
+    mutex_path = session_root_mutex_path(session_root)
     fd = os.open(
-        session_root_mutex_path(session_root),
-        os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW,
+        mutex_path,
+        os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK,
         0o600,
     )
     try:
+        info = os.fstat(fd)
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_size != 0
+            or stat.S_IMODE(info.st_mode) != 0o600
+        ):
+            raise OSError(
+                errno.EINVAL,
+                "the session-root mutex must be an empty regular file, mode 0600",
+                mutex_path,
+            )
         fcntl.flock(fd, fcntl.LOCK_EX)
     except BaseException:
         with contextlib.suppress(OSError):

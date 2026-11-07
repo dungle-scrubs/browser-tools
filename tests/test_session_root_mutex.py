@@ -20,6 +20,7 @@ failure traces of a red run.
 from __future__ import annotations
 
 import asyncio
+import errno
 import fcntl
 import json
 import os
@@ -203,6 +204,154 @@ class TestProtocol:
             assert stat.S_IMODE(info.st_mode) == 0o600
         finally:
             session_initialization.release_session_root_mutex(fd)
+
+
+class TestMutexMetadataProtocol:
+    """The mutex protocol's settled shape: an EMPTY REGULAR 0600 file.
+
+    The lock is the kernel flock alone, but the descriptor's own metadata
+    (fstat, never the path) must already be that shape before the lock is
+    taken. Any other file sitting at the protocol name is refused: left
+    untouched - no chmod, unlink, or truncate - with an operational
+    :class:`OSError` whose diagnostic names the path only, because nothing
+    about the file was read. Real files at a real OS boundary; no double
+    reports a fact.
+    """
+
+    def test_a_preexisting_empty_0600_mutex_file_is_accepted_and_locked(
+        self, tmp_path: Path
+    ) -> None:
+        """A previous launch's released mutex is exactly the protocol's file."""
+        root = tmp_path / "sessions"
+        root.mkdir()
+        existing = root / SESSION_ROOT_MUTEX
+        fd = os.open(existing, os.O_CREAT | os.O_WRONLY, 0o600)
+        os.close(fd)
+        os.chmod(existing, 0o600)
+
+        held = session_initialization.acquire_session_root_mutex(str(root))
+        try:
+            assert not _try_lock_mutex(root), "the acquired mutex was not held"
+        finally:
+            session_initialization.release_session_root_mutex(held)
+
+        assert _try_lock_mutex(root), "the released mutex stayed held"
+        info = existing.stat()
+        assert stat.S_ISREG(info.st_mode)
+        assert info.st_size == 0
+        assert stat.S_IMODE(info.st_mode) == 0o600
+
+    def test_a_nonempty_mutex_file_is_refused_and_left_untouched(
+        self, tmp_path: Path
+    ) -> None:
+        """The parent's reproduction: a nonempty 0644 file is not this mutex."""
+        root = tmp_path / "sessions"
+        root.mkdir()
+        invalid = root / SESSION_ROOT_MUTEX
+        invalid.write_text("synthetic mutex content")
+        os.chmod(invalid, 0o644)
+
+        with pytest.raises(OSError) as refused:
+            session_initialization.acquire_session_root_mutex(str(root))
+
+        assert refused.value.errno == errno.EINVAL
+        assert refused.value.filename == str(invalid)
+        assert invalid.read_text() == "synthetic mutex content"
+        assert stat.S_IMODE(invalid.stat().st_mode) == 0o644
+        assert _try_lock_mutex(root), "the refusal left a lock held"
+
+    def test_a_wrong_mode_mutex_file_is_refused_and_left_untouched(
+        self, tmp_path: Path
+    ) -> None:
+        """Empty but world-readable is not the protocol's file either."""
+        root = tmp_path / "sessions"
+        root.mkdir()
+        invalid = root / SESSION_ROOT_MUTEX
+        invalid.write_text("")
+        os.chmod(invalid, 0o644)
+
+        with pytest.raises(OSError) as refused:
+            session_initialization.acquire_session_root_mutex(str(root))
+
+        assert refused.value.errno == errno.EINVAL
+        assert invalid.read_text() == ""
+        assert stat.S_IMODE(invalid.stat().st_mode) == 0o644
+        assert _try_lock_mutex(root), "the refusal left a lock held"
+
+    def test_a_symlinked_mutex_is_refused_without_touching_the_target(
+        self, tmp_path: Path
+    ) -> None:
+        """O_NOFOLLOW stops the open before the target is ever reached."""
+        root = tmp_path / "sessions"
+        root.mkdir()
+        target = tmp_path / "elsewhere.lock"
+        target.write_text("")
+        os.chmod(target, 0o600)
+        link = root / SESSION_ROOT_MUTEX
+        os.symlink(target, link)
+
+        with pytest.raises(OSError):
+            session_initialization.acquire_session_root_mutex(str(root))
+
+        assert link.is_symlink()
+        assert os.readlink(link) == str(target)
+        assert target.read_text() == ""
+        assert stat.S_IMODE(target.stat().st_mode) == 0o600
+
+    def test_a_fifo_mutex_is_refused_without_reading_or_writing_it(
+        self, tmp_path: Path
+    ) -> None:
+        """A FIFO at the protocol name opens (O_NONBLOCK) and is refused by
+        its descriptor metadata; no data ever moves through it."""
+        root = tmp_path / "sessions"
+        root.mkdir()
+        fifo = root / SESSION_ROOT_MUTEX
+        os.mkfifo(fifo, 0o600)
+
+        with pytest.raises(OSError) as refused:
+            session_initialization.acquire_session_root_mutex(str(root))
+
+        assert refused.value.errno == errno.EINVAL
+        info = fifo.lstat()
+        assert stat.S_ISFIFO(info.st_mode)
+        assert info.st_size == 0
+        assert stat.S_IMODE(info.st_mode) == 0o600
+
+    def test_a_refused_acquisition_closes_its_descriptor(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The kernel itself vouches the refused open's descriptor is closed.
+
+        The witness observes the real open's returned descriptor number for
+        the mutex path, then asks the kernel for that number's flags: a
+        closed descriptor answers EBADF. Nothing is mocked; the real open,
+        refusal, and close all run.
+        """
+        root = tmp_path / "sessions"
+        root.mkdir()
+        invalid = root / SESSION_ROOT_MUTEX
+        invalid.write_text("synthetic mutex content")
+        os.chmod(invalid, 0o600)
+        real_open = os.open
+        opened: list[int] = []
+
+        def opening(path, *args, **kwargs):
+            fd = real_open(path, *args, **kwargs)
+            if os.path.basename(os.fsdecode(path)) == SESSION_ROOT_MUTEX:
+                opened.append(fd)
+            return fd
+
+        monkeypatch.setattr(os, "open", opening)
+        with pytest.raises(OSError):
+            session_initialization.acquire_session_root_mutex(str(root))
+
+        assert opened, "the witness never saw the mutex opened"
+        for fd in opened:
+            with pytest.raises(OSError) as closed:
+                fcntl.fcntl(fd, fcntl.F_GETFD)
+            assert closed.value.errno == errno.EBADF, (
+                f"descriptor {fd} was still open after the refused acquisition"
+            )
 
 
 class TestPublicationRace:
@@ -479,6 +628,69 @@ class TestInabilityPolicies:
 
         assert ran == []
         assert list(root.glob("session-*")) == []
+
+    def test_a_sweep_facing_an_invalid_mutex_file_skips_orphan_removal(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        isolated_default_registry: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A nonempty mutex file is an inability like any other: the sweep
+        skips the unsafe walk, never blindly deletes, and never repairs the
+        invalid file into a mutex."""
+        root = tmp_path / "sessions"
+        orphan = _plant_orphan(root, "session-orphan")
+        invalid = root / SESSION_ROOT_MUTEX
+        invalid.write_text("synthetic mutex content")
+        os.chmod(invalid, 0o600)
+        monkeypatch.setattr(launcher, "_SESSION_ROOT", str(root))
+
+        with caplog.at_level("WARNING"):
+            removed = launcher.cleanup_sessions(registry_path=str(tmp_path / "sweeper.json"))
+
+        assert removed == []
+        assert orphan.is_dir(), "a sweep that refused the mutex still deleted"
+        assert invalid.read_text() == "synthetic mutex content"
+        assert stat.S_IMODE(invalid.stat().st_mode) == 0o600
+        assert "Skipping the orphan sweep" in caplog.text
+
+    def test_a_launch_facing_an_invalid_mutex_file_fails_operationally(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        isolated_default_registry: Path,
+        synthetic_spawn_environment: dict[str, str],
+    ) -> None:
+        """Creator inability for the invalid-file input: abort before the
+        initializer or any spawn, never repair the file, protect nothing."""
+        root = tmp_path / "sessions"
+        root.mkdir()
+        invalid = root / SESSION_ROOT_MUTEX
+        invalid.write_text("synthetic mutex content")
+        os.chmod(invalid, 0o600)
+        monkeypatch.setattr(launcher, "_SESSION_ROOT", str(root))
+        ran: list[str] = []
+
+        def initialize(directory: Path) -> None:
+            ran.append("initializer")
+
+        def spawn(args: list[str], **kwargs: object) -> _FakeProcess:
+            discard_spawn_environment(kwargs.pop("env", None), synthetic_spawn_environment)
+            ran.append("spawn")
+            return _FakeProcess()
+
+        monkeypatch.setattr(launcher.subprocess, "Popen", spawn)
+        monkeypatch.setattr(launcher, "check_cdp_port_async", _ready)
+
+        with pytest.raises(OSError):
+            asyncio.run(launcher.launch_browser(**_launch_kwargs(tmp_path, 9507) | {
+                "initialize_directory": initialize,
+            }))
+
+        assert ran == []
+        assert list(root.glob("session-*")) == []
+        assert invalid.read_text() == "synthetic mutex content"
 
     def test_a_plain_launch_without_an_initializer_never_takes_the_mutex(
         self,
