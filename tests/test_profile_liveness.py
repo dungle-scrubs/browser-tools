@@ -222,8 +222,13 @@ class TestProfilePersistence:
         profile_dir = lifecycle.profile_user_data_dir("keep")
         profile_dir.mkdir(parents=True)
         (profile_dir / "marker").write_text("x")
+        # A PID that cannot exist: stop() confirms the recorded browser exited,
+        # and a recorded PID that is live on the host (1234 can be a root
+        # process on a CI runner) makes that check unknown.
         core_registry._save_registry(
-            {"keep-01": _entry(profile="keep", user_data_dir=str(profile_dir))}, registry_path
+            {"keep-01": _entry(profile="keep", pid=2_000_000_000, pid_start=None,
+                               user_data_dir=str(profile_dir))},
+            registry_path,
         )
         monkeypatch.setattr(lifecycle, "instance_is_live", lambda inst: True)
         monkeypatch.setattr(lifecycle, "_terminate_verified", lambda ext: None)
@@ -238,7 +243,9 @@ class TestProfilePersistence:
         eph = tmp_path / "eph"
         eph.mkdir()
         core_registry._save_registry(
-            {"eph-01": _entry(profile=None, user_data_dir=str(eph))}, registry_path
+            {"eph-01": _entry(profile=None, pid=2_000_000_000, pid_start=None,
+                              user_data_dir=str(eph))},
+            registry_path,
         )
         monkeypatch.setattr(lifecycle, "instance_is_live", lambda inst: True)
         monkeypatch.setattr(lifecycle, "_terminate_verified", lambda ext: None)
