@@ -182,7 +182,6 @@ class TestSeedPin:
     ) -> None:
         session = tmp_path / "session"
         session.mkdir()
-        real_fsync = os.fsync
 
         def failing_fsync(fd):
             raise OSError(5, "synthetic seed I/O failure")

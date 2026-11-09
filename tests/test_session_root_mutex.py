@@ -136,6 +136,40 @@ def _blocking_mutex(root: Path) -> Path:
     return blocked
 
 
+#: The two ways the session-root mutex can be unusable, in the order the
+#: sweep and the launch check them: a mutex that cannot be locked at all (a
+#: directory where the file must be), and a mutex file that is not the
+#: protocol's own file.
+MUTEX_INABILITY_INPUTS = ("cannot-hold", "invalid-file")
+
+#: The synthetic port each inability input launches with, the one the
+#: separate per-input tests used.
+MUTEX_INABILITY_PORTS = {"cannot-hold": 9504, "invalid-file": 9507}
+
+
+def _unusable_mutex(root: Path, inability: str) -> Path | None:
+    """Put the session-root mutex into the named unusable state.
+
+    Args:
+        root: The session root the mutex lives in.
+        inability: ``"cannot-hold"`` for a mutex that cannot be locked at
+            all, or ``"invalid-file"`` for a file that is not the
+            protocol's own.
+
+    Returns:
+        The invalid mutex file's path for the ``"invalid-file"`` input, and
+        ``None`` for the ``"cannot-hold"`` input.
+    """
+    if inability == "cannot-hold":
+        _blocking_mutex(root)
+        return None
+    root.mkdir(parents=True, exist_ok=True)
+    invalid = root / SESSION_ROOT_MUTEX
+    invalid.write_text("synthetic mutex content")
+    os.chmod(invalid, 0o600)
+    return invalid
+
+
 def _launch_kwargs(tmp_path: Path, port: int) -> dict[str, object]:
     """The shared synthetic launch arguments every witness uses."""
     return {
@@ -582,37 +616,67 @@ class TestCriticalSectionBoundaries:
 
 
 class TestInabilityPolicies:
-    def test_a_sweep_that_cannot_hold_the_mutex_skips_orphan_removal(
+    @pytest.mark.parametrize(
+        "inability",
+        [pytest.param(name, id=name) for name in MUTEX_INABILITY_INPUTS],
+    )
+    def test_a_sweep_facing_an_unusable_mutex_skips_orphan_removal(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
         isolated_default_registry: Path,
         caplog: pytest.LogCaptureFixture,
+        inability: str,
     ) -> None:
-        """Sweep inability skips the unsafe walk; it never blindly deletes."""
+        """Sweep inability skips the unsafe walk; it never blindly deletes.
+
+        Both inputs are the same inability for the sweep: a mutex that
+        cannot be locked at all, and a nonempty mutex file that is not the
+        protocol's own. The sweep skips the unsafe walk, never blindly
+        deletes, and never repairs the invalid file into a mutex.
+        """
         root = tmp_path / "sessions"
         orphan = _plant_orphan(root, "session-orphan")
-        _blocking_mutex(root)
+        invalid = _unusable_mutex(root, inability)
         monkeypatch.setattr(launcher, "_SESSION_ROOT", str(root))
 
         with caplog.at_level("WARNING"):
             removed = launcher.cleanup_sessions(registry_path=str(tmp_path / "sweeper.json"))
 
         assert removed == []
-        assert orphan.is_dir(), "a sweep that could not hold the mutex still deleted"
+        if invalid is None:
+            assert orphan.is_dir(), "a sweep that could not hold the mutex still deleted"
+        else:
+            assert orphan.is_dir(), "a sweep that refused the mutex still deleted"
+            assert invalid.read_text() == "synthetic mutex content"
+            assert stat.S_IMODE(invalid.stat().st_mode) == 0o600
         assert "Skipping the orphan sweep" in caplog.text
 
-    def test_a_launch_that_cannot_hold_the_mutex_fails_operationally(
+    @pytest.mark.parametrize(
+        ("inability", "port"),
+        [
+            pytest.param(name, MUTEX_INABILITY_PORTS[name], id=name)
+            for name in MUTEX_INABILITY_INPUTS
+        ],
+    )
+    def test_a_launch_facing_an_unusable_mutex_fails_operationally(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
         isolated_default_registry: Path,
         synthetic_spawn_environment: dict[str, str],
+        inability: str,
+        port: int,
     ) -> None:
-        """Creator inability aborts before the initializer or any spawn; a
-        session this call cannot protect never runs unprotected."""
+        """Creator inability aborts before the initializer or any spawn.
+
+        Both inputs are the same inability for the creator: a mutex that
+        cannot be locked at all, and a nonempty mutex file that is not the
+        protocol's own. The launch aborts before the initializer or any
+        spawn, never repairs the invalid file, and protects nothing.
+        """
         root = tmp_path / "sessions"
-        _blocking_mutex(root)
+        invalid = _unusable_mutex(root, inability)
         monkeypatch.setattr(launcher, "_SESSION_ROOT", str(root))
         ran: list[str] = []
 
@@ -628,75 +692,14 @@ class TestInabilityPolicies:
         monkeypatch.setattr(launcher, "check_cdp_port_async", _ready)
 
         with pytest.raises(OSError):
-            asyncio.run(launcher.launch_browser(**_launch_kwargs(tmp_path, 9504) | {
+            asyncio.run(launcher.launch_browser(**_launch_kwargs(tmp_path, port) | {
                 "initialize_directory": initialize,
             }))
 
         assert ran == []
         assert list(root.glob("session-*")) == []
-
-    def test_a_sweep_facing_an_invalid_mutex_file_skips_orphan_removal(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-        isolated_default_registry: Path,
-        caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        """A nonempty mutex file is an inability like any other: the sweep
-        skips the unsafe walk, never blindly deletes, and never repairs the
-        invalid file into a mutex."""
-        root = tmp_path / "sessions"
-        orphan = _plant_orphan(root, "session-orphan")
-        invalid = root / SESSION_ROOT_MUTEX
-        invalid.write_text("synthetic mutex content")
-        os.chmod(invalid, 0o600)
-        monkeypatch.setattr(launcher, "_SESSION_ROOT", str(root))
-
-        with caplog.at_level("WARNING"):
-            removed = launcher.cleanup_sessions(registry_path=str(tmp_path / "sweeper.json"))
-
-        assert removed == []
-        assert orphan.is_dir(), "a sweep that refused the mutex still deleted"
-        assert invalid.read_text() == "synthetic mutex content"
-        assert stat.S_IMODE(invalid.stat().st_mode) == 0o600
-        assert "Skipping the orphan sweep" in caplog.text
-
-    def test_a_launch_facing_an_invalid_mutex_file_fails_operationally(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-        isolated_default_registry: Path,
-        synthetic_spawn_environment: dict[str, str],
-    ) -> None:
-        """Creator inability for the invalid-file input: abort before the
-        initializer or any spawn, never repair the file, protect nothing."""
-        root = tmp_path / "sessions"
-        root.mkdir()
-        invalid = root / SESSION_ROOT_MUTEX
-        invalid.write_text("synthetic mutex content")
-        os.chmod(invalid, 0o600)
-        monkeypatch.setattr(launcher, "_SESSION_ROOT", str(root))
-        ran: list[str] = []
-
-        def initialize(directory: Path) -> None:
-            ran.append("initializer")
-
-        def spawn(args: list[str], **kwargs: object) -> _FakeProcess:
-            discard_spawn_environment(kwargs.pop("env", None), synthetic_spawn_environment)
-            ran.append("spawn")
-            return _FakeProcess()
-
-        monkeypatch.setattr(launcher.subprocess, "Popen", spawn)
-        monkeypatch.setattr(launcher, "check_cdp_port_async", _ready)
-
-        with pytest.raises(OSError):
-            asyncio.run(launcher.launch_browser(**_launch_kwargs(tmp_path, 9507) | {
-                "initialize_directory": initialize,
-            }))
-
-        assert ran == []
-        assert list(root.glob("session-*")) == []
-        assert invalid.read_text() == "synthetic mutex content"
+        if invalid is not None:
+            assert invalid.read_text() == "synthetic mutex content"
 
     def test_a_plain_launch_without_an_initializer_never_takes_the_mutex(
         self,

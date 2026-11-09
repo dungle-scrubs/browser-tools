@@ -31,6 +31,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from module_size_rules import assert_modules_within_size_limit
 from vulture import Vulture
 
 from browser_tools import login as login_module
@@ -117,9 +118,6 @@ SIZE_MODULES = (
     "test_login_bridge.py",
 )
 
-#: CONTRIBUTING.md's module-size guidance: modules stay under ~800 lines.
-SIZE_LIMIT = 800
-
 
 def test_login_test_modules_stay_under_the_module_size_limit() -> None:
     """A login test module over the size limit fails, named with its count.
@@ -131,18 +129,17 @@ def test_login_test_modules_stay_under_the_module_size_limit() -> None:
     a new test module - never a license to delete a case to fit the limit.
     """
     tests = Path(__file__).parent
-    for name in SIZE_MODULES:
-        path = tests / name
-        assert path.is_file(), (
-            f"tests/{name} does not exist; the whole-flow login tests are "
-            "organized as exactly these two modules"
-        )
-        count = len(path.read_text(encoding="utf-8").splitlines())
-        assert count <= SIZE_LIMIT, (
-            f"tests/{name} is {count} lines, over the {SIZE_LIMIT}-line "
-            "module-size limit (CONTRIBUTING.md, Module Size): extract a "
-            "cohesive set of symbols into a new test module and migrate "
-            "the references to it, keeping every collected case exactly "
-            "once (do not re-export test classes; pytest would collect "
-            "them twice)"
-        )
+    assert_modules_within_size_limit(
+        tests,
+        SIZE_MODULES,
+        path_prefix="tests/",
+        missing_message=(
+            "the whole-flow login tests are organized as exactly these two modules"
+        ),
+        oversize_remedy=(
+            "extract a cohesive set of symbols into a new test module and "
+            "migrate the references to it, keeping every collected case "
+            "exactly once (do not re-export test classes; pytest would "
+            "collect them twice)"
+        ),
+    )
