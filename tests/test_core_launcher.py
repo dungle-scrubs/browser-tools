@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import pytest
+from launcher_spawn_helpers import stub_spawn_environment
 
 from browser_tools.core import launcher
 from browser_tools.core.connection import PortStatus
@@ -54,10 +55,22 @@ def _fingerprint_file(tmp_path, **overrides):
 
 def _patch_launch_plumbing(monkeypatch, captured):
     """Stub the parts of launch_browser that would otherwise touch the
-    network, spawn a real process, or walk the real /tmp/chrome-agent tree.
+    network, spawn a real process, walk the real /tmp/chrome-agent tree, or
+    copy the developer's real environment into ``captured`` (#211).
+
+    Returns the synthetic mapping that ``os.environ.copy()`` now produces. A
+    launch may add ``TZ`` from a fingerprint; the double refuses any other
+    variable without printing a value.
     """
+    synthetic = stub_spawn_environment(monkeypatch)
+    allowed = set(synthetic) | {"TZ"}
 
     def fake_popen(args, stdout=None, stderr=None, env=None, **kwargs):
+        if env is not None and not set(env) <= allowed:
+            raise AssertionError(
+                "the spawn double received variables outside the synthetic "
+                "mapping; the environment copy was not stubbed"
+            )
         # First call only: launch_browser's first spawn is Chrome; anything
         # after it (utils.process_start_time's `ps` probe on platforms without
         # /proc) must not clobber what the assertions read. On Python 3.14
@@ -75,6 +88,7 @@ def _patch_launch_plumbing(monkeypatch, captured):
 
     monkeypatch.setattr(launcher, "check_cdp_port_async", fake_check_cdp_port_async)
     monkeypatch.setattr(launcher, "cleanup_sessions", lambda registry_path=None: [])
+    return synthetic
 
 
 class TestProfilePreferences:
@@ -332,6 +346,32 @@ class TestFingerprintBecomesLaunchFlags:
         assert not any(a.startswith("--user-agent=") for a in args)
         assert not any(a.startswith("--lang=") for a in args)
         assert "TZ" not in (captured["env"] or {})
+
+    def test_an_ambient_tz_never_reaches_the_spawned_browser(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A ``TZ`` exported by the developer's shell stays out of the spawn (#211).
+
+        The plumbing stubs the environment copy to a synthetic mapping, so the
+        ambient value set here reaches the spawn only through a real copy. With
+        no fingerprint, the spawn gets exactly the synthetic mapping.
+        """
+        monkeypatch.setenv("TZ", "Synthetic/Ambient")
+        captured: dict[str, object] = {}
+        synthetic = _patch_launch_plumbing(monkeypatch, captured)
+
+        asyncio.run(
+            launcher.launch_browser(
+                port_override=9339,
+                fingerprint=None,
+                headless=True,
+                working_dir=str(tmp_path),
+                registry_path=str(tmp_path / "registry.json"),
+                user_data_dir=str(tmp_path / "udd"),
+            )
+        )
+
+        assert captured["env"] == synthetic
 
     def test_missing_fingerprint_file_raises(self, monkeypatch, tmp_path):
         captured: dict = {}

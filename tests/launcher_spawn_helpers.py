@@ -13,6 +13,35 @@ name to collide with.
 
 from __future__ import annotations
 
+import os
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import pytest
+
+
+def stub_spawn_environment(monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
+    """Stub the OS-environment copy boundary to one synthetic mapping.
+
+    ``launch_browser`` builds the spawned process's environment with
+    ``os.environ.copy()``. A spawn double that receives that mapping holds a
+    copy of the developer's real environment, and a failing assertion on it
+    prints the values into the failure trace (round-4 tests, #211). The stub
+    replaces the copy boundary itself with a small known mapping, so no real
+    value is read, copied, or printed.
+
+    Args:
+        monkeypatch: The test's monkeypatch, which restores the copy
+            boundary when the test ends.
+
+    Returns:
+        The synthetic mapping. Each ``os.environ.copy()`` call returns a new
+        ``dict`` equal to it, so a launch that adds a key never changes it.
+    """
+    mapping = {"BROWSER_TOOLS_TEST_ENV": "synthetic"}
+    monkeypatch.setattr(os.environ, "copy", lambda: dict(mapping))
+    return mapping
+
 
 def discard_spawn_environment(env: object, synthetic: dict[str, str]) -> None:
     """Drop a spawned process's environment before any assertion can print it.
