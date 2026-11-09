@@ -2,9 +2,9 @@
 
 Deterministic kernel-boundary witnesses for the shared synchronization
 between a launch's visible allocation-plus-marker-publication and an orphan
-sweep's check-and-delete transaction. The parent's frozen witness
-(``evidence/publication-race-witness.py`` in the task folder) proved the
-race: a sweep that observed no marker could pause, let the creator publish
+sweep's check-and-delete transaction. The frozen witness
+``.evidence/onepassword-chrome-unlock/publication-race-witness.py`` proved
+the race at ``4484568``: a sweep that observed no marker could pause, let the creator publish
 the marker and prepare files, then delete the directory despite the held
 lease. Here the same interleaving is forced with real kernel flock on the
 real mutex file and thread events; nothing about the marker, the sweep, or
@@ -458,7 +458,13 @@ class TestPublicationRace:
     ) -> None:
         """The exclusion is mutual: a sweep paused inside its check-and-delete
         transaction holds the mutex, and a concurrent launch's allocation and
-        publication critical section can only begin after it."""
+        publication critical section can only begin after it.
+
+        The launch's own phase-one orphan sweep takes the same mutex before
+        allocation, so the launch can first wait there rather than at
+        allocation. This case proves only the order: the paused sweep's
+        transaction ends before the launch's initializer runs. The previous
+        case proves that allocation itself is excluded (#215)."""
         root = tmp_path / "sessions"
         orphan = _plant_orphan(root, "session-orphan", stale_marker=True)
         monkeypatch.setattr(launcher, "_SESSION_ROOT", str(root))
