@@ -308,9 +308,10 @@ class TestProtectedPublication:
             return fd
 
         def failing_marker_flock(fd: int, operation: int) -> None:
-            # The marker's lock is the launch's only nonblocking exclusive
-            # flock; the session-root mutex's blocking LOCK_EX, taken first,
-            # reaches the kernel (#215).
+            # With cleanup_sessions stubbed, the marker's lock is this window's
+            # only nonblocking exclusive flock; a live sweep's marker check
+            # uses the same operation. The session-root mutex's blocking
+            # LOCK_EX, taken first, reaches the kernel (#215).
             if operation == fcntl.LOCK_EX | fcntl.LOCK_NB:
                 raise OSError(f"synthetic {name} failure")
             real_flock(fd, operation)
