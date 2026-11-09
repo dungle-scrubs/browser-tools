@@ -19,6 +19,11 @@
 # session, so closing that terminal took it while the browser lived on, and it
 # wrote nothing on the way out, so an exit left no trace.
 #
+# The spawned supervisor also starts without the launching terminal's identity
+# variables (#213): Herdr ends a terminal by signalling every process that
+# carries them, session or not, so a supervisor that kept them died with the
+# terminal while its browser ran on unsupervised.
+#
 # Retirement is also adapted (#94). Upstream retires the instance by calling
 # the vendored registry's ``deregister``, which removes the entry and then
 # deletes the recorded user-data dir without checking whether the instance is
@@ -116,6 +121,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
+from browser_tools.spawn_environment import detached_environment
 from .cdp_client import CDPClient, get_ws_url_async
 
 ISOLATED_WORLD = "__chrome_agent_marker__"
@@ -1016,6 +1022,10 @@ def spawn_supervisor(
     ``user_data_dir`` rides on the argv (#176) as the supervisor's identity
     anchor: it is how the supervisor can later tell its own browser from a
     stranger that took the same port.
+
+    The supervisor is spawned without the launching terminal's identity
+    variables (#213): Herdr ends a terminal by signalling every process that
+    carries them, whether or not that process left the terminal's session.
     """
     argv = [
         sys.executable, "-m", "browser_tools.core.supervisor",
@@ -1027,6 +1037,7 @@ def spawn_supervisor(
         argv,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+        env=detached_environment(os.environ.copy()),
         start_new_session=True,
     )
 

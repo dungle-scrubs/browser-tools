@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -596,3 +597,40 @@ class TestHeadedLaunchLeavesFocusAlone:
             not (tmp_path / "registry.json").exists()
             or "9337" not in (tmp_path / "registry.json").read_text()
         )
+
+
+class TestTheSpawnedBrowserEnvironment:
+    """The browser must not carry the launching terminal's identity (#213).
+
+    Herdr ends a terminal by signalling every process it can read whose
+    environment holds that terminal's identity, session or not. Chrome escapes
+    today only because macOS hides its environment; the launch must not rely
+    on that.
+    """
+
+    def test_the_browser_starts_without_the_launching_terminals_identity(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        captured: dict[str, object] = {}
+        _patch_launch_plumbing(monkeypatch, captured)
+        mapping = {
+            "BROWSER_TOOLS_TEST_ENV": "synthetic",
+            "HC_TERMINAL_ID": "t9",
+            "HC_SCOPE": "synthetic-scope",
+            "HC_TERMINAL_SOCKET": "/tmp/synthetic.sock",
+            "HERDR_PANE_ID": "synthetic-pane",
+        }
+        monkeypatch.setattr(os.environ, "copy", lambda: dict(mapping))
+
+        asyncio.run(
+            launcher.launch_browser(
+                port_override=9340,
+                fingerprint=None,
+                headless=True,
+                working_dir=str(tmp_path),
+                registry_path=str(tmp_path / "registry.json"),
+                user_data_dir=str(tmp_path / "udd"),
+            )
+        )
+
+        assert captured["env"] == {"BROWSER_TOOLS_TEST_ENV": "synthetic"}

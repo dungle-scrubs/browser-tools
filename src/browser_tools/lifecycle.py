@@ -77,6 +77,7 @@ from .process_utils import (
     read_listener_pids,
     read_process_command,
 )
+from .spawn_environment import detached_environment
 from .usage import UsageError
 
 if TYPE_CHECKING:
@@ -1466,6 +1467,7 @@ def _spawn_camoufox_process(
         args,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,
+        env=detached_environment(os.environ.copy()),
     )
     pid_start = process_start_time(pid=proc.pid)
 

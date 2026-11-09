@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import select
 import subprocess
 import sys
@@ -14,6 +15,7 @@ from . import lifecycle
 from .core import registry as core_registry
 from .core.utils import process_start_time
 from .process_utils import process_running_state
+from .spawn_environment import detached_environment
 
 Observation = Literal["alive", "gone", "unverified"]
 LeaseState = Literal["auto", "closing", "retained", "close_failed"]
@@ -174,6 +176,7 @@ def establish(name: str, owner: ProcessIdentity, headless: bool, registry_path: 
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
                 text=True,
+                env=detached_environment(os.environ.copy()),
                 start_new_session=True,
             )
             if (

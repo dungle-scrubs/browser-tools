@@ -22,6 +22,10 @@
 # remain disabled; a preferences document that is not standard JSON (including
 # NaN/Infinity constants and numeric overflow) is refused
 # before any browser spawn.
+# The spawned browser also starts without the launching terminal's identity
+# variables (#213): Herdr ends a terminal by signalling every process it can
+# read that carries them, session or not. Chrome escaped only because macOS
+# hides its environment from other processes; it no longer depends on that.
 # A generic `initialize_directory` callback (#201, temporary 1Password setup)
 # runs inside the launch window: after the session directory is allocated and
 # before preference preparation or any browser spawn. The launcher knows
@@ -70,6 +74,7 @@ from typing import NoReturn
 from urllib.parse import urlsplit
 
 from browser_tools import session_initialization
+from browser_tools.spawn_environment import detached_environment
 from .connection import check_cdp_port_async
 from .registry import REGISTRY_PATH, InstanceInfo, allocate_port, register, cleanup
 from .registry import _load_registry, _resolve_path
@@ -389,7 +394,7 @@ async def launch_browser(
                 args.extend(chrome_flags)
 
         # Apply fingerprint via Chrome command-line flags (persistent)
-        env = os.environ.copy()
+        env = detached_environment(os.environ.copy())
         fp_profile = None
         if fingerprint is not None:
             from .fingerprint import load_fingerprint
