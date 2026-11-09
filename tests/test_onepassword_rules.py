@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from module_size_rules import assert_modules_within_size_limit
 
 from browser_tools import lifecycle, onepassword, onepassword_setup, session_initialization
 from browser_tools.core import launcher
@@ -192,6 +193,55 @@ def test_the_setup_module_owns_its_error_below_the_lifecycle_layer() -> None:
     )
 
 
+#: The three states a function's return annotation can be in for the
+#: annotation scanners below: absent, present but the constant ``None``, and
+#: present and naming a type. Each guarded boundary reads the states
+#: differently, so the scanner reports the state and the test judges it.
+_RETURN_MISSING = "missing"
+_RETURN_NONE = "none"
+_RETURN_ANNOTATED = "annotated"
+
+
+def _annotation_report(
+    node: ast.FunctionDef | ast.AsyncFunctionDef,
+    *,
+    skip_receiver: bool = False,
+) -> tuple[list[str], str]:
+    """Report a function node's unannotated parameters and return annotation.
+
+    Args:
+        node: The function definition to inspect.
+        skip_receiver: Whether a ``self`` or ``cls`` receiver is exempt from
+            the annotation requirement, as it is for a method's receiver.
+
+    Returns:
+        The unannotated parameter names in declaration order, and the return
+        annotation's state: ``"missing"`` when there is no return annotation,
+        ``"none"`` when it is the constant ``None``, and ``"annotated"`` when
+        it names a type.
+    """
+    unannotated = [
+        arg.arg
+        for arg in (
+            *node.args.posonlyargs,
+            *node.args.args,
+            *node.args.kwonlyargs,
+        )
+        if arg.annotation is None and not (skip_receiver and arg.arg in ("self", "cls"))
+    ]
+    for extra in (node.args.vararg, node.args.kwarg):
+        if extra is not None and extra.annotation is None:
+            unannotated.append(extra.arg)
+    returns = node.returns
+    if returns is None:
+        state = _RETURN_MISSING
+    elif isinstance(returns, ast.Constant) and returns.value is None:
+        state = _RETURN_NONE
+    else:
+        state = _RETURN_ANNOTATED
+    return unannotated, state
+
+
 def test_new_onepassword_test_classes_fully_annotate_public_methods() -> None:
     """Keep the three #201 test classes' public methods fully annotated.
 
@@ -225,23 +275,11 @@ def test_new_onepassword_test_classes_fully_annotate_public_methods() -> None:
         for method in methods:
             if method.name.startswith("_"):
                 continue
-            unannotated = [
-                arg.arg
-                for arg in (
-                    *method.args.posonlyargs,
-                    *method.args.args,
-                    *method.args.kwonlyargs,
-                )
-                if arg.arg not in ("self", "cls") and arg.annotation is None
-            ]
-            for extra in (method.args.vararg, method.args.kwarg):
-                if extra is not None and extra.annotation is None:
-                    unannotated.append(extra.arg)
-            returns_none = isinstance(method.returns, ast.Constant) and method.returns.value is None
+            unannotated, return_state = _annotation_report(method, skip_receiver=True)
             parts = []
             if unannotated:
                 parts.append("missing annotations for " + ", ".join(unannotated))
-            if not returns_none:
+            if return_state != _RETURN_NONE:
                 parts.append("missing -> None")
             if parts:
                 problems.append(f"{filename}::{class_name}.{method.name}: " + "; ".join(parts))
@@ -275,20 +313,13 @@ def test_conftest_source_isolation_fixture_is_fully_annotated() -> None:
         problems.append("tests/conftest.py: fixture isolated_official_onepassword_source not found")
     else:
         fixture = matches[0]
-        unannotated = [
-            arg.arg
-            for arg in (*fixture.args.posonlyargs, *fixture.args.args, *fixture.args.kwonlyargs)
-            if arg.annotation is None
-        ]
-        for extra in (fixture.args.vararg, fixture.args.kwarg):
-            if extra is not None and extra.annotation is None:
-                unannotated.append(extra.arg)
+        unannotated, return_state = _annotation_report(fixture)
         parts = []
         if unannotated:
             parts.append("missing annotations for " + ", ".join(unannotated))
-        if fixture.returns is None:
+        if return_state == _RETURN_MISSING:
             parts.append("missing return annotation")
-        elif isinstance(fixture.returns, ast.Constant) and fixture.returns.value is None:
+        elif return_state == _RETURN_NONE:
             parts.append(
                 "return annotation must name the fixture's yield type "
                 "(e.g. Iterator[None]), not None"
@@ -327,17 +358,10 @@ def test_launcher_spawn_helpers_reject_guard_is_fully_annotated() -> None:
         problems.append("tests/launcher_spawn_helpers.py: discard_spawn_environment not found")
     else:
         guard = matches[0]
-        unannotated = [
-            arg.arg
-            for arg in (*guard.args.posonlyargs, *guard.args.args, *guard.args.kwonlyargs)
-            if arg.annotation is None
-        ]
-        for extra in (guard.args.vararg, guard.args.kwarg):
-            if extra is not None and extra.annotation is None:
-                unannotated.append(extra.arg)
+        unannotated, return_state = _annotation_report(guard)
         if unannotated:
             problems.append("missing annotations for " + ", ".join(unannotated))
-        if guard.returns is None:
+        if return_state == _RETURN_MISSING:
             problems.append("missing return annotation")
         doc = ast.get_docstring(guard) or ""
         for section in ("Args:", "Raises:"):
@@ -365,7 +389,6 @@ SIZE_MODULES = (
     "test_session_root_mutex.py",
     "launcher_spawn_helpers.py",
 )
-SIZE_LIMIT = 800
 
 
 #: The #201 source modules the scoped size limit covers, the long-lived
@@ -387,21 +410,18 @@ def test_onepassword_source_modules_stay_under_the_module_size_limit() -> None:
     long-lived launcher first.
     """
     package = Path(onepassword.__file__).parent
-    for relative in SOURCE_SIZE_MODULES:
-        path = package / relative
-        assert path.is_file(), (
-            f"src/browser_tools/{relative} does not exist; the #201 setup "
-            "source is organized as exactly these modules"
-        )
-        count = len(path.read_text(encoding="utf-8").splitlines())
-        assert count <= SIZE_LIMIT, (
-            f"src/browser_tools/{relative} is {count} lines, over the "
-            f"{SIZE_LIMIT}-line module-size limit (CONTRIBUTING.md, Module "
-            "Size): extract a cohesive set of symbols into a new module and "
-            "migrate every caller and test reference to it, without a "
-            "re-export from the old module (a compatibility path would let "
-            "the size grow back unnoticed)"
-        )
+    assert_modules_within_size_limit(
+        package,
+        SOURCE_SIZE_MODULES,
+        path_prefix="src/browser_tools/",
+        missing_message="the #201 setup source is organized as exactly these modules",
+        oversize_remedy=(
+            "extract a cohesive set of symbols into a new module and migrate "
+            "every caller and test reference to it, without a re-export from "
+            "the old module (a compatibility path would let the size grow "
+            "back unnoticed)"
+        ),
+    )
 
 
 def test_onepassword_test_modules_stay_under_the_module_size_limit() -> None:
@@ -409,24 +429,23 @@ def test_onepassword_test_modules_stay_under_the_module_size_limit() -> None:
 
     Reads the actual files, the long-lived lifecycle module first. The #201
     round-two review found it at 812 lines against CONTRIBUTING.md's ~800-line
-    limit (the same limit ``test_login_rules.py`` reads as 800).
+    limit (owned by ``tests/module_size_rules.py``, as for the login tests).
     """
     tests = Path(__file__).parent
-    for name in SIZE_MODULES:
-        path = tests / name
-        assert path.is_file(), (
-            f"tests/{name} does not exist; the 1Password lifecycle tests are "
-            "organized as exactly these modules"
-        )
-        count = len(path.read_text(encoding="utf-8").splitlines())
-        assert count <= SIZE_LIMIT, (
-            f"tests/{name} is {count} lines, over the {SIZE_LIMIT}-line "
-            "module-size limit (CONTRIBUTING.md, Module Size): extract a "
-            "cohesive set of symbols into a new test module and migrate "
-            "the references to it, keeping every collected case exactly "
-            "once (do not re-export test classes; pytest would collect "
-            "them twice)"
-        )
+    assert_modules_within_size_limit(
+        tests,
+        SIZE_MODULES,
+        path_prefix="tests/",
+        missing_message=(
+            "the 1Password lifecycle tests are organized as exactly these modules"
+        ),
+        oversize_remedy=(
+            "extract a cohesive set of symbols into a new test module and "
+            "migrate the references to it, keeping every collected case "
+            "exactly once (do not re-export test classes; pytest would "
+            "collect them twice)"
+        ),
+    )
 
 
 def test_the_guide_documents_the_automatic_registration_default() -> None:
