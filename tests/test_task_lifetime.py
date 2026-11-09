@@ -380,3 +380,47 @@ def test_camoufox_owner_binding_uses_same_lease_and_retain_contract(
     assert lifecycle.retain(instance.name, registry_path=registry)["mode"] == "headless"
     assert "cam-01" in lifecycle.stop(instance.name, registry_path=registry)
     assert lifecycle.read_instances(registry) == []
+
+
+def test_the_keeper_starts_without_the_launching_terminals_identity(
+    registry, owner, browser_double, monkeypatch
+):
+    """Herdr ends a terminal by killing every process carrying its identity.
+
+    The keeper is detached from its terminal's session, but Herdr signals
+    every process whose environment holds that terminal's identity anyway
+    (#213), so a keeper that kept them died with the terminal.
+    """
+    mapping = {
+        "BROWSER_TOOLS_TEST_ENV": "synthetic",
+        "HC_TERMINAL_ID": "t9",
+        "HC_SCOPE": "synthetic-scope",
+        "HC_TERMINAL_SOCKET": "/tmp/synthetic.sock",
+        "HERDR_PANE_ID": "synthetic-pane",
+    }
+    monkeypatch.setattr(os.environ, "copy", lambda: dict(mapping))
+    captured = {}
+    spawned = []
+    real_popen = subprocess.Popen
+
+    def popen(argv, **kwargs):
+        if "browser_tools.task_lease" in argv:
+            captured["env"] = kwargs.get("env")
+            proc = real_popen(
+                [sys.executable, "-c", "import time; print('ready', flush=True); time.sleep(60)"],
+                **kwargs,
+            )
+            spawned.append(proc)
+            return proc
+        return real_popen(argv, **kwargs)
+
+    monkeypatch.setattr(task_lease.subprocess, "Popen", popen)
+    try:
+        launch_owned(registry, owner)
+    finally:
+        for proc in spawned:
+            if proc.poll() is None:
+                proc.kill()
+            proc.wait()
+
+    assert captured["env"] == {"BROWSER_TOOLS_TEST_ENV": "synthetic"}

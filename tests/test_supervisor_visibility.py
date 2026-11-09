@@ -17,6 +17,7 @@ Three parts:
 
 from __future__ import annotations
 
+import os
 import subprocess
 from typing import TYPE_CHECKING
 
@@ -66,6 +67,34 @@ class TestSupervisorIsDetached:
 
         assert captured["kwargs"].get("start_new_session") is True, (
             "the supervisor must outlive the shell that launched the browser"
+        )
+
+    def test_spawn_starts_without_the_launching_terminals_identity(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Herdr ends a terminal by killing every process carrying its identity."""
+        mapping = {
+            "BROWSER_TOOLS_TEST_ENV": "synthetic",
+            "HC_TERMINAL_ID": "t9",
+            "HC_SCOPE": "synthetic-scope",
+            "HC_TERMINAL_SOCKET": "/tmp/synthetic.sock",
+            "HERDR_PANE_ID": "synthetic-pane",
+        }
+        monkeypatch.setattr(os.environ, "copy", lambda: dict(mapping))
+        captured: dict = {}
+
+        def fake_popen(command, **kwargs):
+            captured["kwargs"] = kwargs
+            return object()
+
+        monkeypatch.setattr(supervisor.subprocess, "Popen", fake_popen)
+
+        supervisor.spawn_supervisor(
+            port=9222, name="only-01", registry_path="/tmp/r.json", draw_border=True
+        )
+
+        assert captured["kwargs"].get("env") == {"BROWSER_TOOLS_TEST_ENV": "synthetic"}, (
+            "the supervisor must not carry the launching terminal's identity (#213)"
         )
 
 
