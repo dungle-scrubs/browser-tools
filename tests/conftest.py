@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
+from launcher_spawn_helpers import stub_spawn_environment
 
 from browser_tools import lifecycle
 
@@ -237,18 +238,10 @@ def isolated_default_registry(
 def synthetic_spawn_environment(monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
     """Stub the OS-environment copy boundary to one synthetic mapping.
 
-    ``launch_browser`` builds the spawned process's environment with
-    ``os.environ.copy()``; a spawn double that receives that mapping would
-    copy the developer's real environment into the process, and a failing
-    assertion inside the double would print it into the failure trace
-    (round-4 tests: abbreviated environment data in long traces). The stub
-    replaces the copy boundary itself with a small known mapping, so no real
-    value is ever read, copied, or printed, and a spawn double can reject any
-    environment that is not this mapping without ever seeing a real one.
+    A spawn double can then reject any environment that is not this mapping
+    without ever seeing a real one. ``stub_spawn_environment`` explains why.
     """
-    mapping = {"BROWSER_TOOLS_TEST_ENV": "synthetic"}
-    monkeypatch.setattr(os.environ, "copy", lambda: dict(mapping))
-    return mapping
+    return stub_spawn_environment(monkeypatch)
 
 
 @pytest.fixture
