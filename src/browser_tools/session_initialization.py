@@ -122,9 +122,12 @@ def acquire_session_root_mutex(session_root: str) -> int:
 
     The mutex is an empty regular file, mode 0600, created on first use; no
     content is ever written or read and symlinks are never followed, so the
-    lock is the kernel flock alone. The descriptor's own metadata is
-    validated before the lock is taken: a name that is not an empty regular
-    0600 file is not this mutex, so it is refused untouched - never
+    lock is the kernel flock alone. The process umask filters the creation
+    mode, so the call that creates the file (``O_EXCL``) sets 0600 on its own
+    new descriptor; a mask that removes owner bits would otherwise leave a
+    file every later call refuses (#214). The descriptor's own metadata is
+    validated before the lock is taken: an existing name that is not an empty
+    regular 0600 file is not this mutex, so it is refused untouched - never
     chmod'ed, unlinked, or truncated - because repairing an unknown file at
     the protocol name would act on something this protocol never owned. The
     open itself is nonblocking so a malformed special file parked at the
@@ -151,12 +154,16 @@ def acquire_session_root_mutex(session_root: str) -> int:
             existing file is left exactly as it was.
     """
     mutex_path = session_root_mutex_path(session_root)
-    fd = os.open(
-        mutex_path,
-        os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK,
-        0o600,
-    )
+    flags = os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK
     try:
+        fd = os.open(mutex_path, flags | os.O_CREAT | os.O_EXCL, 0o600)
+        created = True
+    except FileExistsError:
+        fd = os.open(mutex_path, flags)
+        created = False
+    try:
+        if created:
+            os.fchmod(fd, 0o600)
         info = os.fstat(fd)
         if (
             not stat.S_ISREG(info.st_mode)
