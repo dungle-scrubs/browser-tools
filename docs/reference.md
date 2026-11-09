@@ -34,13 +34,15 @@ Chrome is the default engine. Without a channel or binary override, the launcher
 | `--headless` | Run without a visible window. The default is headed. |
 | `--name NAME` | Choose the instance's base name, independent of the current directory. |
 | `--profile NAME` | Reuse a persistent browser profile and its login state. |
-| `--1password` | With `--profile` on macOS, provision the signed installed 1Password desktop helper for the official stable extension. See `bt guide` for policy and limits. |
+| `--1password` | With `--profile` on macOS, provision the signed installed 1Password desktop helper for the official stable extension. Fresh macOS Chrome sessions, named or temporary, get the registration and the pin default automatically when the official source exists. See `bt guide` for policy and limits. |
 | `--owner PID` | Close the browser when that process exits. |
 | `--engine camoufox` | Use the optional Camoufox engine. |
 | `--port PORT` | Use an explicit debugging port instead of auto-allocation from 9422 upward. |
 | `--fingerprint FILE` | Pass a fingerprint profile's launch flags. This file is not a saved login. |
 | `--no-window-border` | Disable the border, badge, and tab-title marking for this launch. |
 | `-- BROWSER_ARGS` | Pass remaining arguments to the browser. |
+
+Fresh macOS Chrome sessions, meaning a brand-new named profile or a temporary unnamed launch, are registered with the installed official 1Password native host automatically, and the preference document created for them pins the official stable 1Password extension (`extensions.pinned_extensions`). Chromium retains pinned IDs it does not recognize yet, so the pin takes effect when the extension is later installed (the `kPinnedExtensions` preference in [`extensions/browser/pref_names.h`](https://source.chromium.org/chromium/chromium/src/+/refs/tags/157.0.8103.39:extensions/browser/pref_names.h) and the stale-ID retention in [`chrome/browser/ui/toolbar/toolbar_actions_model.cc`](https://source.chromium.org/chromium/chromium/src/+/refs/tags/157.0.8103.39:chrome/browser/ui/toolbar/toolbar_actions_model.cc), tag 157.0.8103.39). Existing profiles are only provisioned with `--1password`. The pin seed never reads or rewrites an existing preference document or pin choice, and a pinned extension can be unpinned in the toolbar like any other. The password-manager preference updates that every launch already performs still apply to existing documents. A present but invalid official source fails that session's first launch before any browser starts. The launcher then cleans up the failed temporary session's directory; a nonempty Named profile directory is kept for an explicit `--1password` retry, and a directory whose cleanup itself fails is retained with its path logged and never reused. Relaunching retries.
 
 An instance name is the base name plus the first free two-digit suffix. A launch from a directory called `web` starts with `web-01`; `--name demo` starts with `demo-01`. Names are lowercased. Read the actual name from launch output rather than assuming a suffix.
 

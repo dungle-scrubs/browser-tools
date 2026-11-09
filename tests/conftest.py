@@ -4,10 +4,14 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
 from browser_tools import lifecycle
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 
 #: Set for the whole session so no test can launch the developer's own browser.
@@ -71,6 +75,52 @@ def isolated_profile_roots(tmp_path_factory, monkeypatch):
     monkeypatch.setenv(lifecycle.LEGACY_PROFILES_ENV_VAR, str(root / "legacy"))
 
 
+@pytest.fixture(scope="session", autouse=True)
+def isolated_official_onepassword_source(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> Iterator[None]:
+    """Point the official 1Password source at one absent synthetic path.
+
+    The profile roots are isolated per test, but the automatic paths' source
+    check reads a fixed path in the developer's own ``~/Library``: on a
+    machine with the desktop app installed, a general unit test that launches
+    a fresh Chrome session would otherwise read the real registration and run
+    a real codesign against it. The isolation is session-scoped so it is in
+    force before any module-scoped fixture runs (``curated_browser`` is
+    module-scoped and set up before any function-scoped patch could apply).
+    Every test therefore starts with the source absent; the positive fixtures
+    (``valid_installation`` and the tests that plant their own source)
+    override it with a synthetic one for their own scope, and pytest's
+    monkeypatch nesting restores this absent session source when each
+    override is torn down.
+    """
+    from browser_tools import onepassword
+
+    absent = (
+        tmp_path_factory.mktemp("absent-official-source")
+        / onepassword.HOSTS_DIR_NAME
+        / f"{onepassword.HOST_NAME}.json"
+    )
+    with pytest.MonkeyPatch.context() as patches:
+        patches.setattr(onepassword, "SOURCE_MANIFEST", absent)
+        yield
+
+
+@pytest.fixture(scope="module")
+def official_source_at_module_scope() -> Path:
+    """Capture the official source path before any function-scoped fixture.
+
+    Module-scoped fixtures (``curated_browser`` among them) are set up before
+    the function-scoped fixtures of their first test, so what this captures
+    is exactly what a module-scoped browser launch would read. The witness
+    test asserts the session-level isolation above was already in force at
+    that point; the fixture itself never touches the real source.
+    """
+    from browser_tools import onepassword
+
+    return onepassword.source_manifest_path()
+
+
 #: The port a person's own Chrome is most likely to be on, and the port every
 #: DevTools default names. A test that reaches it drives the developer's real
 #: browser: it opens an unauthenticated CDP session to whatever they had open
@@ -110,7 +160,6 @@ def _suite_ports_start_above_the_default_port():
     finally:
         registry.BASE_PORT = original_base
         registry.MAX_PORT = original_max
-
 
 
 @pytest.fixture(autouse=True)
@@ -158,6 +207,48 @@ def no_test_talks_devtools_on_the_default_port(monkeypatch):
 
     monkeypatch.setattr(urllib.request, "urlopen", guarded_urlopen)
     monkeypatch.setattr(CDPClient, "__init__", guarded_init)
+
+
+@pytest.fixture
+def isolated_default_registry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Path:
+    """Point BOTH default-registry aliases at one synthetic path.
+
+    The session root is shared by every registry, so the real orphan sweep
+    honors the default registry's instances even when the caller passed an
+    isolated registry path. A real-sweep test that leaves an alias at the
+    developer's own ``/tmp/chrome-agent/registry.json`` reads the
+    developer's registry: ``launcher.REGISTRY_PATH`` (the imported alias the
+    sweep compares and falls back against) and ``core.registry.REGISTRY_PATH``
+    (the module-global fallback a None path resolves through) both need the
+    synthetic path (round-4 tests F1).
+    """
+    from browser_tools.core import launcher as core_launcher
+    from browser_tools.core import registry as core_registry
+
+    synthetic = tmp_path / "synthetic-default-registry.json"
+    monkeypatch.setattr(core_launcher, "REGISTRY_PATH", str(synthetic))
+    monkeypatch.setattr(core_registry, "REGISTRY_PATH", str(synthetic))
+    return synthetic
+
+
+@pytest.fixture
+def synthetic_spawn_environment(monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
+    """Stub the OS-environment copy boundary to one synthetic mapping.
+
+    ``launch_browser`` builds the spawned process's environment with
+    ``os.environ.copy()``; a spawn double that receives that mapping would
+    copy the developer's real environment into the process, and a failing
+    assertion inside the double would print it into the failure trace
+    (round-4 tests: abbreviated environment data in long traces). The stub
+    replaces the copy boundary itself with a small known mapping, so no real
+    value is ever read, copied, or printed, and a spawn double can reject any
+    environment that is not this mapping without ever seeing a real one.
+    """
+    mapping = {"BROWSER_TOOLS_TEST_ENV": "synthetic"}
+    monkeypatch.setattr(os.environ, "copy", lambda: dict(mapping))
+    return mapping
 
 
 @pytest.fixture

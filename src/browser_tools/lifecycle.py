@@ -80,7 +80,7 @@ from .process_utils import (
 from .usage import UsageError
 
 if TYPE_CHECKING:
-    from collections.abc import Generator
+    from collections.abc import Callable, Generator
 
 logger = logging.getLogger(__name__)
 
@@ -1059,31 +1059,132 @@ def _check_onepassword_eligibility(*, engine: str, profile: str | None) -> None:
         )
     if sys.platform != "darwin":
         raise LifecycleError(
-            "--1password is supported on macOS only. Launch without it on this "
-            "platform."
+            "--1password is supported on macOS only. Launch without it on this platform."
         )
 
 
-def _provision_onepassword(user_data_dir: Path) -> None:
+def _official_onepassword_source_present() -> bool:
+    """Report whether the official source registration entry exists, unread.
+
+    The automatic paths' single source check: a directory entry at the
+    provisioner's own fixed path, detected without following links so a
+    dangling symlink counts as present. The manifest is never read or
+    trusted here -- schema, signature, origin and no-overwrite all stay
+    inside the provisioner, which a present but invalid source reaches and
+    fails.
+
+    Imported lazily so a launch that can never take the automatic path loads
+    nothing from the module, the same cold-start property the explicit path
+    keeps.
+
+    Returns:
+        True when any directory entry exists at the official source path.
+    """
+    from . import onepassword
+
+    return onepassword.source_manifest_path().exists(follow_symlinks=False)
+
+
+def _temporary_setup_initializer(
+    *, engine: str, profile: str | None
+) -> Callable[[Path], None] | None:
+    """Build the automatic setup initializer for an anonymous Chrome launch.
+
+    A temporary session has no directory until the vendored launcher
+    allocates one, so its setup runs through the launcher's generic
+    directory-initializer hook rather than the lifecycle-owned sequence a
+    named profile uses. Only an anonymous macOS Chrome launch whose machine
+    carries an official source entry gets one: any other platform, the
+    Camoufox engine, a named profile (whose policy lives in ``launch``) and a
+    machine without the source entry keep today's plain launch. A present
+    but invalid source still reaches the provisioner, so its failure stays
+    visible.
+
+    Args:
+        engine: The normalized launch engine.
+        profile: The selected Named Profile, or None for an anonymous launch.
+
+    Returns:
+        The initializer the vendored launcher invokes on the freshly allocated
+        session directory, or None when this launch keeps a plain launch.
+    """
+    if profile is not None or engine != "chrome" or sys.platform != "darwin":
+        return None
+    if not _official_onepassword_source_present():
+        return None
+    from . import onepassword_setup
+
+    return onepassword_setup.temporary_session_initializer()
+
+
+def _discard_empty_automatic_initialization(user_data_dir: Path) -> bool:
+    """Remove the empty directories an aborted automatic initialization made.
+
+    Only the profile's NativeMessagingHosts directory and the profile
+    directory itself are considered, each removed only when empty, so a
+    failed first launch never silently disables the next launch's automatic
+    registration while no existing profile, nonempty directory, or unrelated
+    data is ever deleted.
+
+    Args:
+        user_data_dir: The profile directory this launch created.
+
+    Returns:
+        True when the profile directory itself was removed.
+    """
+    from . import onepassword
+
+    hosts_dir = user_data_dir / onepassword.HOSTS_DIR_NAME
+    with contextlib.suppress(OSError):
+        hosts_dir.rmdir()
+    try:
+        user_data_dir.rmdir()
+    except OSError:
+        return False
+    return True
+
+
+def _provision_onepassword(user_data_dir: Path, *, automatic: bool = False) -> None:
     """Register the validated 1Password helper in one profile directory (#201).
 
-    Imported lazily at this seam so a launch that never opts in loads nothing
-    from the module, the same cold-start property the Camoufox runner has.
-    The module's dedicated failure type is translated to the lifecycle's own;
-    its message already names the remedy and the flag.
+    Imported lazily at this seam so a launch that never reaches provisioning
+    loads nothing from the module, the same cold-start property the Camoufox
+    runner has. The module's dedicated failure type is translated to the
+    lifecycle's own. The explicit flag keeps the provisioner's full message;
+    the automatic path keeps only the typed reason and states its own
+    recovery, discarding the empty initialization it created so a retry
+    registers instead of silently turning into an existing-profile launch.
+    Every check the provisioner made is kept verbatim.
 
     Args:
         user_data_dir: The selected Named Profile's directory, with its lock held.
+        automatic: True when this launch reached provisioning automatically,
+            without the explicit flag (a brand-new Named Chrome profile).
 
     Raises:
-        LifecycleError: Provisioning failed before any browser launched.
+        LifecycleError: Provisioning failed before any browser launched. An
+            automatic failure additionally reports whether the empty new
+            profile directory was discarded or had to be kept.
     """
     from . import onepassword
 
     try:
         onepassword.provision(user_data_dir)
     except onepassword.OnePasswordProvisionError as exc:
-        raise LifecycleError(str(exc)) from exc
+        if not automatic:
+            raise LifecycleError(str(exc)) from exc
+        if _discard_empty_automatic_initialization(user_data_dir):
+            advice = (
+                " Fix the condition above and relaunch; the new profile is "
+                "provisioned automatically on the retry."
+            )
+        else:
+            advice = (
+                " The new profile directory was kept because it is not empty. "
+                "Fix the condition above, then relaunch with --1password to "
+                "provision the existing profile."
+            )
+        raise LifecycleError(exc.reason + advice) from exc
 
 
 def launch(
@@ -1121,8 +1222,14 @@ def launch(
     1Password native-messaging registration: validated, code-signature
     checked, and written narrowed to the stable extension origin, after the
     profile lock and the live-holder refusal and before Chrome launches.
-    Unsupported combinations are refused before any filesystem work, and
-    without the flag nothing is provisioned or validated.
+    Unsupported combinations are refused before any filesystem work. Without
+    the flag nothing is provisioned or validated, with two user-selected
+    exceptions: a brand-new Named Chrome profile on macOS, and an anonymous
+    macOS Chrome session, are registered by the same provisioner when the
+    fixed official source entry exists; the launcher's initializer hook then
+    seeds the new-profile pin default into the same directory. An
+    existing profile never is, and a machine without the source keeps the
+    launch plain.
     """
     from . import task_lease
 
@@ -1156,6 +1263,12 @@ def launch(
     if onepassword:
         _check_onepassword_eligibility(engine=engine, profile=profile)
 
+    # The vendored launcher's directory-initializer hook (#201): None for
+    # every ordinary launch; set below by the paths that earn it -- a named
+    # profile right after its provisioning succeeded, an anonymous macOS
+    # Chrome session just before the launcher call.
+    initialize_directory: Callable[[Path], None] | None = None
+
     # Hold the profile's launch lock for the WHOLE sequence: stale-lock
     # cleanup, the holder lookup, the launch, the registration and the
     # annotation. Checking for a holder and then launching is not atomic, so
@@ -1176,21 +1289,54 @@ def launch(
                     f"--1password requires a real profile directory, not the symlink "
                     f"{user_data_dir}. Inspect it, or launch without --1password."
                 )
-            user_data_dir.mkdir(parents=True, exist_ok=True)
-            # Clean stale singleton locks (dead holder) BEFORE the exclusivity check
-            # so a crashed previous run does not wedge the profile forever.
-            clean_stale_singleton_lock(user_data_dir)
-            holder = find_profile_holder(profile, registry_path=registry_path)
-            if holder is not None:
-                raise LifecycleError(
-                    f"Profile '{profile}' is already held by live instance '{holder}'. "
-                    f"Stop it first, or launch a different profile."
-                )
-            # --1password (#201): after the lock and the holder refusal, before
-            # Chrome launches. A provisioning failure therefore never leaves a
-            # browser running, and a held profile is never provisioned.
-            if onepassword:
-                _provision_onepassword(user_data_dir)
+            # Automatic registration (#201): a brand-new Named Chrome profile
+            # on macOS gets the official registration when the fixed official
+            # source exists. Newness is decided here -- after legacy migration
+            # (a migrated profile already existed) and before the directory is
+            # created below -- so an existing profile never acquires a
+            # registration on its own. Existence is this path's only source
+            # check; the provisioner keeps every other one.
+            automatic_registration = (
+                not onepassword
+                and engine == "chrome"
+                and sys.platform == "darwin"
+                and not user_data_dir.exists()
+                and _official_onepassword_source_present()
+            )
+            try:
+                user_data_dir.mkdir(parents=True, exist_ok=True)
+                # Clean stale singleton locks (dead holder) BEFORE the exclusivity check
+                # so a crashed previous run does not wedge the profile forever.
+                clean_stale_singleton_lock(user_data_dir)
+                holder = find_profile_holder(profile, registry_path=registry_path)
+                if holder is not None:
+                    raise LifecycleError(
+                        f"Profile '{profile}' is already held by live instance '{holder}'. "
+                        f"Stop it first, or launch a different profile."
+                    )
+                # --1password (#201): after the lock and the holder refusal, before
+                # Chrome launches. A provisioning failure therefore never leaves a
+                # browser running, and a held profile is never provisioned. The
+                # automatic path reaches the same provisioner under the same rules;
+                # a present but invalid official source fails here, closed.
+                if onepassword or automatic_registration:
+                    _provision_onepassword(user_data_dir, automatic=automatic_registration)
+                    # After successful provisioning, the launcher hook seeds
+                    # the new-profile pin default into the same directory
+                    # before Chrome starts (#201).
+                    from . import onepassword_setup
+
+                    initialize_directory = onepassword_setup.new_profile_initializer()
+            except BaseException:
+                # Any abort of an automatic first launch -- a refusal, a failure
+                # or an interruption such as Ctrl-C -- must not leave the empty
+                # directory this launch created, or the next launch would see an
+                # existing profile and silently skip the automatic registration.
+                # Only empty directories go (repeating the provisioner's own
+                # cleanup is harmless); the abort propagates unchanged.
+                if automatic_registration:
+                    _discard_empty_automatic_initialization(user_data_dir)
+                raise
         elif engine == "camoufox":
             base = ephemeral_root()
             base.mkdir(parents=True, exist_ok=True)
@@ -1227,6 +1373,14 @@ def launch(
         # property rather than a preference.
         binary = chrome_binary_from_env() or resolve_channel_binary(channel)
 
+        # Automatic temporary-session setup (#201): an anonymous macOS Chrome
+        # launch whose machine carries an official source entry runs its setup
+        # through the vendored launcher's generic initializer hook. A named
+        # profile instead set ``initialize_directory`` above, right after its
+        # provisioning succeeded; every other launch keeps None.
+        if initialize_directory is None:
+            initialize_directory = _temporary_setup_initializer(engine=engine, profile=profile)
+
         try:
             with _safe_allocation_base():
                 info = asyncio.run(
@@ -1245,6 +1399,7 @@ def launch(
                         window_border=window_border,
                         binary=binary,
                         user_data_dir=str(user_data_dir) if user_data_dir is not None else None,
+                        initialize_directory=initialize_directory,
                     )
                 )
         except BrowserNotFoundError as exc:

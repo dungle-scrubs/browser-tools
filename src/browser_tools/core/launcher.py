@@ -18,6 +18,32 @@
 # registry entry so `bt status` can report a supervisor that has died (#65),
 # and the supervisor is told the browser's user-data-dir (#176) so it can
 # verify that the port it re-attaches to still serves its own browser.
+# Existing profile preferences are preserved while password-save prompts
+# remain disabled; a preferences document that is not standard JSON (including
+# NaN/Infinity constants and numeric overflow) is refused
+# before any browser spawn.
+# A generic `initialize_directory` callback (#201, temporary 1Password setup)
+# runs inside the launch window: after the session directory is allocated and
+# before preference preparation or any browser spawn. The launcher knows
+# nothing about 1Password; the lifecycle layer supplies the callback. While a
+# callback prepares a freshly allocated unbound session, an empty
+# initialization marker held under a kernel flock stops a concurrent orphan
+# sweep from reaping the directory; the same lease spans browser startup and
+# successful registration and is released in one outer finally on every
+# outcome, because between the marker's release and registration no registry
+# tracks the session and no Chrome singleton lock exists yet. The directory's
+# visible allocation and the marker's publication happen inside one short
+# session-root-mutex critical section (S4-1), and the orphan sweep holds the
+# same mutex across its whole check-and-delete transaction, so a sweep can
+# never act on an absent-marker observation that predates the publication;
+# neither critical section touches the callback, preferences, startup, or any
+# registry lock. A failure in mutex acquisition, marker publication, the
+# callback, or preference preparation before spawn aborts the launch and
+# removes only a throwaway directory this call allocated; once a spawn may
+# have begun, no directory deletion happens.
+# The marker protocol itself lives in browser_tools.session_initialization
+# (the repository's module-size rule moved it out of this adapted module);
+# this launcher is a thin caller of it.
 # Intra-package imports are rewritten to
 # browser_tools.core. Otherwise unchanged from chrome-agent v0.5.7. See RFC-01,
 # section "Vendoring rules".
@@ -32,14 +58,18 @@ No Playwright dependency -- uses subprocess directly.
 import asyncio
 import json
 import logging
+import math
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
+from typing import NoReturn
 from urllib.parse import urlsplit
 
+from browser_tools import session_initialization
 from .connection import check_cdp_port_async
 from .registry import REGISTRY_PATH, InstanceInfo, allocate_port, register, cleanup
 from .registry import _load_registry, _resolve_path
@@ -96,6 +126,122 @@ def _platform_candidates() -> list[str]:
     return []
 
 
+def _reject_non_standard_json_constant(constant: str) -> NoReturn:
+    """Refuse a non-standard JSON constant (NaN, Infinity, -Infinity).
+
+    Python's default JSON decoder accepts these tokens, but they are outside
+    JSON syntax and Chrome must never receive a document containing one. The
+    raised ValueError becomes the caller's operational refusal; it names only
+    the constant, never the file's other values.
+
+    Args:
+        constant: The decoded non-standard token, one of ``NaN``,
+            ``Infinity`` or ``-Infinity``.
+
+    Raises:
+        ValueError: Always, naming only the rejected constant.
+    """
+    raise ValueError(f"non-standard JSON constant {constant}")
+
+
+def _parse_finite_json_float(token: str) -> float:
+    """Decode a JSON number with a fraction or exponent, refusing overflow.
+
+    Python's decoder turns a token such as ``1e999`` into ``inf``, which the
+    standard-JSON serializer rejects only after the two password settings
+    have overwritten any such value. Refusing it at decode time keeps the
+    refusal ahead of every preference mutation. The raised ValueError names
+    no value; the caller reports the path only.
+
+    Args:
+        token: The JSON number text, for example ``0.5`` or ``1e999``.
+
+    Returns:
+        The decoded finite float.
+
+    Raises:
+        ValueError: The token decodes to a non-finite float.
+    """
+    value = float(token)
+    if not math.isfinite(value):
+        raise ValueError("JSON number out of range")
+    return value
+
+
+def _prepare_preferences(path: Path) -> None:
+    """Disable Chrome password prompts without discarding profile state.
+
+    The existing document is validated, corrected in memory, and republished
+    by atomic replacement: ``path`` is only ever replaced whole, and a staging
+    file left behind by a failed write is removed.
+
+    Args:
+        path: The Chrome profile's ``Default/Preferences`` file. A missing file
+            is treated as an empty document; parent directories are created as
+            needed.
+
+    Raises:
+        RuntimeError: The existing document is not decodable JSON, is not a
+            JSON object, or its ``profile`` entry is not a JSON object.
+            Also raised when the document contains a non-standard JSON
+            constant (NaN, Infinity, -Infinity) or a numeric overflow, both
+            refused while decoding and before any setting changes, or a
+            value the serializer cannot write as standard JSON. The
+            original file is left untouched.
+        OSError: Creating a parent directory, writing the staging file, or
+            atomically replacing ``path`` failed. The original file is left
+            untouched and the staging file is removed.
+    """
+    try:
+        with path.open(encoding="utf-8") as source:
+            prefs = json.load(
+                source,
+                parse_constant=_reject_non_standard_json_constant,
+                parse_float=_parse_finite_json_float,
+            )
+    except FileNotFoundError:
+        prefs = {}
+    except ValueError:
+        # JSONDecodeError and UnicodeDecodeError are ValueError subclasses,
+        # and the non-standard-constant rejection raises ValueError: every
+        # malformed input becomes the same operational refusal, with the
+        # file's values kept out of the message.
+        raise RuntimeError(f"Chrome preferences are invalid: {path}") from None
+
+    if not isinstance(prefs, dict):
+        raise RuntimeError(f"Chrome preferences must be a JSON object: {path}")
+    profile = prefs.setdefault("profile", {})
+    if not isinstance(profile, dict):
+        raise RuntimeError(f"Chrome profile preferences must be a JSON object: {path}")
+    prefs["credentials_enable_service"] = False
+    profile["password_manager_enabled"] = False
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", prefix=".Preferences-", dir=path.parent,
+            delete=False,
+        ) as target:
+            temporary_path = Path(target.name)
+            try:
+                json.dump(prefs, target, allow_nan=False)
+            except ValueError:
+                # Defensive: decoding already refuses non-finite numbers, so
+                # this guards the serializer boundary itself. The same
+                # operational refusal: the path only, never the parsed value
+                # or the serializer's text, and no cause chained below it.
+                raise RuntimeError(
+                    f"Chrome preferences cannot be written as standard JSON: {path}"
+                ) from None
+            target.flush()
+            os.fsync(target.fileno())
+        os.replace(temporary_path, path)
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+
+
 async def launch_browser(
     port_override: int | None = None,
     fingerprint: str | None = None,
@@ -107,6 +253,7 @@ async def launch_browser(
     window_border: bool = True,
     binary: str | None = None,
     user_data_dir: str | None = None,
+    initialize_directory: Callable[[Path], None] | None = None,
 ) -> InstanceInfo:
     """Launch Chrome with CDP enabled and register as a named instance.
 
@@ -115,8 +262,18 @@ async def launch_browser(
     ready, registers the instance in the registry, and optionally applies
     a fingerprint profile.
 
-    Session data is stored under /tmp/chrome-agent/session-<id>/.
-    The browser continues running after this function returns.
+    Session data is stored under /tmp/chrome-agent/session-<id>/ unless
+    ``user_data_dir`` names a persistent directory. The browser continues
+    running after this function returns. ``initialize_directory``
+    (adaptation, #201), when given, runs against the session directory after
+    it is allocated and before preferences are prepared or Chrome is
+    spawned; the launcher itself stays generic and knows no 1Password
+    policy. While the callback prepares a fresh session, an initialization
+    marker is held until startup has completed and the instance is
+    registered (released on every outcome), so a concurrent orphan sweep
+    cannot reap the directory; the allocation and the marker's publication
+    are serialized against that sweep's whole check-and-delete transaction
+    by the session-root mutex in ``browser_tools.session_initialization``.
 
     Returns InstanceInfo with name, port, pid, browser_version, user_data_dir.
 
@@ -148,180 +305,228 @@ async def launch_browser(
         registry_data = _load_registry(reg_path)
         port = allocate_port(registry=registry_data)
 
-    # Phase 3: Prepare launch arguments. The CLI front (#36) may bind a
-    # persistent per-profile user-data-dir; otherwise a throwaway session dir
-    # under _SESSION_ROOT is created (and later reaped on stop/cleanup).
-    if user_data_dir is not None:
-        session_dir = user_data_dir
-        os.makedirs(session_dir, exist_ok=True)
-    else:
-        os.makedirs(_SESSION_ROOT, exist_ok=True)
-        session_dir = tempfile.mkdtemp(prefix="session-", dir=_SESSION_ROOT)
-
-    # Write Chrome preferences to disable password save prompts
-    default_dir = os.path.join(session_dir, "Default")
-    os.makedirs(default_dir, exist_ok=True)
-    prefs = {
-        "credentials_enable_service": False,
-        "profile": {
-            "password_manager_enabled": False,
-        },
-    }
-    with open(os.path.join(default_dir, "Preferences"), "w") as f:
-        json.dump(prefs, f)
-
-    args = [
-        binary,
-        f"--remote-debugging-port={port}",
-        f"--user-data-dir={session_dir}",
-        "--no-first-run",
-        "--no-default-browser-check",
-        "--password-store=basic",
-    ]
-    startup_urls: list[str] = []
-    if headless:
-        args.append("--headless=new")
-        if extra_args:
-            # Headless Chrome opens startup URL arguments itself, natively.
-            args.extend(extra_args)
-    else:
-        # A headed launch starts windowless (--no-startup-window) and opens
-        # its first window over CDP. --no-startup-window also suppresses every
-        # startup URL Chrome would have opened from the command line, so a URL
-        # passed after '--' (#179) never appeared: the browser came up on
-        # about:blank and the caller's page was gone. The URL arguments are
-        # therefore pulled out of Chrome's argv and opened by
-        # _open_first_window instead, which keeps the no-focus-steal property
-        # AND opens the caller's page. Non-argument flags pass through
-        # verbatim, as before.
-        args.append("--no-startup-window")
-        if extra_args:
-            chrome_flags, startup_urls = _partition_startup_urls(extra_args)
-            args.extend(chrome_flags)
-
-    # Apply fingerprint via Chrome command-line flags (persistent)
-    env = os.environ.copy()
-    fp_profile = None
-    if fingerprint is not None:
-        from .fingerprint import load_fingerprint
-        fp_profile = load_fingerprint(path=fingerprint)
-        args.append(f"--user-agent={fp_profile.user_agent}")
-        args.append(f"--window-size={fp_profile.viewport['width']},{fp_profile.viewport['height']}")
-        args.append(f"--lang={fp_profile.locale}")
-        env["TZ"] = fp_profile.timezone
-
-    # Phase 4: Launch subprocess. start_new_session detaches the browser from
-    # the launching terminal's controlling tty (#177): without it Chrome kept
-    # the terminal as its controlling terminal even after reparenting to
-    # launchd, and closing that terminal pane killed the browser. The same
-    # detach the supervisor gets at spawn time.
-    process = subprocess.Popen(
-        args,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-        env=env,
-        start_new_session=True,
-    )
-    # Capture the process's start-time identity token immediately, while the
-    # PID is guaranteed to still be this process (wrapper installs can exit
-    # fast). (pid, pid_start) lets liveness checks detect PID recycling.
-    pid_start = process_start_time(pid=process.pid)
-    logger.info("Launched Chrome PID %d on port %d", process.pid, port)
-
-    # Phase 5: Wait for CDP port to be ready
-    deadline = asyncio.get_event_loop().time() + 30.0
-    status = None
-    while asyncio.get_event_loop().time() < deadline:
-        # Check if process died
-        if process.poll() is not None:
-            stderr_output = process.stderr.read().decode(errors="replace") if process.stderr else ""
-            raise RuntimeError(
-                f"Chrome exited immediately with code {process.returncode}. "
-                f"stderr: {stderr_output[:500]}"
-            )
-        status = await check_cdp_port_async(port=port)
-        if status.listening:
-            break
-        await asyncio.sleep(0.2)
-    else:
-        # Timeout -- kill the process and fail
-        process.kill()
-        raise TimeoutError("Browser did not start within 30 seconds")
-
-    if not headless:
+    # Phase 3 + 3.5: Prepare the session directory. A supplied user_data_dir
+    # is created as-is. A throwaway session directory is allocated under
+    # _SESSION_ROOT; when an initializer will prepare it, the allocation runs
+    # inside one short session-root-mutex critical section together with the
+    # marker's publication, so the directory becomes visible and protected
+    # atomically with respect to any orphan sweep (which holds the same mutex
+    # across its check-and-delete transaction) and a launch that cannot
+    # acquire the mutex fails operationally rather than allocating
+    # unprotected. The critical section covers allocation and publication
+    # only - never the initializer callback, preferences, or startup, which
+    # stay protected by the per-directory marker's kernel flock. Allocation
+    # sits inside the owned cleanup window below, so any failure there (in
+    # the mutex, allocation, publication, the initializer, or preference
+    # preparation) removes only a throwaway directory this call allocated -
+    # never a supplied one - while the original error propagates and nothing
+    # masks it. The lease is NOT dropped inside the window: the marker stays
+    # held through the spawn, CDP readiness and registration below (an
+    # unregistered session with no Chrome singleton lock yet is exactly what
+    # a concurrent sweep reaps), and one outer finally releases it on every
+    # outcome after that.
+    marker_fd: int | None = None
+    session_dir: str | None = None
+    try:
         try:
-            await _open_first_window(
-                port=port,
-                url=startup_urls[0] if startup_urls else "about:blank",
-                extra_urls=startup_urls[1:],
+            if user_data_dir is not None:
+                session_dir = user_data_dir
+                os.makedirs(session_dir, exist_ok=True)
+            else:
+                os.makedirs(_SESSION_ROOT, exist_ok=True)
+                if initialize_directory is None:
+                    session_dir = tempfile.mkdtemp(prefix="session-", dir=_SESSION_ROOT)
+                else:
+                    with session_initialization.session_root_exclusion(_SESSION_ROOT):
+                        session_dir = tempfile.mkdtemp(prefix="session-", dir=_SESSION_ROOT)
+                        marker_fd = session_initialization.publish_initialization_marker(
+                            session_dir
+                        )
+            if initialize_directory is not None:
+                initialize_directory(Path(session_dir))
+            _prepare_preferences(Path(session_dir) / "Default" / "Preferences")
+        except BaseException:
+            if user_data_dir is None and session_dir is not None:
+                try:
+                    shutil.rmtree(session_dir, ignore_errors=True)
+                except OSError:
+                    # Even a cleanup that itself fails must not mask the original
+                    # error; the retained path is reported instead.
+                    pass
+                if os.path.isdir(session_dir):
+                    logger.warning(
+                        "Retained session directory %s after a failed initialization", session_dir
+                    )
+            raise
+
+        args = [
+            binary,
+            f"--remote-debugging-port={port}",
+            f"--user-data-dir={session_dir}",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--password-store=basic",
+        ]
+        startup_urls: list[str] = []
+        if headless:
+            args.append("--headless=new")
+            if extra_args:
+                # Headless Chrome opens startup URL arguments itself, natively.
+                args.extend(extra_args)
+        else:
+            # A headed launch starts windowless (--no-startup-window) and opens
+            # its first window over CDP. --no-startup-window also suppresses every
+            # startup URL Chrome would have opened from the command line, so a URL
+            # passed after '--' (#179) never appeared: the browser came up on
+            # about:blank and the caller's page was gone. The URL arguments are
+            # therefore pulled out of Chrome's argv and opened by
+            # _open_first_window instead, which keeps the no-focus-steal property
+            # AND opens the caller's page. Non-argument flags pass through
+            # verbatim, as before.
+            args.append("--no-startup-window")
+            if extra_args:
+                chrome_flags, startup_urls = _partition_startup_urls(extra_args)
+                args.extend(chrome_flags)
+
+        # Apply fingerprint via Chrome command-line flags (persistent)
+        env = os.environ.copy()
+        fp_profile = None
+        if fingerprint is not None:
+            from .fingerprint import load_fingerprint
+            fp_profile = load_fingerprint(path=fingerprint)
+            args.append(f"--user-agent={fp_profile.user_agent}")
+            args.append(
+                f"--window-size={fp_profile.viewport['width']},{fp_profile.viewport['height']}"
             )
-        except BaseException as exc:
-            # Nothing is registered yet, so a browser left running here would be
-            # an orphan no verb can see or stop. BaseException, not Exception: a
-            # launch cancelled while this awaits (Ctrl-C, a cancelled task)
-            # leaves the same orphan, and CancelledError is not an Exception.
+            args.append(f"--lang={fp_profile.locale}")
+            env["TZ"] = fp_profile.timezone
+
+        # Phase 4: Launch subprocess. start_new_session detaches the browser from
+        # the launching terminal's controlling tty (#177): without it Chrome kept
+        # the terminal as its controlling terminal even after reparenting to
+        # launchd, and closing that terminal pane killed the browser. The same
+        # detach the supervisor gets at spawn time.
+        process = subprocess.Popen(
+            args,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            env=env,
+            start_new_session=True,
+        )
+        # Capture the process's start-time identity token immediately, while the
+        # PID is guaranteed to still be this process (wrapper installs can exit
+        # fast). (pid, pid_start) lets liveness checks detect PID recycling.
+        pid_start = process_start_time(pid=process.pid)
+        logger.info("Launched Chrome PID %d on port %d", process.pid, port)
+
+        # Phase 5: Wait for CDP port to be ready
+        deadline = asyncio.get_event_loop().time() + 30.0
+        status = None
+        while asyncio.get_event_loop().time() < deadline:
+            # Check if process died
+            if process.poll() is not None:
+                stderr_output = (
+                    process.stderr.read().decode(errors="replace") if process.stderr else ""
+                )
+                raise RuntimeError(
+                    f"Chrome exited immediately with code {process.returncode}. "
+                    f"stderr: {stderr_output[:500]}"
+                )
+            status = await check_cdp_port_async(port=port)
+            if status.listening:
+                break
+            await asyncio.sleep(0.2)
+        else:
+            # Timeout -- kill the process and fail
             process.kill()
-            if isinstance(exc, asyncio.CancelledError):
-                raise
-            raise RuntimeError(f"Browser started but its first window did not open: {exc}") from exc
+            raise TimeoutError("Browser did not start within 30 seconds")
 
-    # Phase 6: Pin to desktop (Linux/X11, best-effort)
-    if pin_to_desktop and not headless:
-        await _move_to_launching_desktop(pid=process.pid)
+        if not headless:
+            try:
+                await _open_first_window(
+                    port=port,
+                    url=startup_urls[0] if startup_urls else "about:blank",
+                    extra_urls=startup_urls[1:],
+                )
+            except BaseException as exc:
+                # Nothing is registered yet, so a browser left running here would be
+                # an orphan no verb can see or stop. BaseException, not Exception: a
+                # launch cancelled while this awaits (Ctrl-C, a cancelled task)
+                # leaves the same orphan, and CancelledError is not an Exception.
+                process.kill()
+                if isinstance(exc, asyncio.CancelledError):
+                    raise
+                raise RuntimeError(
+                    f"Browser started but its first window did not open: {exc}"
+                ) from exc
 
-    # Phase 7: Register in the instance registry
-    if working_dir is None:
-        working_dir = os.getcwd()
+        # Phase 6: Pin to desktop (Linux/X11, best-effort)
+        if pin_to_desktop and not headless:
+            await _move_to_launching_desktop(pid=process.pid)
 
-    instance_info = register(
-        working_dir=working_dir,
-        pid=process.pid,
-        browser_version=status.browser_version or "unknown",
-        user_data_dir=session_dir,
-        port_override=port,
-        registry_path=registry_path,
-        pid_start=pid_start,
-    )
+        # Phase 7: Register in the instance registry
+        if working_dir is None:
+            working_dir = os.getcwd()
 
-    # Phase 8: Spawn the per-instance supervisor (headed launches only). It is a
-    # detached process -- it must survive the caller exiting (fire-and-forget
-    # launch model) -- that holds a CDP connection and, when the browser/window
-    # closes, retires the instance from the registry (and removes its session
-    # dir). While the browser is alive it also marks the window (tab title
-    # prefix), unless:
-    #   - --no-window-border (window_border is False), or
-    #   - a fingerprint profile is active: the title prefix is page-observable
-    #     (a modified document.title), and bot-defended sites -- exactly where
-    #     fingerprinting is used -- are where title-diffing detectors live. See
-    #     the detection audit.
-    # Headless launches get no supervisor (no window to close or mark); their
-    # registry entries are reclaimed by the launch-time prune above / cleanup.
-    if not headless:
-        from browser_tools.lifecycle import record_supervisor
-
-        from .supervisor import spawn_supervisor
-        resolved_registry = _resolve_path(registry_path)
-        supervisor_process = spawn_supervisor(
-            port=port,
-            name=instance_info.name,
-            registry_path=resolved_registry,
-            draw_border=window_border and fp_profile is None,
-            # The browser's user-data-dir is the supervisor's identity anchor
-            # (#176): the port alone cannot tell "my browser came back" from
-            # "a different browser took the port".
+        instance_info = register(
+            working_dir=working_dir,
+            pid=process.pid,
+            browser_version=status.browser_version or "unknown",
             user_data_dir=session_dir,
-        )
-        # Record it so a supervisor that later dies reads as missing rather
-        # than as an instance that never had one (#65). Same identity pair the
-        # browser's own liveness uses, so a recycled PID is not mistaken for it.
-        record_supervisor(
-            instance_info.name,
-            pid=supervisor_process.pid,
-            pid_start=process_start_time(pid=supervisor_process.pid),
-            registry_path=resolved_registry,
+            port_override=port,
+            registry_path=registry_path,
+            pid_start=pid_start,
         )
 
-    return instance_info
+        # Phase 8: Spawn the per-instance supervisor (headed launches only). It is a
+        # detached process -- it must survive the caller exiting (fire-and-forget
+        # launch model) -- that holds a CDP connection and, when the browser/window
+        # closes, retires the instance from the registry (and removes its session
+        # dir). While the browser is alive it also marks the window (tab title
+        # prefix), unless:
+        #   - --no-window-border (window_border is False), or
+        #   - a fingerprint profile is active: the title prefix is page-observable
+        #     (a modified document.title), and bot-defended sites -- exactly where
+        #     fingerprinting is used -- are where title-diffing detectors live. See
+        #     the detection audit.
+        # Headless launches get no supervisor (no window to close or mark); their
+        # registry entries are reclaimed by the launch-time prune above / cleanup.
+        if not headless:
+            from browser_tools.lifecycle import record_supervisor
+
+            from .supervisor import spawn_supervisor
+            resolved_registry = _resolve_path(registry_path)
+            supervisor_process = spawn_supervisor(
+                port=port,
+                name=instance_info.name,
+                registry_path=resolved_registry,
+                draw_border=window_border and fp_profile is None,
+                # The browser's user-data-dir is the supervisor's identity anchor
+                # (#176): the port alone cannot tell "my browser came back" from
+                # "a different browser took the port".
+                user_data_dir=session_dir,
+            )
+            # Record it so a supervisor that later dies reads as missing rather
+            # than as an instance that never had one (#65). Same identity pair the
+            # browser's own liveness uses, so a recycled PID is not mistaken for it.
+            record_supervisor(
+                instance_info.name,
+                pid=supervisor_process.pid,
+                pid_start=process_start_time(pid=supervisor_process.pid),
+                registry_path=resolved_registry,
+            )
+
+        return instance_info
+    finally:
+        # The same lease acquired above spans the entire remaining launch:
+        # spawn, CDP readiness, first window, pinning and registration. A
+        # concurrent orphan sweep - including another registry's - cannot reap
+        # a session no registry tracks yet. It is dropped here on every
+        # outcome (return, failure, cancellation), never earlier; and once a
+        # spawn may have begun, the directory itself is never deleted, the
+        # lease is only released.
+        if marker_fd is not None and session_dir is not None:
+            session_initialization.release_initialization_marker(session_dir, marker_fd)
 
 
 async def _open_first_window(
@@ -419,32 +624,63 @@ def cleanup_sessions(registry_path: str | None = None) -> list[str]:
         default_data = _load_registry(REGISTRY_PATH)
         tracked_dirs |= {e.get("user_data_dir") for e in default_data.values()}
 
-    # Legacy cleanup: remove session dirs not tracked by the registry
+    # Legacy cleanup: remove session dirs not tracked by the registry. The
+    # whole check-and-delete transaction runs under the same session-root
+    # mutex a launch holds from the moment its fresh directory becomes
+    # visible until its marker is published, so a sweep can never act on an
+    # absent-marker observation that predates that publication (S4-1). The
+    # registry cleanup and loads above stay outside the mutex region, and no
+    # registry lock is ever taken inside it. A sweep that cannot hold the
+    # mutex skips the orphan walk entirely rather than deleting without the
+    # serialization.
     if os.path.isdir(_SESSION_ROOT):
-        for entry in os.listdir(_SESSION_ROOT):
-            session_dir = os.path.join(_SESSION_ROOT, entry)
-            if not os.path.isdir(session_dir):
-                continue
-            # Skip the registry file itself
-            if entry == "registry.json" or entry.endswith(".tmp"):
-                continue
-            if session_dir in tracked_dirs:
-                continue
+        mutex_fd: int | None = None
+        try:
+            mutex_fd = session_initialization.acquire_session_root_mutex(_SESSION_ROOT)
+        except OSError as exc:
+            logger.warning(
+                "Skipping the orphan sweep; the session-root mutex is unavailable: %s", exc
+            )
+        if mutex_fd is not None:
+            try:
+                for entry in os.listdir(_SESSION_ROOT):
+                    session_dir = os.path.join(_SESSION_ROOT, entry)
+                    if not os.path.isdir(session_dir):
+                        continue
+                    # Skip the registry file itself
+                    if entry == "registry.json" or entry.endswith(".tmp"):
+                        continue
+                    if session_dir in tracked_dirs:
+                        continue
 
-            lock_file = os.path.join(session_dir, "SingletonLock")
-            if not os.path.exists(lock_file) and not os.path.islink(lock_file):
-                logger.info("Removing orphaned session directory: %s", session_dir)
-                shutil.rmtree(session_dir, ignore_errors=True)
-            else:
-                # Identity check, not bare existence: the lock's PID is written
-                # by Chrome as it saw itself, so a sandboxed (PID-namespaced)
-                # ghost's lock aliases to a foreign host process. A PID that is
-                # not our own live process cannot be a browser holding this
-                # (untracked) profile.
-                pid = _read_lock_pid(lock_file=lock_file)
-                if pid is not None and not process_is_ours(pid=pid):
-                    logger.info("Removing orphaned session directory (PID %d not ours): %s", pid, session_dir)
-                    shutil.rmtree(session_dir, ignore_errors=True)
+                    # An initializer still preparing this untracked directory holds an
+                    # empty marker under a kernel flock (#201): a slow setup (signature
+                    # verification, publication) must not be swept away by another
+                    # registry's startup sweep. A marker the kernel has already
+                    # released (a dead initializer) leaves it sweepable as before.
+                    if session_initialization.initialization_marker_holds(session_dir):
+                        continue
+
+                    lock_file = os.path.join(session_dir, "SingletonLock")
+                    if not os.path.exists(lock_file) and not os.path.islink(lock_file):
+                        logger.info("Removing orphaned session directory: %s", session_dir)
+                        shutil.rmtree(session_dir, ignore_errors=True)
+                    else:
+                        # Identity check, not bare existence: the lock's PID is written
+                        # by Chrome as it saw itself, so a sandboxed (PID-namespaced)
+                        # ghost's lock aliases to a foreign host process. A PID that is
+                        # not our own live process cannot be a browser holding this
+                        # (untracked) profile.
+                        pid = _read_lock_pid(lock_file=lock_file)
+                        if pid is not None and not process_is_ours(pid=pid):
+                            logger.info(
+                                "Removing orphaned session directory (PID %d not ours): %s",
+                                pid,
+                                session_dir,
+                            )
+                            shutil.rmtree(session_dir, ignore_errors=True)
+            finally:
+                session_initialization.release_session_root_mutex(mutex_fd)
 
     return removed
 

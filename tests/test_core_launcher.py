@@ -17,11 +17,15 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import pytest
 
 from browser_tools.core import launcher
 from browser_tools.core.connection import PortStatus
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 @dataclass
@@ -65,11 +69,223 @@ def _patch_launch_plumbing(monkeypatch, captured):
         return _FakeProcess()
 
     monkeypatch.setattr(launcher.subprocess, "Popen", fake_popen)
+
     async def fake_check_cdp_port_async(*, port):
         return PortStatus(listening=True, browser_version="Chrome/999.0.0.0")
 
     monkeypatch.setattr(launcher, "check_cdp_port_async", fake_check_cdp_port_async)
     monkeypatch.setattr(launcher, "cleanup_sessions", lambda registry_path=None: [])
+
+
+class TestProfilePreferences:
+    def _launch(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        captured: dict[str, object],
+    ) -> object:
+        _patch_launch_plumbing(monkeypatch, captured)
+        return asyncio.run(
+            launcher.launch_browser(
+                port_override=9337,
+                binary="synthetic-chrome",
+                headless=True,
+                working_dir=str(tmp_path),
+                registry_path=str(tmp_path / "registry.json"),
+                user_data_dir=str(tmp_path / "udd"),
+            )
+        )
+
+    def test_existing_profile_settings_survive_launch(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        path = tmp_path / "udd" / "Default" / "Preferences"
+        path.parent.mkdir(parents=True)
+        original = {
+            "homepage": "https://example.test/",
+            "browser": {"show_home_button": True},
+            "extensions": {"pinned_extensions": ["synthetic-extension"]},
+            "profile": {"name": "Automation", "password_manager_enabled": True},
+            "credentials_enable_service": True,
+        }
+        path.write_text(json.dumps(original))
+
+        captured = {}
+        self._launch(monkeypatch, tmp_path, captured)
+
+        expected = original | {"credentials_enable_service": False}
+        expected["profile"] = original["profile"] | {"password_manager_enabled": False}
+        assert json.loads(path.read_text()) == expected
+        assert captured["args"][0] == "synthetic-chrome"
+
+    def test_missing_preferences_get_password_prompt_defaults(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        self._launch(monkeypatch, tmp_path, {})
+
+        path = tmp_path / "udd" / "Default" / "Preferences"
+        assert json.loads(path.read_text()) == {
+            "credentials_enable_service": False,
+            "profile": {"password_manager_enabled": False},
+        }
+
+    @pytest.mark.parametrize(
+        "contents",
+        [
+            b'{"private_synthetic_marker":',
+            b'["private_synthetic_marker"]',
+            b"null",
+            b'{"profile": ["private_synthetic_marker"]}',
+            b"\xffprivate_synthetic_marker",
+            # Outside JSON syntax: the default Python decoder accepts them, so
+            # they must be rejected explicitly before Chrome ever sees them.
+            b'{"private_synthetic_marker": NaN}',
+            b'{"private_synthetic_marker": Infinity}',
+            b'{"private_synthetic_marker": -Infinity}',
+            # The same constants inside the two settings the launch overwrites:
+            # without an explicit decode-time rejection the overwrite would
+            # hide them from the serializer and the launch would proceed.
+            b'{"private_synthetic_marker": 1, "credentials_enable_service": NaN}',
+            b'{"private_synthetic_marker": 1, "credentials_enable_service": Infinity}',
+            b'{"private_synthetic_marker": 1, "credentials_enable_service": -Infinity}',
+            b'{"private_synthetic_marker": 1, "profile": {"password_manager_enabled": NaN}}',
+            b'{"private_synthetic_marker": 1, "profile": {"password_manager_enabled": Infinity}}',
+            b'{"private_synthetic_marker": 1, "profile": {"password_manager_enabled": -Infinity}}',
+        ],
+    )
+    def test_invalid_preferences_abort_before_spawn_and_remain_intact(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, contents: bytes
+    ) -> None:
+        path = tmp_path / "udd" / "Default" / "Preferences"
+        path.parent.mkdir(parents=True)
+        path.write_bytes(contents)
+        captured = {}
+
+        with pytest.raises(RuntimeError) as error:
+            self._launch(monkeypatch, tmp_path, captured)
+
+        assert path.read_bytes() == contents
+        assert "args" not in captured
+        assert "private_synthetic_marker" not in str(error.value)
+        assert error.value.__suppress_context__ or error.value.__context__ is None
+
+    def test_failed_atomic_replace_preserves_existing_preferences(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A failed atomic publication leaves the original document intact.
+
+        Proven through the public launch seam: the same Preferences file the
+        launch would publish is seeded, the atomic replacement fails, and the
+        original bytes, the absent browser spawn, and the absent staging file
+        are all asserted. Calling the private helper would prove nothing about
+        a launch.
+        """
+        path = tmp_path / "udd" / "Default" / "Preferences"
+        path.parent.mkdir(parents=True)
+        contents = b'{"homepage": "https://example.test/"}'
+        path.write_bytes(contents)
+
+        def fail_replace(source: object, target: object) -> None:
+            raise OSError("synthetic atomic replacement failure")
+
+        monkeypatch.setattr(launcher.os, "replace", fail_replace)
+        captured: dict[str, object] = {}
+
+        with pytest.raises(OSError, match="synthetic atomic replacement failure"):
+            self._launch(monkeypatch, tmp_path, captured)
+
+        assert path.read_bytes() == contents
+        assert "args" not in captured
+        assert list(path.parent.iterdir()) == [path]
+
+    @pytest.mark.parametrize(
+        "contents",
+        [
+            b'{"homepage": "https://example.test/", "synthetic_overflow": 1e999}',
+            b'{"homepage": "https://example.test/", "synthetic_overflow": -1e999}',
+            b'{"homepage": "https://example.test/", "credentials_enable_service": 1e999}',
+            b'{"homepage": "https://example.test/", "profile": {"password_manager_enabled": 1e999}}',
+        ],
+    )
+    def test_unrepresentable_numeric_overflow_aborts_before_spawn_and_leaves_no_staging(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, contents: bytes
+    ) -> None:
+        """A number that decodes to infinity (1e999) is refused while decoding.
+
+        That includes the two settings the launch overwrites, which would
+        otherwise hide the overflow from the serializer. The refusal is the
+        fixed path-only load message: no traceback past the RuntimeError
+        boundary, no value or decoder text, no chained cause, original bytes
+        retained, no browser spawn, and no staging file left behind.
+        """
+        path = tmp_path / "udd" / "Default" / "Preferences"
+        path.parent.mkdir(parents=True)
+        path.write_bytes(contents)
+        captured: dict[str, object] = {}
+
+        with pytest.raises(RuntimeError) as error:
+            self._launch(monkeypatch, tmp_path, captured)
+
+        assert str(error.value) == f"Chrome preferences are invalid: {path}"
+        assert path.read_bytes() == contents
+        assert "args" not in captured
+        assert error.value.__cause__ is None
+        assert error.value.__suppress_context__
+        assert list(path.parent.iterdir()) == [path]
+
+    def test_finite_floats_survive_launch(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Ordinary fractional and exponent numbers still decode and publish."""
+        path = tmp_path / "udd" / "Default" / "Preferences"
+        path.parent.mkdir(parents=True)
+        path.write_text(
+            '{"zoom": 1.5, "tiny": 2.5e-3, "large": 1e2, "credentials_enable_service": true}'
+        )
+        captured: dict[str, object] = {}
+
+        self._launch(monkeypatch, tmp_path, captured)
+
+        assert json.loads(path.read_text()) == {
+            "zoom": 1.5,
+            "tiny": 0.0025,
+            "large": 100.0,
+            "credentials_enable_service": False,
+            "profile": {"password_manager_enabled": False},
+        }
+        assert "args" in captured
+
+    def test_a_serializer_failure_is_normalized_to_the_path_only_refusal(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """The defensive serializer boundary keeps its own fixed refusal.
+
+        Valid synthetic preferences decode, then the serializer raises a
+        ValueError carrying a synthetic marker. The public launch reports the
+        fixed path-only message with no chained cause, the original bytes
+        survive, nothing spawns, and no staging file remains.
+        """
+        path = tmp_path / "udd" / "Default" / "Preferences"
+        path.parent.mkdir(parents=True)
+        contents = b'{"homepage": "https://example.test/"}'
+        path.write_bytes(contents)
+
+        def failing_dump(*args: object, **kwargs: object) -> None:
+            raise ValueError("private_synthetic_marker serializer failure")
+
+        monkeypatch.setattr(launcher.json, "dump", failing_dump)
+        captured: dict[str, object] = {}
+
+        with pytest.raises(RuntimeError) as error:
+            self._launch(monkeypatch, tmp_path, captured)
+
+        assert str(error.value) == f"Chrome preferences cannot be written as standard JSON: {path}"
+        assert "private_synthetic_marker" not in str(error.value)
+        assert error.value.__cause__ is None
+        assert error.value.__suppress_context__
+        assert path.read_bytes() == contents
+        assert "args" not in captured
+        assert list(path.parent.iterdir()) == [path]
 
 
 class TestFingerprintBecomesLaunchFlags:
@@ -194,9 +410,7 @@ class TestHeadedLaunchLeavesFocusAlone:
 
         assert captured["popen_kwargs"].get("start_new_session") is True
 
-    def test_headed_url_opens_in_the_first_window_not_chromes_argv(
-        self, monkeypatch, tmp_path
-    ):
+    def test_headed_url_opens_in_the_first_window_not_chromes_argv(self, monkeypatch, tmp_path):
         """A URL after '--' opens as the first page (#179).
 
         --no-startup-window suppresses Chrome's own startup URLs, so the URL
@@ -209,7 +423,10 @@ class TestHeadedLaunchLeavesFocusAlone:
             captured["opened"] = kwargs
 
         self._launch_headed(
-            monkeypatch, tmp_path, captured, fake_open,
+            monkeypatch,
+            tmp_path,
+            captured,
+            fake_open,
             extra_args=["http://127.0.0.1:17471/"],
         )
 
@@ -217,16 +434,17 @@ class TestHeadedLaunchLeavesFocusAlone:
         assert captured["opened"]["url"] == "http://127.0.0.1:17471/"
         assert captured["opened"]["extra_urls"] == []
 
-    def test_headed_flags_pass_through_and_multiple_urls_open_as_tabs(
-        self, monkeypatch, tmp_path
-    ):
+    def test_headed_flags_pass_through_and_multiple_urls_open_as_tabs(self, monkeypatch, tmp_path):
         captured: dict = {}
 
         async def fake_open(**kwargs):
             captured["opened"] = kwargs
 
         self._launch_headed(
-            monkeypatch, tmp_path, captured, fake_open,
+            monkeypatch,
+            tmp_path,
+            captured,
+            fake_open,
             extra_args=["--proxy-server=host:9", "https://a.example", "https://b.example"],
         )
 
@@ -244,7 +462,10 @@ class TestHeadedLaunchLeavesFocusAlone:
         page = tmp_path / "page.html"
         page.write_text("<h1>hi</h1>")
         self._launch_headed(
-            monkeypatch, tmp_path, captured, fake_open,
+            monkeypatch,
+            tmp_path,
+            captured,
+            fake_open,
             extra_args=[str(page)],
         )
 
@@ -290,9 +511,7 @@ class TestHeadedLaunchLeavesFocusAlone:
             raise asyncio.CancelledError()
 
         _patch_launch_plumbing(monkeypatch, captured)
-        monkeypatch.setattr(
-            launcher.subprocess, "Popen", lambda args, **kwargs: _KillableProcess()
-        )
+        monkeypatch.setattr(launcher.subprocess, "Popen", lambda args, **kwargs: _KillableProcess())
         monkeypatch.setattr(launcher, "_open_first_window", cancelled_open)
 
         with pytest.raises(asyncio.CancelledError):
@@ -319,9 +538,7 @@ class TestHeadedLaunchLeavesFocusAlone:
             raise ConnectionError("no browser")
 
         _patch_launch_plumbing(monkeypatch, captured)
-        monkeypatch.setattr(
-            launcher.subprocess, "Popen", lambda args, **kwargs: _KillableProcess()
-        )
+        monkeypatch.setattr(launcher.subprocess, "Popen", lambda args, **kwargs: _KillableProcess())
         monkeypatch.setattr(launcher, "_open_first_window", failing_open)
 
         with pytest.raises(RuntimeError, match="first window did not open"):
@@ -335,6 +552,7 @@ class TestHeadedLaunchLeavesFocusAlone:
                 )
             )
         assert killed == [424242]
-        assert not (tmp_path / "registry.json").exists() or "9337" not in (
-            tmp_path / "registry.json"
-        ).read_text()
+        assert (
+            not (tmp_path / "registry.json").exists()
+            or "9337" not in (tmp_path / "registry.json").read_text()
+        )

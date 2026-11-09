@@ -1,15 +1,20 @@
-"""Whole-lifecycle and CLI coverage for ``launch --profile NAME --1password`` (#201).
+"""Whole-lifecycle coverage for ``launch --profile NAME --1password`` (#201).
 
 Everything here is mocked below the seams that matter: the vendored launcher
 is faked (no browser starts), codesign is replaced at the subprocess boundary,
 and the official registration lives in a tmp tree. What these tests prove is
 the ordering the spec pins -- eligibility before any write, holder refusal
-before provisioning, provisioning under the profile lock and before Chrome --
-plus the CLI flag's plumbing and exit codes.
+before provisioning, provisioning under the profile lock and before Chrome.
+A brand-new Named Chrome profile on macOS is also registered automatically
+when the official source exists: that default's coverage lives in
+TestAutomaticRegistration. The CLI flag's plumbing and exit codes are in
+``test_onepassword_cli.py``; the shared fixtures live in
+``onepassword_lifecycle_fixtures.py``.
 """
 
 from __future__ import annotations
 
+import errno
 import json
 import subprocess
 import sys
@@ -20,115 +25,21 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 import pytest
+from onepassword_lifecycle_fixtures import DEST_NAME, HOSTS, STABLE
+from onepassword_lifecycle_fixtures import _darwin as _darwin
+from onepassword_lifecycle_fixtures import (
+    _never_read_the_real_registration as _never_read_the_real_registration,
+)
+from onepassword_lifecycle_fixtures import _no_real_camoufox_runner as _no_real_camoufox_runner
+from onepassword_lifecycle_fixtures import _no_real_codesign as _no_real_codesign
+from onepassword_lifecycle_fixtures import fake_browser_launch as fake_browser_launch
+from onepassword_lifecycle_fixtures import profiles_root as profiles_root
+from onepassword_lifecycle_fixtures import registry_path as registry_path
+from onepassword_lifecycle_fixtures import valid_installation as valid_installation
 
-from browser_tools import cli, lifecycle, onepassword
-from browser_tools.core import registry as core_registry
+from browser_tools import lifecycle, onepassword
 from browser_tools.lifecycle import LifecycleError, ProfileLockBusy
 from browser_tools.usage import UsageError
-
-STABLE = onepassword.STABLE_EXTENSION_ORIGIN
-OTHER_ORIGIN = "chrome-extension://" + "b" * 32 + "/"
-HOSTS = "NativeMessagingHosts"
-DEST_NAME = "com.1password.1password.json"
-LAUNCH_JSON_KEYS = {
-    "name",
-    "port",
-    "pid",
-    "engine",
-    "profile",
-    "browser_version",
-    "user_data_dir",
-}
-
-
-@pytest.fixture(autouse=True)
-def _never_read_the_real_registration(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    monkeypatch.setattr(
-        onepassword,
-        "SOURCE_MANIFEST",
-        tmp_path / "absent" / HOSTS / DEST_NAME,
-    )
-
-
-@pytest.fixture(autouse=True)
-def _no_real_codesign(monkeypatch: pytest.MonkeyPatch) -> None:
-    def fake_run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
-        return subprocess.CompletedProcess(args, 0, b"", b"")
-
-    monkeypatch.setattr(onepassword, "subprocess", types.SimpleNamespace(run=fake_run))
-
-
-@pytest.fixture(autouse=True)
-def _no_real_camoufox_runner(monkeypatch: pytest.MonkeyPatch) -> None:
-    def forbidden(*args, **kwargs):
-        raise AssertionError("a provisioning test attempted to launch a real Camoufox")
-
-    monkeypatch.setattr(lifecycle, "_spawn_camoufox_process", forbidden)
-
-
-@pytest.fixture(autouse=True)
-def _darwin(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Pin the platform so the positive paths run anywhere the suite runs."""
-    monkeypatch.setattr(sys, "platform", "darwin")
-
-
-@pytest.fixture
-def registry_path(tmp_path: Path) -> str:
-    return str(tmp_path / "registry.json")
-
-
-@pytest.fixture
-def profiles_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    root = tmp_path / "profiles"
-    monkeypatch.setenv(lifecycle.PROFILES_ENV_VAR, str(root))
-    return root
-
-
-@pytest.fixture
-def valid_installation(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
-    """A valid official registration the provisioning path can read."""
-    helper = tmp_path / "app" / "1Password-BrowserSupport"
-    helper.parent.mkdir(parents=True, exist_ok=True)
-    helper.write_text("#!/bin/sh\nexit 0\n")
-    helper.chmod(0o755)
-    hosts = tmp_path / "official-chrome" / HOSTS
-    hosts.mkdir(parents=True, exist_ok=True)
-    (hosts / DEST_NAME).write_text(
-        json.dumps(
-            {
-                "name": "com.1password.1password",
-                "description": "1Password native messaging host",
-                "path": str(helper),
-                "type": "stdio",
-                "allowed_origins": [STABLE, OTHER_ORIGIN],
-            }
-        )
-    )
-    monkeypatch.setattr(onepassword, "SOURCE_MANIFEST", hosts / DEST_NAME)
-    return helper
-
-
-@pytest.fixture
-def fake_browser_launch(monkeypatch: pytest.MonkeyPatch, registry_path: str) -> dict[str, object]:
-    """Replace the vendored launcher; record what it was handed."""
-    captured: dict[str, object] = {}
-
-    async def fake_launch_browser(**kwargs: object) -> object:
-        captured.update(kwargs)
-        info = core_registry.register(
-            working_dir=str(kwargs.get("working_dir")),
-            pid=4321,
-            browser_version="Chrome/9",
-            user_data_dir=str(kwargs.get("user_data_dir")),
-            port_override=9450,
-            registry_path=str(kwargs.get("registry_path")),
-            pid_start="tok",
-        )
-        return core_registry.lookup(info.name, registry_path=str(kwargs.get("registry_path")))
-
-    monkeypatch.setattr(lifecycle.core_launcher, "launch_browser", fake_launch_browser)
-    return captured
-
 
 # ---------------------------------------------------------------------------
 # Eligibility: refused before any filesystem work
@@ -222,9 +133,11 @@ class TestLaunchSeamOrdering:
         assert fake_browser_launch == {}
         assert not (external / HOSTS).exists()
 
-    def test_opt_out_never_calls_provisioning(
+    def test_absent_official_source_never_provisions(
         self, monkeypatch, registry_path, profiles_root, fake_browser_launch
     ):
+        # The autouse fixture keeps SOURCE_MANIFEST absent, so a launch with no
+        # flag has no official source to register from.
         calls: list[Path] = []
 
         def never(user_data_dir: Path) -> None:
@@ -309,80 +222,514 @@ class TestLaunchSeamOrdering:
 
 
 # ---------------------------------------------------------------------------
-# The CLI surface: flag, forwarding, exit codes
+# Automatic registration of brand-new Named Profiles
 # ---------------------------------------------------------------------------
 
 
-class TestCliSurface:
-    def test_the_flag_parses_and_defaults_off(self):
-        assert cli.build_parser().parse_args(["launch"]).onepassword is False
-        assert cli.build_parser().parse_args(["launch", "--1password"]).onepassword is True
+class TestAutomaticRegistration:
+    """A fresh macOS Named Chrome profile registers itself; nothing else does.
 
-    def test_the_flag_is_forwarded_and_the_json_stays_unchanged(
-        self, monkeypatch, capsys, tmp_path, registry_path
-    ):
+    The default is user-selected: no flag, no new seam. Everything the
+    explicit path checks stays inside the provisioner; these tests pin only
+    which launches reach it.
+    """
+
+    def test_fresh_profile_registers_automatically(
+        self,
+        registry_path: str,
+        profiles_root: Path,
+        valid_installation: Path,
+        fake_browser_launch: dict[str, object],
+    ) -> None:
+        instance = lifecycle.launch(profile="work", registry_path=registry_path)
+
+        assert instance.profile == "work"
+        assert fake_browser_launch["user_data_dir"] == str(profiles_root / "work")
+        manifest_path = profiles_root / "work" / HOSTS / DEST_NAME
+        written = json.loads(manifest_path.read_text())
+        assert written == {
+            "name": "com.1password.1password",
+            "description": "1Password native messaging host",
+            "path": str(valid_installation),
+            "type": "stdio",
+            "allowed_origins": [STABLE],
+        }
+        assert manifest_path.stat().st_mode & 0o777 == 0o600
+
+    def test_existing_profile_stays_unregistered_without_the_flag(
+        self,
+        registry_path: str,
+        profiles_root: Path,
+        valid_installation: Path,
+        fake_browser_launch: dict[str, object],
+    ) -> None:
+        profile = profiles_root / "work"
+        login = profile / "Default" / "Login Data"
+        login.parent.mkdir(parents=True)
+        login.write_bytes(b"existing login sentinel")
+
+        instance = lifecycle.launch(profile="work", registry_path=registry_path)
+
+        assert instance.profile == "work"
+        assert fake_browser_launch["user_data_dir"] == str(profile)
+        assert not (profile / HOSTS).exists()
+        assert login.read_bytes() == b"existing login sentinel"
+
+    def test_absent_source_keeps_a_plain_launch(
+        self, registry_path: str, profiles_root: Path, fake_browser_launch: dict[str, object]
+    ) -> None:
+        instance = lifecycle.launch(profile="work", registry_path=registry_path)
+
+        assert instance.profile == "work"
+        assert fake_browser_launch  # the browser launched, nothing else happened
+        assert not (profiles_root / "work" / HOSTS).exists()
+
+    def test_unsupported_platform_keeps_a_plain_launch(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        registry_path: str,
+        profiles_root: Path,
+        valid_installation: Path,
+        fake_browser_launch: dict[str, object],
+    ) -> None:
+        monkeypatch.setattr(sys, "platform", "linux")
+
+        instance = lifecycle.launch(profile="work", registry_path=registry_path)
+
+        assert instance.profile == "work"
+        assert fake_browser_launch
+        assert not (profiles_root / "work" / HOSTS).exists()
+
+    def test_camoufox_profile_keeps_a_plain_launch(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        registry_path: str,
+        profiles_root: Path,
+        valid_installation: Path,
+    ) -> None:
         captured: dict[str, object] = {}
 
-        def fake_launch(**kwargs: object) -> lifecycle.ExtendedInstance:
+        def fake_camoufox(**kwargs: object) -> lifecycle.ExtendedInstance:
             captured.update(kwargs)
             return lifecycle.ExtendedInstance(
                 name="work-01",
                 port=9450,
-                pid=4321,
-                browser_version="Chrome/9",
-                user_data_dir=str(tmp_path / "profiles" / "work"),
+                pid=512,
+                browser_version="camoufox",
+                user_data_dir=str(profiles_root / "work"),
                 launched=None,
                 pid_start=None,
-                engine="chrome",
+                engine="camoufox",
                 profile="work",
             )
 
-        monkeypatch.setattr(lifecycle, "launch", fake_launch)
-        monkeypatch.setenv(lifecycle.REGISTRY_ENV_VAR, registry_path)
+        monkeypatch.setattr(lifecycle, "_launch_camoufox", fake_camoufox)
+        instance = lifecycle.launch(engine="camoufox", profile="work", registry_path=registry_path)
 
-        assert cli.main(["launch", "--profile", "work", "--1password"]) == cli.EXIT_OK
-        assert captured["onepassword"] is True
-        document = json.loads(capsys.readouterr().out)
-        assert set(document) == LAUNCH_JSON_KEYS
+        assert instance.engine == "camoufox"
+        assert captured["user_data_dir"] == profiles_root / "work"
+        assert not (profiles_root / "work" / HOSTS).exists()
 
-        assert cli.main(["launch", "--profile", "work"]) == cli.EXIT_OK
-        assert captured["onepassword"] is False
-
-    @pytest.mark.parametrize(
-        ("argv", "fragment"),
-        [
-            (
-                ["launch", "--engine", "camoufox", "--profile", "work", "--1password"],
-                "--1password requires the chrome engine",
-            ),
-            (["launch", "--1password"], "--1password provisions a named profile"),
-        ],
-    )
-    def test_unsupported_combinations_are_usage_errors(
+    def test_unnamed_launch_never_provisions(
         self,
-        monkeypatch,
-        capsys,
-        tmp_path,
-        registry_path,
-        profiles_root,
-        fake_browser_launch,
-        argv,
-        fragment,
-    ):
-        monkeypatch.setenv(lifecycle.REGISTRY_ENV_VAR, registry_path)
-        assert cli.main(argv) == cli.EXIT_USAGE
-        assert fragment in capsys.readouterr().err
-        # Nothing was written on the way out.
-        assert list(profiles_root.glob("*")) == []
+        monkeypatch: pytest.MonkeyPatch,
+        registry_path: str,
+        valid_installation: Path,
+        fake_browser_launch: dict[str, object],
+    ) -> None:
+        calls: list[Path] = []
 
-    def test_a_provisioning_failure_is_an_operational_error_before_any_browser(
-        self, monkeypatch, capsys, registry_path, profiles_root, fake_browser_launch
-    ):
-        def refused(user_data_dir: Path) -> None:
-            raise onepassword.OnePasswordProvisionError("no official registration")
+        def never(user_data_dir: Path) -> None:
+            calls.append(user_data_dir)
 
-        monkeypatch.setattr(onepassword, "provision", refused)
-        monkeypatch.setenv(lifecycle.REGISTRY_ENV_VAR, registry_path)
-        assert cli.main(["launch", "--profile", "work", "--1password"]) == cli.EXIT_OPERATIONAL
-        assert "no official registration" in capsys.readouterr().err
+        monkeypatch.setattr(onepassword, "provision", never)
+        lifecycle.launch(registry_path=registry_path)
+
+        assert calls == []
+        assert fake_browser_launch
+
+    def test_migrated_legacy_profile_is_not_new(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        registry_path: str,
+        profiles_root: Path,
+        valid_installation: Path,
+        fake_browser_launch: dict[str, object],
+    ) -> None:
+        legacy = profiles_root.parent / "legacy"
+        monkeypatch.setenv(lifecycle.LEGACY_PROFILES_ENV_VAR, str(legacy))
+        source = legacy / "work"
+        login = source / "Default" / "Login Data"
+        login.parent.mkdir(parents=True)
+        login.write_bytes(b"legacy login sentinel")
+
+        instance = lifecycle.launch(profile="work", registry_path=registry_path)
+
+        assert instance.profile == "work"
+        assert not (profiles_root / "work" / HOSTS).exists()
+        assert (profiles_root / "work" / "Default" / "Login Data").read_bytes() == (
+            b"legacy login sentinel"
+        )
+        assert not source.exists()
+
+    def test_invalid_present_source_refuses_before_browser_spawn(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        registry_path: str,
+        profiles_root: Path,
+        fake_browser_launch: dict[str, object],
+    ) -> None:
+        invalid = tmp_path / HOSTS / DEST_NAME
+        invalid.parent.mkdir(parents=True)
+        invalid.write_text("{ not json")
+        monkeypatch.setattr(onepassword, "SOURCE_MANIFEST", invalid)
+
+        with pytest.raises(LifecycleError, match="not valid JSON") as error:
+            lifecycle.launch(profile="work", registry_path=registry_path)
+
         assert fake_browser_launch == {}
+        # The launch carried no flag, so the refusal cannot offer one.
+        assert "--1password" not in str(error.value)
+
+    def test_dangling_source_link_is_invalid_rather_than_absent(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        registry_path: str,
+        fake_browser_launch: dict[str, object],
+    ) -> None:
+        """A dangling symlink at the official source path is a present,
+        invalid entry (adversarial A2): it must reach the provisioner's
+        refusal instead of being classified as absent and launched around.
+        """
+        source = tmp_path / HOSTS / DEST_NAME
+        source.parent.mkdir(parents=True)
+        source.symlink_to(tmp_path / "absent-target.json")
+        monkeypatch.setattr(onepassword, "SOURCE_MANIFEST", source)
+
+        with pytest.raises(LifecycleError, match="could not be read as a regular file"):
+            lifecycle.launch(profile="work", registry_path=registry_path)
+
+        assert fake_browser_launch == {}
+
+    def test_retry_after_failed_initialization_still_refuses_unchanged_invalid_source(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        registry_path: str,
+        valid_installation: Path,
+        fake_browser_launch: dict[str, object],
+    ) -> None:
+        """A failed automatic initialization must not silently disable the
+        gate (adversarial A1): with the source still invalid, the retry is
+        refused again with the failure visible.
+        """
+        source = onepassword.source_manifest_path()
+        source.write_text("{ not json")
+        with pytest.raises(LifecycleError, match="not valid JSON"):
+            lifecycle.launch(profile="work", registry_path=registry_path)
+        assert fake_browser_launch == {}
+
+        with pytest.raises(LifecycleError, match="not valid JSON"):
+            lifecycle.launch(profile="work", registry_path=registry_path)
+
+        assert fake_browser_launch == {}
+
+    def test_retry_after_failed_initialization_registers_once_the_source_is_repaired(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        registry_path: str,
+        profiles_root: Path,
+        valid_installation: Path,
+        fake_browser_launch: dict[str, object],
+    ) -> None:
+        """A repaired official source must produce the promised automatic
+        registration on retry, not a permanently-plain existing profile.
+        """
+        source = onepassword.source_manifest_path()
+        valid_source = source.read_bytes()
+        source.write_text("{ not json")
+        with pytest.raises(LifecycleError, match="not valid JSON"):
+            lifecycle.launch(profile="work", registry_path=registry_path)
+
+        source.write_bytes(valid_source)
+        instance = lifecycle.launch(profile="work", registry_path=registry_path)
+
+        assert instance.profile == "work"
+        assert fake_browser_launch["user_data_dir"] == str(profiles_root / "work")
+        manifest = json.loads((profiles_root / "work" / HOSTS / DEST_NAME).read_text())
+        assert manifest["allowed_origins"] == [STABLE]
+        assert manifest["path"] == str(valid_installation)
+
+    def test_an_interrupted_validation_discards_the_new_directory_and_the_retry_registers(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        registry_path: str,
+        profiles_root: Path,
+        valid_installation: Path,
+        fake_browser_launch: dict[str, object],
+    ) -> None:
+        """Ctrl-C during the helper check must not turn the next launch plain.
+
+        The interruption propagates unchanged (the very same exception
+        object), the empty directory this launch created is gone, and the
+        retry still registers the profile automatically.
+        """
+        interrupt = KeyboardInterrupt()
+        real_validate = onepassword._validate_helper
+        state = {"interrupt": True}
+
+        def flaky_validate(helper_path: str) -> None:
+            if state["interrupt"]:
+                raise interrupt
+            real_validate(helper_path)
+
+        monkeypatch.setattr(onepassword, "_validate_helper", flaky_validate)
+
+        with pytest.raises(KeyboardInterrupt) as error:
+            lifecycle.launch(profile="work", registry_path=registry_path)
+
+        assert error.value is interrupt
+        assert not (profiles_root / "work").exists()
+        assert fake_browser_launch == {}
+
+        state["interrupt"] = False
+        lifecycle.launch(profile="work", registry_path=registry_path)
+
+        manifest = json.loads((profiles_root / "work" / HOSTS / DEST_NAME).read_text())
+        assert manifest["allowed_origins"] == [STABLE]
+        assert fake_browser_launch["user_data_dir"] == str(profiles_root / "work")
+
+    def test_a_live_holder_refusal_discards_the_new_directory_and_the_retry_registers(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        registry_path: str,
+        profiles_root: Path,
+        valid_installation: Path,
+        fake_browser_launch: dict[str, object],
+    ) -> None:
+        """A refusal before provisioning leaves no directory behind either.
+
+        The profile is still new on the retry, so once the holder is gone the
+        launch registers it instead of treating it as an existing profile.
+        """
+
+        def held(profile: str, *, registry_path: str | None = None) -> str | None:
+            return "other-01"
+
+        def free(profile: str, *, registry_path: str | None = None) -> str | None:
+            return None
+
+        monkeypatch.setattr(lifecycle, "find_profile_holder", held)
+
+        with pytest.raises(LifecycleError, match="already held by live instance 'other-01'"):
+            lifecycle.launch(profile="work", registry_path=registry_path)
+
+        assert not (profiles_root / "work").exists()
+        assert fake_browser_launch == {}
+
+        monkeypatch.setattr(lifecycle, "find_profile_holder", free)
+        lifecycle.launch(profile="work", registry_path=registry_path)
+
+        assert (profiles_root / "work" / HOSTS / DEST_NAME).is_file()
+        assert fake_browser_launch["user_data_dir"] == str(profiles_root / "work")
+
+    def test_an_interruption_never_deletes_data_the_launch_did_not_leave_empty(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        registry_path: str,
+        profiles_root: Path,
+        valid_installation: Path,
+        fake_browser_launch: dict[str, object],
+    ) -> None:
+        """Only empty directories are removed; anything inside is retained."""
+        sentinel = profiles_root / "work" / "Default" / "sentinel.txt"
+        interrupt = KeyboardInterrupt()
+
+        def interrupt_after_data_appears(user_data_dir: Path) -> None:
+            sentinel.parent.mkdir(parents=True)
+            sentinel.write_bytes(b"synthetic sentinel")
+            raise interrupt
+
+        monkeypatch.setattr(lifecycle, "clean_stale_singleton_lock", interrupt_after_data_appears)
+
+        with pytest.raises(KeyboardInterrupt) as error:
+            lifecycle.launch(profile="work", registry_path=registry_path)
+
+        assert error.value is interrupt
+        assert sentinel.read_bytes() == b"synthetic sentinel"
+        assert fake_browser_launch == {}
+
+    def test_failed_publication_retry_can_register_while_the_profile_is_empty(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        registry_path: str,
+        profiles_root: Path,
+        valid_installation: Path,
+        fake_browser_launch: dict[str, object],
+    ) -> None:
+        """An injected pre-publication filesystem failure cleans up the empty
+        initialization it created, so the same launch can be retried.
+        """
+        failing = {"on": True}
+        real_write = onepassword._write_manifest
+
+        def flaky_write(hosts_fd: int, filename: Path, canonical: dict) -> None:
+            if failing["on"]:
+                raise OSError(errno.EIO, "synthetic publication failure")
+            real_write(hosts_fd, filename, canonical)
+
+        monkeypatch.setattr(onepassword, "_write_manifest", flaky_write)
+        with pytest.raises(LifecycleError, match="synthetic publication failure"):
+            lifecycle.launch(profile="work", registry_path=registry_path)
+        assert fake_browser_launch == {}
+        # Only the empty initialization was cleaned up; the profile is new again.
+        assert not (profiles_root / "work").exists()
+
+        failing["on"] = False
+        instance = lifecycle.launch(profile="work", registry_path=registry_path)
+
+        assert instance.profile == "work"
+        manifest = json.loads((profiles_root / "work" / HOSTS / DEST_NAME).read_text())
+        assert manifest["path"] == str(valid_installation)
+
+    def test_failed_initialization_preserves_nonempty_profile_data(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        registry_path: str,
+        profiles_root: Path,
+        valid_installation: Path,
+        fake_browser_launch: dict[str, object],
+    ) -> None:
+        """Unexpected data in the new profile directory is never deleted;
+        that exceptional failure points at the explicit flag for recovery,
+        because the kept directory makes a plain retry an existing profile.
+        """
+
+        def writes_then_fails(user_data_dir: Path) -> None:
+            login = user_data_dir / "Default" / "Login Data"
+            login.parent.mkdir(parents=True)
+            login.write_bytes(b"unexpected synthetic data")
+            raise onepassword.OnePasswordProvisionError("helper failed verification")
+
+        monkeypatch.setattr(onepassword, "provision", writes_then_fails)
+        with pytest.raises(LifecycleError) as error:
+            lifecycle.launch(profile="work", registry_path=registry_path)
+
+        sentinel = profiles_root / "work" / "Default" / "Login Data"
+        assert sentinel.read_bytes() == b"unexpected synthetic data"
+        assert fake_browser_launch == {}
+        message = str(error.value)
+        assert "helper failed verification" in message
+        assert "--1password" in message
+        assert "Launch without" not in message
+
+    def test_automatic_source_failure_advice_never_advises_removal(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        registry_path: str,
+        profiles_root: Path,
+        fake_browser_launch: dict[str, object],
+    ) -> None:
+        """The automatic refusal keeps the provisioner's reason plus generic
+        retry advice; it never suggests removing the everyday source
+        registration and never repeats the explicit flag's suffix.
+        """
+        invalid = tmp_path / HOSTS / DEST_NAME
+        invalid.parent.mkdir(parents=True)
+        invalid.write_text("{ not json")
+        monkeypatch.setattr(onepassword, "SOURCE_MANIFEST", invalid)
+
+        with pytest.raises(LifecycleError, match="not valid JSON") as error:
+            lifecycle.launch(profile="work", registry_path=registry_path)
+
+        message = str(error.value)
+        assert fake_browser_launch == {}
+        assert not (profiles_root / "work").exists()
+        assert "--1password" not in message
+        assert "Launch without" not in message
+        assert "remove" not in message.lower()
+        assert "everyday" not in message
+
+    @pytest.mark.parametrize("failure", ["signing", "unexecutable"])
+    def test_automatic_helper_failure_names_the_helper_not_a_registration(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        registry_path: str,
+        profiles_root: Path,
+        valid_installation: Path,
+        fake_browser_launch: dict[str, object],
+        failure: str,
+    ) -> None:
+        """A helper failure is about the helper executable; the automatic
+        advice must not relabel that path as a registration to remove.
+        """
+        if failure == "signing":
+
+            def rejected(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+                return subprocess.CompletedProcess(args, 1, b"", b"")
+
+            monkeypatch.setattr(onepassword, "subprocess", types.SimpleNamespace(run=rejected))
+            refused_with = "code-signature verification"
+        else:
+            valid_installation.chmod(0o644)
+            refused_with = "is not an executable file"
+
+        with pytest.raises(LifecycleError, match=refused_with) as error:
+            lifecycle.launch(profile="work", registry_path=registry_path)
+
+        message = str(error.value)
+        assert fake_browser_launch == {}
+        if failure == "unexecutable":
+            assert str(valid_installation) in message
+        assert "registration" not in message
+        assert "remove" not in message.lower()
+        assert "everyday" not in message
+        assert "Launch without" not in message
+
+    def test_automatic_destination_failure_keeps_the_conflicting_file(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        registry_path: str,
+        profiles_root: Path,
+        valid_installation: Path,
+        fake_browser_launch: dict[str, object],
+    ) -> None:
+        """A conflicting registration that appears after the newness check is
+        neither replaced nor deleted; the automatic refusal keeps the file and
+        the only removal it names is that profile's own conflicting file.
+        """
+        planted = {
+            "name": "com.1password.1password",
+            "description": "conflicting synthetic registration",
+            "path": "/usr/bin/true",
+            "type": "stdio",
+            "allowed_origins": [STABLE],
+        }
+        real_clean = lifecycle.clean_stale_singleton_lock
+
+        def clean_and_plant_conflict(directory: Path) -> None:
+            real_clean(directory)
+            hosts = directory / HOSTS
+            hosts.mkdir(exist_ok=True)
+            (hosts / DEST_NAME).write_text(json.dumps(planted))
+
+        monkeypatch.setattr(lifecycle, "clean_stale_singleton_lock", clean_and_plant_conflict)
+        with pytest.raises(LifecycleError, match="holds a conflicting registration") as error:
+            lifecycle.launch(profile="work", registry_path=registry_path)
+
+        message = str(error.value)
+        destination = profiles_root / "work" / HOSTS / DEST_NAME
+        assert json.loads(destination.read_text()) == planted
+        assert fake_browser_launch == {}
+        assert str(destination) in message
+        assert "--1password" in message
+        assert "Launch without" not in message
+        assert "everyday" not in message
+        # The single removal the message names is the profile's own
+        # conflicting file, never the everyday Chrome source.
+        assert message.lower().count("remove") == 1
+        assert "or remove it yourself to re-provision" in message
