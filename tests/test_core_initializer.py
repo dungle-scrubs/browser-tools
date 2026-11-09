@@ -293,19 +293,39 @@ class TestProtectedPublication:
         therefore scoped to the marker's staging name alone.
         """
         real_open = os.open
+        real_flock = fcntl.flock
+        staged: list[object] = []
 
         def failing_open(path: object, flags: int, *args: object, **kwargs: object) -> object:
             if _is_marker_staging(path):
                 raise OSError(f"synthetic {name} failure")
             return real_open(path, flags, *args, **kwargs)
 
+        def recording_open(path: object, flags: int, *args: object, **kwargs: object) -> object:
+            fd = real_open(path, flags, *args, **kwargs)
+            if _is_marker_staging(path):
+                staged.append(path)
+            return fd
+
+        def failing_marker_flock(fd: int, operation: int) -> None:
+            # The marker's lock is the launch's only nonblocking exclusive
+            # flock; the session-root mutex's blocking LOCK_EX, taken first,
+            # reaches the kernel (#215).
+            if operation == fcntl.LOCK_EX | fcntl.LOCK_NB:
+                raise OSError(f"synthetic {name} failure")
+            real_flock(fd, operation)
+
         def failing(*args: object, **kwargs: object) -> None:
             raise OSError(f"synthetic {name} failure")
 
-        # os.open is shared with the owned cleanup, so it is faulted narrowly;
-        # flock and link have no other caller in this window.
+        # os.open is shared with the owned cleanup and flock with the
+        # session-root mutex, so both are faulted narrowly; link has no other
+        # caller in this window.
         if (boundary, name) == (os, "open"):
             monkeypatch.setattr(os, "open", failing_open)
+        elif (boundary, name) == (fcntl, "flock"):
+            monkeypatch.setattr(os, "open", recording_open)
+            monkeypatch.setattr(fcntl, "flock", failing_marker_flock)
         else:
             monkeypatch.setattr(boundary, name, failing)
         ran: list[str] = []
@@ -321,6 +341,8 @@ class TestProtectedPublication:
         assert ran == []
         assert stubbed_boundaries["order"] == ["cleanup"]
         assert list(stubbed_boundaries["sessions_root"].glob("session-*")) == []
+        if name == "flock":
+            assert staged, "the launch failed before staging the marker, not at its lock"
 
     def test_a_publication_failure_preserves_its_error_when_cleanup_also_fails(
         self,

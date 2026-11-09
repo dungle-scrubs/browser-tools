@@ -117,6 +117,43 @@ _SETUP_LAYERING_SCRIPT = (
 )
 
 
+def _lifecycle_imports(source: str) -> list[str]:
+    """Find every import of ``browser_tools.lifecycle`` in a package module.
+
+    Args:
+        source: The source of a module directly inside ``browser_tools``.
+
+    Returns:
+        ``line <n>`` for each ``import`` or ``from`` statement, at any nesting
+        depth, that imports the lifecycle module or a name from it.
+    """
+    target = "browser_tools.lifecycle"
+    found: list[str] = []
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Import):
+            hit = any(
+                alias.name == target or alias.name.startswith(f"{target}.")
+                for alias in node.names
+            )
+        elif isinstance(node, ast.ImportFrom):
+            if node.level == 0:
+                module = node.module or ""
+            elif node.level == 1:
+                module = "browser_tools" + (f".{node.module}" if node.module else "")
+            else:
+                continue
+            hit = (
+                module == target
+                or module.startswith(f"{target}.")
+                or (module == "browser_tools" and any(a.name == "lifecycle" for a in node.names))
+            )
+        else:
+            continue
+        if hit:
+            found.append(f"line {node.lineno}")
+    return found
+
+
 def test_the_setup_module_owns_its_error_below_the_lifecycle_layer() -> None:
     """The setup module never imports the lifecycle layer above it.
 
@@ -124,15 +161,24 @@ def test_the_setup_module_owns_its_error_below_the_lifecycle_layer() -> None:
     ``lifecycle`` may import ``onepassword_setup`` lazily at its adapter
     seams; the reverse edge - the setup module importing
     ``lifecycle.LifecycleError`` to subclass it - closed the cycle (round-4
-    Quality hard finding at ``4484568``). The check imports the setup
-    module in a fresh interpreter and refuses any ``lifecycle`` module in
-    its loaded set, so a re-introduced cycle fails however deeply it hides
-    (a lazy import inside the module would load it the same way only later,
-    which is why the guard is scoped to this one module's import surface
-    rather than a whole-repo cycle scanner). The setup-owned error must
+    Quality hard finding at ``4484568``). Two checks cover the edge. The
+    source scan refuses an import of ``lifecycle`` anywhere in the module,
+    including inside a function body, which runs only when that function is
+    called (#215). The fresh-interpreter import refuses any ``lifecycle``
+    module in the loaded set, which also catches a module-level import made
+    through another module. Both are scoped to this one module's imports
+    rather than a whole-repository cycle scanner. The setup-owned error must
     stay a ``RuntimeError`` subtype: the lifecycle launch boundary
     translates that shape to ``LifecycleError`` and the CLI's exit 1.
     """
+    source = Path(inspect.getfile(onepassword_setup)).read_text(encoding="utf-8")
+    found = _lifecycle_imports(source)
+    assert not found, (
+        "onepassword_setup imports the lifecycle layer above it at "
+        + ", ".join(found)
+        + " (CONTRIBUTING.md: no circular imports). Own the error contract in "
+        "the setup module and translate it at the lifecycle boundary."
+    )
     result = subprocess.run(
         [sys.executable, "-c", _SETUP_LAYERING_SCRIPT],
         capture_output=True,
