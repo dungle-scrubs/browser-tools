@@ -51,8 +51,14 @@ class _FakeProcess:
         return None
 
 
-def _patch_headed_launch(monkeypatch, captured: dict) -> None:
-    """Stub everything a headed launch would otherwise really do."""
+def _patch_headed_launch(monkeypatch, captured: dict, tmp_path) -> None:
+    """Stub everything a headed launch would otherwise really do.
+
+    That includes allocating the session directory: a launch with no profile
+    creates it in ``launcher._SESSION_ROOT``, the directory that holds the
+    developer's live browsers, and nothing stops this faked instance (#212).
+    """
+    monkeypatch.setattr(launcher, "_SESSION_ROOT", str(tmp_path / "sessions"))
 
     def fake_popen(args, stdout=None, stderr=None, env=None, **kwargs):
         # kwargs: start_new_session arrives here (#177); on Python 3.14
@@ -93,7 +99,7 @@ class TestFlagThreadsThroughToSupervisor:
     def test_default_launch_marks_the_window(self, monkeypatch, tmp_path):
         monkeypatch.setenv("BROWSER_TOOLS_REGISTRY", str(tmp_path / "registry.json"))
         captured: dict = {}
-        _patch_headed_launch(monkeypatch, captured)
+        _patch_headed_launch(monkeypatch, captured, tmp_path)
 
         rc = cli.main(["launch"])
 
@@ -103,11 +109,12 @@ class TestFlagThreadsThroughToSupervisor:
         # browser's user-data-dir so its reconnect loop can tell its own
         # browser from a stranger that took the port.
         assert captured["user_data_dir"] is not None
+        assert captured["user_data_dir"].startswith(str(tmp_path / "sessions"))
 
     def test_no_window_border_suppresses_the_marking(self, monkeypatch, tmp_path):
         monkeypatch.setenv("BROWSER_TOOLS_REGISTRY", str(tmp_path / "registry.json"))
         captured: dict = {}
-        _patch_headed_launch(monkeypatch, captured)
+        _patch_headed_launch(monkeypatch, captured, tmp_path)
 
         rc = cli.main(["launch", "--no-window-border"])
 
