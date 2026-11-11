@@ -24,6 +24,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -569,31 +570,62 @@ def terminate_process_and_wait(pid: int | None, timeout: float = 5.0) -> bool:
     return not is_process_alive(pid)
 
 
-def find_user_data_dir_processes(user_data_dir: str) -> list[int] | None:
-    """Return directory-holding PIDs, or None when the process scan is unknown."""
+@dataclass(frozen=True)
+class ScanUnknown:
+    """A process scan whose answer cannot be trusted.
+
+    Attributes:
+        reason: Which check failed, worded to follow "process scan". It never
+            quotes a process's arguments, which can carry secrets.
+    """
+
+    reason: str
+
+
+#: How long the system-wide ``ps`` scan may take.
+_SCAN_TIMEOUT_S = 2
+
+
+def find_user_data_dir_processes(user_data_dir: str) -> list[int] | ScanUnknown:
+    """Return the PIDs whose command line names ``user_data_dir``.
+
+    Args:
+        user_data_dir: The browser's user-data directory.
+
+    Returns:
+        The holding PIDs, possibly empty, or a ``ScanUnknown`` naming the
+        check that failed when the scan could not be read completely.
+    """
     if not user_data_dir:
-        return None
+        return ScanUnknown("had no user-data directory to look for")
     try:
         result = subprocess.run(
             ["ps", "-ww", "-e", "-o", "pid=", "-o", "args="],
             capture_output=True,
             text=True,
-            timeout=2,
+            timeout=_SCAN_TIMEOUT_S,
         )
-        if result.returncode != 0 or not result.stdout.strip():
-            return None
+        if result.returncode != 0:
+            return ScanUnknown(f"failed: ps exited {result.returncode}")
+        if not result.stdout.strip():
+            return ScanUnknown("failed: ps printed nothing")
         expected = Path(user_data_dir).resolve()
-        pids = []
-        for line in result.stdout.splitlines():
+        pids: list[int] = []
+        for number, line in enumerate(result.stdout.splitlines(), start=1):
             fields = line.strip().split(maxsplit=1)
             if len(fields) != 2 or not fields[0].isdigit():
-                return None
+                return ScanUnknown(
+                    f"could not parse ps line {number}: {len(fields)} field(s), "
+                    f"first field {'numeric' if fields and fields[0].isdigit() else 'not numeric'}"
+                )
             match = _USER_DATA_DIR_PATTERN.search(fields[1])
             if match and Path(match[1]).resolve() == expected:
                 pids.append(int(fields[0]))
         return pids
-    except (OSError, subprocess.SubprocessError, RuntimeError):
-        return None
+    except subprocess.TimeoutExpired:
+        return ScanUnknown(f"timed out: ps took longer than {_SCAN_TIMEOUT_S}s")
+    except (OSError, subprocess.SubprocessError, RuntimeError) as exc:
+        return ScanUnknown(f"failed: {type(exc).__name__}")
 
 
 def process_running_state(pid: int) -> bool | None:
