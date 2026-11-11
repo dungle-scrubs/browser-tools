@@ -245,14 +245,14 @@ def synthetic_spawn_environment(monkeypatch: pytest.MonkeyPatch) -> dict[str, st
 
 
 @pytest.fixture
-def sample_mcp_response():
-    """Sample MCP tool response."""
+def sample_tool_response():
+    """Sample tool response."""
     return {"content": [{"type": "text", "text": "Operation completed successfully"}]}
 
 
 @pytest.fixture
 def sample_error_response():
-    """Sample MCP error response."""
+    """Sample error response."""
     return {"error": {"code": -32600, "message": "Element not found"}}
 
 

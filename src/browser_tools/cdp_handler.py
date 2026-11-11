@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""CDP handler and toolset definitions for browser-tools daemon.
+"""CDP handler and toolset definitions for browser-tools.
 
 Tool handler methods for CDP domain operations: frame management,
 accessibility, content extraction, export, and screencast.
@@ -23,11 +23,25 @@ if TYPE_CHECKING:
 
     from .curated_runtime import ResponseBuffer
 
+from .cdp_constants import (
+    REQUEST_TIMEOUT_SECONDS,
+    SCREENSHOT_PAINT_READY_TIMEOUT_MS,
+)
 from .core.attach import AmbiguousTargetError, TargetNotFoundError
 from .core.errors import NoPageError
 from .dialog_policy import DialogPolicy
 from .endpoint import ResolvedEndpoint
+from .interstitial import (
+    detect_interstitials_async,
+    detect_total_timeout,
+    detect_with_retry,
+)
 from .lifecycle import LifecycleError
+from .native_interaction import NativeInteractor, UidResolutionError
+from .native_snapshot import NativeSnapshotReader
+from .screencast import ScreencastRecorder
+from .tool_registry import CDP_TOOLS
+from .tool_response import make_error, make_text
 
 logger = logging.getLogger(__name__)
 
@@ -55,43 +69,6 @@ _EXPECTED_CONNECT_FAILURES = (
     NoPageError,
     TargetNotFoundError,
 )
-
-try:
-    from .cdp_constants import (
-        REQUEST_TIMEOUT_SECONDS,
-        SCREENSHOT_PAINT_READY_TIMEOUT_MS,
-    )
-    from .interstitial import (
-        detect_interstitials_async,
-        detect_total_timeout,
-        detect_with_retry,
-    )
-    from .mcp_response import make_error, make_text
-    from .native_interaction import NativeInteractor, UidResolutionError
-    from .native_snapshot import NativeSnapshotReader
-    from .screencast import ScreencastRecorder
-    from .tool_registry import CDP_TOOLS
-except ImportError:
-    from cdp_constants import (  # type: ignore[import-untyped,no-redef]
-        REQUEST_TIMEOUT_SECONDS,
-        SCREENSHOT_PAINT_READY_TIMEOUT_MS,
-    )
-    from interstitial import (  # type: ignore[import-untyped,no-redef]
-        detect_interstitials_async,
-        detect_total_timeout,
-        detect_with_retry,
-    )
-    from mcp_response import (  # type: ignore[import-untyped,no-redef]
-        make_error,
-        make_text,
-    )
-    from native_interaction import (  # type: ignore[import-untyped,no-redef]
-        NativeInteractor,
-        UidResolutionError,
-    )
-    from native_snapshot import NativeSnapshotReader  # type: ignore[import-untyped,no-redef]
-    from screencast import ScreencastRecorder  # type: ignore[import-untyped,no-redef]
-    from tool_registry import CDP_TOOLS  # type: ignore[import-untyped,no-redef]
 
 
 class ToolInvocationError(Exception):
@@ -126,20 +103,13 @@ class CdpToolError(Exception):
 
 
 def _get_cdp_error_class() -> type[Exception]:
-    """Import CDPError lazily to avoid breaking script-mode execution.
+    """Import CDPError lazily.
 
-    cdp_client.py uses relative imports that fail when modules are
-    loaded outside of the browser_tools package (e.g. --help flag
-    parsing in the daemon script).  Deferring the import until a CDP
-    call is actually attempted keeps the module importable in all
-    execution modes.
+    The import is deferred until a CDP call is actually attempted, so the
+    module is imported only where it is used.
     """
-    try:
-        from .cdp_client import CDPError  # type: ignore[import-untyped,reportMissingImports]
-    except ImportError:
-        from cdp_client import (  # type: ignore[import-untyped,reportMissingImports]
-            CDPError,  # type: ignore[no-redef]
-        )
+    from .cdp_client import CDPError
+
     return CDPError
 
 
@@ -330,8 +300,8 @@ VISIBILITY_READ_TIMEOUT_SECONDS = 5.0
 
 class CDPRuntime:
     """Owns the CDP background thread, event loop, WebSocket connection, frame
-    manager, screencast recorder, and the thread-safe marshal methods the Daemon
-    calls (``await_paint_ready``, ``run_post_navigation_detection``).
+    manager, screencast recorder, and the thread-safe marshal methods the
+    handler calls (``await_paint_ready``, ``run_post_navigation_detection``).
 
     The deep half of the CDP layer: a lot of machinery (thread + loop +
     WebSocket connection + frame-tree subscriptions + two marshal hooks) behind
@@ -361,7 +331,6 @@ class CDPRuntime:
         self,
         browser_url: str | ResolvedEndpoint | None,
         mode: str = "full",
-        stealth: bool = False,
         target_spec: str | None = None,
         target_by: str | None = None,
         all_frames: bool = False,
@@ -374,16 +343,9 @@ class CDPRuntime:
             target_spec: Which page to attach to, as an index into the page
                 targets sorted by target ID, or a target ID. None takes the
                 first page in that order, which is what ``--target 0`` names.
-            stealth: Accepted for MCP surface compatibility only. No JavaScript
-                is injected for fingerprint purposes (RFC-01, "Anti-detection":
-                each JS override is independently detectable). Chrome
-                fingerprinting is launch-flag profiles (``core/fingerprint.py``)
-                via ``launch --fingerprint``; Camoufox is the engine-level path
-                via ``launch --engine camoufox``.
         """
         self._browser_url = browser_url
         self._mode = mode
-        self._stealth = stealth
         self._target_spec = target_spec
         self._target_by = target_by
         # RFC-04, Decision 8: off unless the caller asked for it. A cross-
@@ -845,7 +807,7 @@ class CDPRuntime:
 
         The JS resolves once the next frame after the current one has been
         scheduled by the compositor, with a hard timeout safety net so a
-        broken page (background tab, no rAF firing) can't hang the daemon.
+        broken page (background tab, no rAF firing) can't hang the runtime.
         """
         js = f"""
         (async () => {{
@@ -940,16 +902,16 @@ class CDPHandler:
 
     Owns no connection state itself - the runtime does - and reaches the browser
     through the runtime's ``client`` / ``frame_manager`` / ``screencast`` seam.
-    The Daemon constructs this, threads ``run``, and calls the two cross-cutting
-    hooks (``await_paint_ready``, ``run_post_navigation_detection``), all of which
-    delegate to the runtime, their natural owner.
+    The caller constructs this, threads ``run``, and calls the two
+    cross-cutting hooks (``await_paint_ready``,
+    ``run_post_navigation_detection``), all of which delegate to the runtime,
+    their natural owner.
     """
 
     def __init__(
         self,
         browser_url: str | ResolvedEndpoint | None,
         mode: str = "full",
-        stealth: bool = False,
         target_spec: str | None = None,
         target_by: str | None = None,
         all_frames: bool = False,
@@ -959,14 +921,11 @@ class CDPHandler:
         Args:
             browser_url: Chrome remote debugging URL.
             mode: Access mode ('full' or 'inspect').
-            stealth: Accepted for MCP surface compatibility only; see
-                :class:`CDPRuntime`. No JavaScript is injected.
             target_spec: Which page to attach to; see :class:`CDPRuntime`.
         """
         self._rt = CDPRuntime(
             browser_url,
             mode,
-            stealth=stealth,
             target_spec=target_spec,
             target_by=target_by,
             all_frames=all_frames,
@@ -976,16 +935,14 @@ class CDPHandler:
         self._handlers: dict[str, Any] = {
             name: getattr(self, method) for name, method in _CDP_HANDLERS.items()
         }
-        # Native snapshot/UID backend (RFC-01 Phase 2, ticket #41). One reader
-        # per handler owns the snapshot lifecycle for this session; the
-        # interactor resolves a UID against the reader's current snapshot, so a
-        # ``take_snapshot`` populates the UIDs a subsequent ``click``/``fill``
-        # resolves. This is the default snapshot backend; ``--engine mcp`` keeps
-        # the Node path (these methods are then never reached).
+        # Native snapshot/UID backend. One reader per handler owns the snapshot
+        # lifecycle for this session; the interactor resolves a UID against the
+        # reader's current snapshot, so a ``take_snapshot`` populates the UIDs
+        # a subsequent ``click``/``fill`` resolves.
         self._native_reader = NativeSnapshotReader()
         self._native_interactor = NativeInteractor(self._native_reader)
 
-    # --- Daemon-facing surface: delegate to the runtime ---
+    # --- Runtime-facing surface: delegate to the runtime ---
     @property
     def available(self) -> bool:
         """Whether the runtime's CDP client is connected and ready."""
@@ -1163,11 +1120,10 @@ class CDPHandler:
     def call_native(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         """Execute a native snapshot/UID tool on the CDP loop (thread-safe).
 
-        The flipped default backend for ``take_snapshot`` / ``click`` / ``fill``
-        (RFC-01 Phase 2, #41). It runs the native read/interaction path built in
-        #39/#40 over this session's CDP client and returns the same bare MCP
-        envelope shape the Node engine returned, so the frozen tool response
-        shape is preserved. Mirrors :meth:`call_tool`'s loop scheduling.
+        The default backend for ``take_snapshot`` / ``click`` / ``fill``. It runs
+        the native read/interaction path over this session's CDP client and
+        returns the same response envelope shape, so the tool response shape is
+        preserved. Mirrors :meth:`call_tool`'s loop scheduling.
 
         Args:
             name: One of ``take_snapshot``, ``click``, ``fill``.
@@ -1200,9 +1156,8 @@ class CDPHandler:
         """Invalidate the native snapshot's UIDs after a navigation.
 
         A navigation replaces the document, so every outstanding native UID is
-        stale. Called by the daemon dispatcher after a navigation tool so a UID
-        from a pre-navigation snapshot no longer resolves (native's stability
-        contract). No-op cost when the Node engine is selected.
+        stale. Called after a navigation tool so a UID from a pre-navigation
+        snapshot no longer resolves (native's stability contract).
         """
         self._native_reader.note_navigation()
 
@@ -1506,7 +1461,7 @@ class CDPHandler:
             if not (self._cdp_client and self._cdp_client.connected):
                 return make_text("No frames available. CDP client not connected.")
             # An empty tree usually means nothing has refreshed it yet. Refresh
-            # and answer from the result: this handler runs on the MCP dispatch
+            # and answer from the result: this handler runs on the tool dispatch
             # path, not the CDP read loop, so awaiting here cannot deadlock.
             # Firing a detached task and telling the caller to ask again left
             # the result unobserved and cost a second round trip.

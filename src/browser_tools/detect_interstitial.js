@@ -18,7 +18,9 @@
  *
  * This script is injected via Runtime.evaluate after navigation.
  * A project-specific override can be placed at:
- *   ~/.config/tool-proxy/browser-tools/detect-interstitial.js
+ *   $XDG_CONFIG_HOME/browser-tools/detect-interstitial.js
+ *   ~/.config/browser-tools/detect-interstitial.js (when XDG_CONFIG_HOME is
+ *   unset or empty)
  */
 (function detectInterstitials() {
   const results = [];

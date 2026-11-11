@@ -1,16 +1,10 @@
 """Single source of truth for tool routing.
 
 ``CDP_TOOLS`` -- the tools the CDP handler owns -- is *derived* from the
-``TOOLS`` table here rather than written out a second time. Before this module
-that set lived independently in ``cdp_constants`` and in the persistent
-controller, and the copies drifted.
+``TOOLS`` table here rather than written out a second time.
 
-The table used to carry seven more flags, classifying tools for the MCP front:
-which were refused or warned in inspect mode, which needed a pre-snapshot,
-which selected the active tab, which took the screenshot gate, which the
-session adapter kept to one tab. The front is gone (#92), and with it every
-consumer of those flags, so the table keeps the one flag that still routes
-anything.
+The table keeps the one flag that still routes anything: whether a tool is
+CDP-routed at all.
 
 A tool absent from ``TOOLS`` is not CDP-routed.
 """

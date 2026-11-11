@@ -319,9 +319,7 @@ class NativeSnapshot:
         """Render an indented, UID-tagged text view of the visible tree.
 
         The line shape mirrors chrome-devtools-mcp's textual snapshot
-        (``[uid=..] role "name"``) so a later cutover of the frozen
-        ``take_snapshot`` tool onto this backend keeps the response shape. This
-        module does not wire that cutover (see the module docstring).
+        (``[uid=..] role "name"``).
         """
         if self.root_uid is None:
             return "(empty accessibility tree)"

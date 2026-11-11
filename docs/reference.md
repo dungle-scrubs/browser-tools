@@ -63,7 +63,7 @@ A named profile is a browser user-data directory. One live instance can hold it 
 | `BROWSER_TOOLS_REGISTRY` | Override the registry file, normally under `/tmp/chrome-agent/`. |
 | `BROWSER_TOOLS_CHROME_BINARY` | Override the Chrome executable, including when `--channel` is present. |
 | `BROWSER_TOOLS_LEGACY_PROFILES_DIR` | Override the old profile root, normally `/tmp/browser-tools-profiles`. |
-| `XDG_CONFIG_HOME` | Settings live in `browser-tools/settings.json` and the approved-login policy in `browser-tools/logins.json`; otherwise they use `~/.config/browser-tools/`. |
+| `XDG_CONFIG_HOME` | Settings live in `browser-tools/settings.json`, the approved-login policy in `browser-tools/logins.json`, and a project-specific interstitial detection override in `browser-tools/detect-interstitial.js`; otherwise they use `~/.config/browser-tools/`. |
 
 Profiles left under the old temporary root appear with `"legacy": true` in `profile list`. `profile migrate --dry-run` previews migration to durable storage. `profile migrate` moves them, and `profile migrate --back` moves them back. Launching one legacy profile migrates that profile automatically. A live holder or a destination name collision prevents migration.
 
@@ -212,7 +212,7 @@ cdp_handler.py             CDP tool implementations
   screencast.py            Screencast capture
   screenshot_utils.py      Blank-frame detection
   tool_registry.py         CDP tool routing
-  mcp_response.py          Response builders, not an MCP server
+  tool_response.py         Response builders and readers
 profiler.py                Standalone JavaScript CPU profiler
 ```
 

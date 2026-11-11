@@ -2,7 +2,7 @@
 
 Four pins proved only by tests that go with the front (#92), moved here first so
 the deletion is a deletion and nothing else (#91). Each one covers a module that
-stays: ``tool_registry``, ``cdp_handler`` and ``mcp_response``.
+stays: ``tool_registry``, ``cdp_handler`` and ``tool_response``.
 
 Every test here is a pin. It must fail if the thing it pins changes. No Chrome,
 no daemon subprocess, no Node -- direct imports and literals only.
@@ -14,7 +14,7 @@ no daemon subprocess, no Node -- direct imports and literals only.
   assertion also runs at import time inside ``cdp_handler``; this pins the table
   itself, so a matched pair of edits to both sides still goes red. Was
   ``test_mcp_surface_contract.TestCdpHandlers``.
-- The ``mcp_response`` builders and ``extract_text_items``. Was
+- The ``tool_response`` builders and ``extract_text_items``. Was
   ``test_mcp_surface_contract.TestMcpResponseBuilders``.
 """
 
@@ -22,9 +22,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from browser_tools import cdp_handler, mcp_response, tool_registry
-from browser_tools.mcp_response import extract_text_items
+from browser_tools import cdp_handler, tool_registry, tool_response
 from browser_tools.tool_registry import CDP_TOOLS
+from browser_tools.tool_response import extract_text_items
 
 
 class TestCdpToolSet:
@@ -123,28 +123,23 @@ class TestCdpHandlers:
             assert v.startswith("_handle_")
 
 
-class TestMcpResponseBuilders:
-    """Pin the four builder functions and extract_text_items shapes."""
-
-    def test_text_response(self) -> None:
-        assert mcp_response.text_response("hello") == {
-            "result": {"content": [{"type": "text", "text": "hello"}]}
-        }
+class TestToolResponseBuilders:
+    """Pin the three builder functions and extract_text_items shapes."""
 
     def test_error_response(self) -> None:
-        assert mcp_response.error_response("boom") == {
+        assert tool_response.error_response("boom") == {
             "result": {"content": [{"type": "text", "text": "boom"}], "isError": True}
         }
 
     def test_make_text(self) -> None:
-        assert mcp_response.make_text("hi") == {
+        assert tool_response.make_text("hi") == {
             "jsonrpc": "2.0",
             "result": {"content": [{"type": "text", "text": "hi"}]},
             "id": 0,
         }
 
     def test_make_error(self) -> None:
-        assert mcp_response.make_error("oops") == {
+        assert tool_response.make_error("oops") == {
             "jsonrpc": "2.0",
             "result": {"content": [{"type": "text", "text": "Error: oops"}], "isError": True},
             "id": 0,

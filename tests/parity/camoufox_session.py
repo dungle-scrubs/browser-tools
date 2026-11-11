@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 
 # Named Camoufox profiles persist cookies + localStorage as a Playwright
 # storage-state file so a login survives close_browser and process exit.
-CAMOUFOX_STATE_DIR = Path.home() / ".cache" / "tool-proxy" / "browser-tools" / "camoufox_profiles"
+CAMOUFOX_STATE_DIR = Path.home() / ".cache" / "browser-tools" / "camoufox_profiles"
 _SAFE_PROFILE_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
 
@@ -56,8 +56,8 @@ def _camoufox_state_path(profile: str) -> Path | None:
 class CamoufoxSession:
     """Manages a Camoufox anti-detect browser session.
 
-    Wraps the Camoufox Python library to provide tool-proxy compatible
-    browser automation with anti-detect fingerprinting.
+    Wraps the Camoufox Python library to provide browser automation with
+    anti-detect fingerprinting.
     """
 
     def __init__(self) -> None:

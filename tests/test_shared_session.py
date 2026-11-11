@@ -53,13 +53,13 @@ class FakeHandler(HandlerSurface):
 
     def call_native(self, name, arguments):
         self.calls.append(name)
-        from browser_tools.mcp_response import make_text
+        from browser_tools.tool_response import make_text
 
         return make_text("[uid=AB-1] RootWebArea")
 
     def call_tool(self, name, arguments):
         self.calls.append(name)
-        from browser_tools.mcp_response import make_text
+        from browser_tools.tool_response import make_text
 
         return make_text("ok")
 

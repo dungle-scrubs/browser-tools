@@ -45,7 +45,6 @@ def make_cdp_handler(mock_cdp: Any) -> BrowserCDPHandler:
     rt._loop = None
     rt._stop_event = None
     rt._mode = "full"
-    rt._stealth = False
     rt._browser_url = None
     rt._ready = threading.Event()
     rt._screencast = ScreencastRecorder()

@@ -1,8 +1,7 @@
 """One `error:` on a line, not two.
 
-`mcp_response.make_error` prefixes `Error: ` for a daemon socket that no
-longer exists: RFC-01 deleted the MCP front, and `mcp_response` survives as
-the envelope shape `CDPHandler` and `curated` pass between themselves.
+`tool_response.make_error` prefixes `Error: `, and `tool_response` is the
+envelope shape `CDPHandler` and `curated` pass between themselves.
 `cli.py` prefixes `error: ` on the way to stderr. Together they printed:
 
     error: Error: E002: No frame found matching 'localhost'. ...
@@ -18,7 +17,7 @@ from doubles import HandlerSurface
 
 from browser_tools import curated
 from browser_tools.lifecycle import LifecycleError
-from browser_tools.mcp_response import error_response, make_error, make_text
+from browser_tools.tool_response import error_response, make_error, make_text
 
 
 class Handler(HandlerSurface):

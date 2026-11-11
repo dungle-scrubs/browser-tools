@@ -13,12 +13,8 @@ owns the two REQUIRED "CLI surface" list verbs:
   attach session, correlated by ``requestId``, and renders them as a JSON
   list.
 
-RFC-01 requires both as thin wrappers over a short attach session, replacing
-the earlier point-in-time dumps (chrome-devtools-mcp's ``list_console_messages``
-/ ``list_network_requests``, forwarded by default -- see ``mcp_daemon.py``)
-that only see whatever had already accumulated by the moment they were
-called, and so miss anything emitted between two calls. This module instead
-opens an isolated ``Target`` session (mirroring ``events._wait_one_shot``'s
+Both verbs are thin wrappers over a short attach session: each opens an
+isolated ``Target`` session (mirroring ``events._wait_one_shot``'s
 connect/resolve/attach plumbing), subscribes SUBSCRIBE-FIRST -- the handler is
 registered before the domain-enable await and before the collection window
 begins, so an event delivered while ``Domain.enable`` is in flight, or at any

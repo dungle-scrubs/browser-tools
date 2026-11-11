@@ -30,8 +30,8 @@ vendored core (``browser_tools.core``). It owns:
 
 - Camoufox launch (#36). ``launch --engine camoufox`` starts the detached
   ``camoufox_runner`` host process, registers it with ``engine="camoufox"``, and
-  reports it live via the user-data-dir hold. The in-process ``CamoufoxSession``
-  MCP tools are untouched.
+  reports it live via the user-data-dir hold. The Camoufox session surface is
+  untouched.
 
 - Registry corruption is not retirement (#36). An unparseable registry reads as
   ``unknown``: ``status`` reports it, ``stop`` refuses to signal, and

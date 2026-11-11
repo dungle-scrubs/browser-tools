@@ -33,8 +33,10 @@ import pytest
 
 from browser_tools import cli, lifecycle
 
-# The MCP front and the legacy session stack it drove, deleted in #92. None may
-# be importable, and none may appear in any retained module's import closure.
+# The deleted front and the legacy session stack it drove, deleted in #92. None
+# may be importable, and none may appear in any retained module's import
+# closure. The front's own modules all share the ``mcp_`` prefix, so that
+# prefix is checked separately by name (see TestTheFrontNamedModulesAreGone).
 REMOVED_MODULES = [
     "browser_tools.automation_backend",
     "browser_tools.browser_session",
@@ -46,9 +48,6 @@ REMOVED_MODULES = [
     "browser_tools.daemon_client",
     "browser_tools.daemon_supervisor",
     "browser_tools.live_chrome",
-    "browser_tools.mcp_broker",
-    "browser_tools.mcp_daemon",
-    "browser_tools.mcp_session",
     "browser_tools.page_selection",
     "browser_tools.persistent_browser",
     "browser_tools.profile_catalog",
@@ -99,6 +98,18 @@ class TestTheRemovedStackIsGone:
             "except ModuleNotFoundError:\n    print('GONE')\n"
         )
         assert _in_fresh_process(script) == "GONE", f"{module} is still importable"
+
+
+class TestTheFrontNamedModulesAreGone:
+    """No module carrying the deleted front's name prefix may exist."""
+
+    def test_no_module_carries_the_front_name_prefix(self) -> None:
+        script = (
+            "import json, pkgutil, browser_tools\n"
+            "names = [m.name for m in pkgutil.iter_modules(browser_tools.__path__)]\n"
+            "print(json.dumps(sorted(n for n in names if n.startswith('mcp_'))))\n"
+        )
+        assert json.loads(_in_fresh_process(script)) == []
 
 
 class TestTheImportClosureIsLean:

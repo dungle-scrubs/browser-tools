@@ -38,8 +38,8 @@ from doubles import HandlerSurface
 from browser_tools import cli, curated, lifecycle
 from browser_tools.core import registry as core_registry
 from browser_tools.lifecycle import LifecycleError
-from browser_tools.mcp_response import extract_text_items, make_error, make_text
 from browser_tools.passthrough import UsageError
+from browser_tools.tool_response import extract_text_items, make_error, make_text
 
 
 @pytest.fixture
@@ -90,7 +90,6 @@ class FakeHandler(HandlerSurface):
         self,
         browser_url,
         mode="full",
-        stealth=False,
         target_spec=None,
         target_by=None,
         all_frames=False,

@@ -8,9 +8,9 @@ the vendored ``core.cdp_client``, the same client every other adapted
 module uses, and the ``Profiler``/``Performance`` calls are sent through it
 directly.
 
-This module depends on nothing above the core client: it has no imports
-from ``cli`` or ``tool_registry``, and runs standalone against a browser's
-CDP port.
+This module MUST NOT depend on the CLI front: it has no imports from
+``cli``, ``tool_registry``, or the CDP tool layer, and runs standalone
+against a browser's CDP port.
 """
 
 from __future__ import annotations

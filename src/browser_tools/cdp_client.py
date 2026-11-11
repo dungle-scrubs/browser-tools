@@ -1,14 +1,7 @@
 """Async CDP WebSocket client for direct Chrome DevTools Protocol access.
 
-This module provides a lightweight CDP client that connects to Chrome's
-WebSocket debugging endpoint. It runs alongside the MCP subprocess —
-the MCP subprocess handles existing tools while this client handles
-frame-aware tools and event subscriptions.
-
-Key constraint (D-001): This client subscribes ONLY to frame lifecycle
-events (Page.frameAttached, Page.frameDetached, Page.frameNavigated,
-Page.executionContextCreated, Page.executionContextDestroyed).
-The MCP subprocess handles all other CDP domains.
+A lightweight CDP client that connects to Chrome's WebSocket debugging
+endpoint, sends commands, and delivers subscribed events to their handlers.
 """
 
 from __future__ import annotations

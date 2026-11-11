@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from collections.abc import Generator
 
-from browser_tools.mcp_response import make_text
+from browser_tools.tool_response import make_text
 
 
 class HandlerSurface:
@@ -140,13 +140,13 @@ class FakeHandler(HandlerSurface):
         return {"sent": True}
 
     def call_tool(self, name, arguments):
-        from browser_tools.mcp_response import make_text
+        from browser_tools.tool_response import make_text
 
         self.log.append(("tool", name))
         return make_text("Cookies (0):" if name == "get_storage" else "ok")
 
     def call_native(self, name, arguments):
-        from browser_tools.mcp_response import make_text
+        from browser_tools.tool_response import make_text
 
         self.log.append(("native", name))
         return make_text("[uid=AB-1] RootWebArea")

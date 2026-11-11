@@ -2,15 +2,11 @@
 
 Low-level helpers for inspecting Chrome processes, managing PIDs, finding
 executables and ports, and interacting with Chrome's remote debugging
-HTTP endpoints. Extracted from persistent_browser.py to keep the module
-under 800 lines.
+HTTP endpoints.
 
-The launch helpers that used to live here -- the Chrome command builder and the
-first-window opener -- moved back into ``persistent_browser`` (#91). They serve
-the legacy daemon and the external-attach path only; the CLI launches through
-``core/launcher.py``, which builds its own command and opens its own window. The
-move is what lets this module stop importing ``session_layout``, so the MCP
-front can be deleted without dragging the layout module along (#92).
+The Chrome command builder and the first-window opener live elsewhere: the
+CLI launches through ``core/launcher.py``, which builds its own command and
+opens its own window.
 """
 
 from __future__ import annotations
@@ -371,10 +367,8 @@ def pid_holds_user_data_dir(
     """Check whether a live PID is a Chrome holding the given profile dir.
 
     Guards against a recycled SingletonLock PID (now an unrelated process) or a
-    Chrome running a different ``--user-data-dir``. Single source of truth:
-    both ``live_chrome`` (for resolve_live_chrome's verify step) and
-    ``persistent_browser`` (re-exported for the session reaper) import it from
-    here, so the PID-recycle guard is no longer re-derived in two places.
+    Chrome running a different ``--user-data-dir``. Every caller imports it
+    from here, so the PID-recycle guard is derived once.
 
     Args:
         pid: Process ID recorded in the profile's SingletonLock.

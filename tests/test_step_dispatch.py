@@ -41,7 +41,7 @@ class FakeHandler(HandlerSurface):
         self.stopped = True
 
     def call_native(self, name, arguments):
-        from browser_tools.mcp_response import make_text
+        from browser_tools.tool_response import make_text
 
         self.seen.append(name)
         if name in {"eval", "press", "hover", "type", "wait-text", "network-get"}:
@@ -49,7 +49,7 @@ class FakeHandler(HandlerSurface):
         return make_text("[uid=AB-1] RootWebArea")
 
     def call_tool(self, name, arguments):
-        from browser_tools.mcp_response import make_text
+        from browser_tools.tool_response import make_text
 
         self.seen.append(name)
         return make_text("ok")
