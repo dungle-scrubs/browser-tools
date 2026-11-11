@@ -1,0 +1,90 @@
+name: Insights on Chrome stable
+
+# bt insights refuses traces from any Chrome build missing from the adapter's
+# validated list (src/browser_tools/_insights/adapter.mjs). Chrome stable moves
+# every few weeks, and without this job the first sign was a user whose every
+# analysis exited 1 (#191). Each week this job captures real traces with the
+# current Chrome for Testing stable and answers two separate questions:
+#   1. Does the pinned engine still analyse this build correctly?
+#   2. Is this build on the validated list?
+# A failure in step 1 means the engine needs work. A failure in step 2 alone
+# means the build passed and its version string belongs on the list.
+
+on:
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+jobs:
+  insights:
+    name: Insights acceptance (${{ matrix.browser }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # The headless shell reports its full build; full Chrome's headless
+        # mode, which a plain `bt launch --headless` uses, reports MAJOR.0.0.0.
+        browser: [chrome-headless-shell, chrome]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - run: uv sync
+
+      # Ubuntu 24.04 forbids the unprivileged user namespaces Chrome's sandbox
+      # needs. Lifting the restriction keeps the sandbox on rather than
+      # launching with --no-sandbox, which bt does not do.
+      - name: Allow Chrome's sandbox
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
+      - name: Install ${{ matrix.browser }} stable
+        id: browser
+        run: |
+          # GitHub's Ubuntu image ships Google Chrome, so its system
+          # libraries are already present for Chrome for Testing.
+          line=$(npx --yes @puppeteer/browsers@2.10.5 install "${{ matrix.browser }}@stable" \
+            --path "$RUNNER_TEMP/cft" | tail -1)
+          echo "Installed: $line"
+          echo "binary=${line#* }" >> "$GITHUB_OUTPUT"
+
+      - run: uv run bt insights --setup
+
+      - name: The engine analyses this build correctly
+        env:
+          BT_INSIGHTS_LIVE: "1"
+          BT_INSIGHTS_LIVE_UNVALIDATED: "1"
+          BROWSER_TOOLS_CHROME_BINARY: ${{ steps.browser.outputs.binary }}
+        run: uv run pytest tests/test_insights_live.py -q -p no:cacheprovider
+
+      - name: This build is on the validated list
+        env:
+          BT_INSIGHTS_LIVE: "1"
+          BROWSER_TOOLS_CHROME_BINARY: ${{ steps.browser.outputs.binary }}
+        run: |
+          set -o pipefail
+          if ! uv run pytest tests/test_insights_live.py -q -p no:cacheprovider 2>&1 \
+              | tee "$RUNNER_TEMP/validated.log"; then
+            log="$RUNNER_TEMP/validated.log"
+            refusal='Unsupported trace browser version'
+            if grep -q "$refusal (metadata missing)" "$log"; then
+              echo "::error::A captured trace carried no browser version; read the" \
+                "test output above."
+            elif grep -q "$refusal " "$log"; then
+              # "HeadlessChrome/158.0.0.0." -> "158.0.0.0", the form the list uses.
+              version=$(grep -o -m 1 "$refusal [^ ]*" "$log" | sed 's/.* //; s/\.$//; s|.*/||')
+              echo "::error::The engine passed on Chrome $version, but '$version' is not" \
+                "in validatedVersions in src/browser_tools/_insights/adapter.mjs. Add it."
+            else
+              echo "::error::The validated-mode run failed for a reason other than the" \
+                "version list; read the test output above."
+            fi
+            exit 1
+          fi

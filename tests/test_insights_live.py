@@ -5,6 +5,7 @@ from __future__ import annotations
 import functools
 import json
 import os
+import re
 import threading
 import time
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -15,6 +16,18 @@ import pytest
 from browser_tools import cli, lifecycle
 
 FIXTURES = Path(__file__).parent / "fixtures" / "insights"
+
+#: BT_INSIGHTS_LIVE_UNVALIDATED=1 runs every assertion with
+#: --ignore-engine-mismatch. A pass on a build absent from the adapter's
+#: validated list is the evidence for adding it; without the variable, an
+#: unlisted build fails here, which is how a new Chrome stable is noticed.
+ENGINE_FLAGS = (
+    ["--ignore-engine-mismatch"] if os.environ.get("BT_INSIGHTS_LIVE_UNVALIDATED") == "1" else []
+)
+
+
+def insights(trace: Path, *extra: str) -> list[str]:
+    return ["insights", "--trace", str(trace), *ENGINE_FLAGS, *extra]
 
 
 @pytest.mark.skipif(
@@ -68,7 +81,7 @@ def test_capture_navigation_and_interaction(tmp_path, capsys):
                 )
                 captured = capsys.readouterr()
                 assert json.loads(captured.out)["trace"]["dataLossOccurred"] is False
-                assert cli.main(["insights", "--trace", str(trace)]) == 0
+                assert cli.main(insights(trace)) == 0
                 result = capsys.readouterr()
                 models = {
                     i["key"]: i
@@ -78,7 +91,14 @@ def test_capture_navigation_and_interaction(tmp_path, capsys):
                 assert len(models) == 19
                 assert models["INPBreakdown"]["state"] == state
                 if driven:
-                    assert "Processing duration: 280" in models["INPBreakdown"]["detail"]
+                    # The click handler busy-waits until 280ms have passed, so
+                    # the engine reports at least 280. The ceiling only catches
+                    # a different handler; a loaded CI runner adds dispatch
+                    # delay on top of the 280.
+                    detail = models["INPBreakdown"]["detail"]
+                    processing = re.search(r"Processing duration: (\d+)", detail)
+                    assert processing, detail
+                    assert 280 <= int(processing[1]) < 400, detail
         finally:
             server.shutdown()
             thread.join()
@@ -169,14 +189,14 @@ def test_zero_set_and_failure_causes_reproduce_live(tmp_path, capsys):
                     ]
                 )
                 assert json.loads(capsys.readouterr().out)["trace"]["dataLossOccurred"] is False
-                assert cli.main(["insights", "--trace", str(trace)]) == expected, name
+                assert cli.main(insights(trace)) == expected, name
                 result = capsys.readouterr()
                 if phrase is not None:
                     assert phrase in result.err, (name, result.err)
                 else:
                     document = json.loads(result.out)
                     assert len(document["navigations"]) == 2
-                    text = ["insights", "--trace", str(trace), "--format", "text"]
+                    text = insights(trace, "--format", "text")
                     assert cli.main(text) == 0
                     assert "# Navigation 2 of 2:" in capsys.readouterr().out
         finally:
