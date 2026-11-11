@@ -47,7 +47,12 @@ class _FakeCdpClient:
     def __init__(self) -> None:
         self.methods: list[str] = []
 
-    async def send(self, method: str, params: dict[str, Any] | None = None, timeout: float | None = None) -> dict[str, Any]:
+    async def send(
+        self,
+        method: str,
+        params: dict[str, Any] | None = None,
+        timeout: float | None = None,
+    ) -> dict[str, Any]:
         self.methods.append(method)
         if method == "Accessibility.getFullAXTree":
             return _FORM_TREE
@@ -110,7 +115,9 @@ async def test_native_click_resolves_snapshot_uid_and_dispatches_mouse() -> None
 async def test_native_fill_sets_value_and_reports_it() -> None:
     handler, fake = _handler_with_fake_client()
     await handler._dispatch_native("take_snapshot", {})
-    button = next(n for n in handler._native_reader.current.visible_nodes() if n.role == "button")
+    current = handler._native_reader.current
+    assert current is not None
+    button = next(n for n in current.visible_nodes() if n.role == "button")
     resp = await handler._dispatch_native("fill", {"uid": button.uid, "value": "hello"})
     _bare_envelope(resp)
     assert "Runtime.callFunctionOn" in fake.methods
@@ -138,6 +145,7 @@ async def test_a_uid_from_another_document_is_refused_as_an_error_envelope() -> 
 @pytest.mark.asyncio
 async def test_native_errors_when_cdp_unavailable() -> None:
     handler = CDPHandler(browser_url=None)
-    handler._cdp_or_error = lambda: (None, {"result": {"content": [{"type": "text", "text": "down"}], "isError": True}})  # type: ignore[method-assign]
+    down_error = {"result": {"content": [{"type": "text", "text": "down"}], "isError": True}}
+    handler._cdp_or_error = lambda: (None, down_error)  # type: ignore[method-assign]
     resp = await handler._dispatch_native("take_snapshot", {})
     assert resp["result"].get("isError") is True

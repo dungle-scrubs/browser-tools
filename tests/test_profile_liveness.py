@@ -109,14 +109,18 @@ class TestEngineAwareLiveness:
 
     def test_chrome_port_reuse_reads_dead(self, monkeypatch):
         # Recorded PID not ours; port listens but a DIFFERENT profile claims it.
-        monkeypatch.setattr(core_registry, "process_is_ours", lambda pid, expected_start=None: False)
+        monkeypatch.setattr(
+            core_registry, "process_is_ours", lambda pid, expected_start=None: False
+        )
         monkeypatch.setattr(core_registry, "_port_is_listening", lambda port: True)
         monkeypatch.setattr(core_registry, "_cdp_port_claimants", lambda port: {"/tmp/other"})
         ext = _ext(engine="chrome", user_data_dir="/tmp/mine", port=9222)
         assert lifecycle.instance_is_live(ext) is False
 
     def test_chrome_pid_reuse_dead_port_reads_dead(self, monkeypatch):
-        monkeypatch.setattr(core_registry, "process_is_ours", lambda pid, expected_start=None: False)
+        monkeypatch.setattr(
+            core_registry, "process_is_ours", lambda pid, expected_start=None: False
+        )
         monkeypatch.setattr(core_registry, "_port_is_listening", lambda port: False)
         ext = _ext(engine="chrome", user_data_dir="/tmp/mine", port=9222)
         assert lifecycle.instance_is_live(ext) is False
@@ -130,7 +134,11 @@ class TestEngineAwareLiveness:
 class TestProfileExclusivity:
     def test_second_launch_on_held_profile_fails_naming_holder(self, registry_path, monkeypatch):
         core_registry._save_registry(
-            {"holder-01": _entry(profile="dev", user_data_dir=str(lifecycle.profile_user_data_dir("dev")))},
+            {
+                "holder-01": _entry(
+                    profile="dev", user_data_dir=str(lifecycle.profile_user_data_dir("dev"))
+                )
+            },
             registry_path,
         )
         monkeypatch.setattr(lifecycle, "instance_is_live", lambda inst: True)

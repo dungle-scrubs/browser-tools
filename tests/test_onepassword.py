@@ -17,7 +17,7 @@ import subprocess
 import sys
 import types
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -49,10 +49,11 @@ class CodesignDouble:
         self.spawn_error: OSError | None = None
         self.output = b"OUTPUT-MARKER codesign said something"
 
-    def __call__(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+    def __call__(self, args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
         self.calls.append((list(args), kwargs))
         if self.timeout:
-            raise subprocess.TimeoutExpired(cmd="codesign", timeout=kwargs.get("timeout"))
+            timeout = cast("float", kwargs.get("timeout"))
+            raise subprocess.TimeoutExpired(cmd="codesign", timeout=timeout)
         if self.spawn_error is not None:
             raise self.spawn_error
         return subprocess.CompletedProcess(args, self.exit_code, b"", self.output)

@@ -12,6 +12,11 @@ because it is the one a caller greps for.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, cast
+
+if TYPE_CHECKING:
+    from browser_tools.cdp_handler import CDPHandler
+
 import pytest
 from doubles import HandlerSurface
 
@@ -53,18 +58,18 @@ class TestTheEnvelopePrefixIsNotCarriedIntoTheMessage:
         it chose. Stripping one `Error: ` still leaves that caller's own."""
         handler = Handler(error_response("E001: the port is dead"))
         with pytest.raises(LifecycleError) as caught:
-            curated._tool_or_raise(handler, "anything", {})
+            curated._tool_or_raise(cast("CDPHandler", handler), "anything", {})
         assert str(caught.value) == "E001: the port is dead"
 
     def test_the_word_error_inside_a_message_survives(self):
         """Only a leading prefix goes. A message about an error keeps it."""
         handler = Handler(make_error("the page raised Error: ReferenceError"))
         with pytest.raises(LifecycleError) as caught:
-            curated._tool_or_raise(handler, "anything", {})
+            curated._tool_or_raise(cast("CDPHandler", handler), "anything", {})
         assert str(caught.value) == "the page raised Error: ReferenceError"
 
     def test_a_success_envelope_is_returned_verbatim(self):
         handler = Handler(make_text("Error: this is the page's own text"))
-        assert curated._tool_or_raise(handler, "anything", {}) == (
+        assert curated._tool_or_raise(cast("CDPHandler", handler), "anything", {}) == (
             "Error: this is the page's own text"
         )

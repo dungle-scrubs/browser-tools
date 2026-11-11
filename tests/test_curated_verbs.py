@@ -30,7 +30,7 @@ from __future__ import annotations
 import base64
 import json
 import time
-from typing import ClassVar
+from typing import Any, ClassVar
 
 import pytest
 from doubles import HandlerSurface
@@ -1090,8 +1090,9 @@ async def test_network_subscribes_before_enable_and_returns_without_fixed_wait(m
     original = cdp.send
     bodies = []
 
-    async def send(method, params=None, session_id=None):
+    async def send(method, params: dict[str, Any] | None = None, session_id=None):
         if method == "Network.getResponseBody":
+            assert params is not None
             bodies.append(params["requestId"])
             return {"body": "last", "base64Encoded": False}
         return await original(method, params, session_id=session_id)
@@ -1196,7 +1197,9 @@ class TestCuratedInChrome:
         import re
 
         tree = page("snapshot")["snapshot"]
-        uid = re.search(r'\[uid=([^\]]+)\] button "Hover me"', tree).group(1)
+        match = re.search(r'\[uid=([^\]]+)\] button "Hover me"', tree)
+        assert match is not None
+        uid = match.group(1)
         page("hover", "--uid", uid)
         assert (
             page("eval", 'getComputedStyle(document.querySelector("#h")).color')["value"]
@@ -1229,7 +1232,9 @@ class TestCuratedInChrome:
         assert pressed == {"key": "Enter", "modifiers": [], "dispatched": ["keyDown", "keyUp"]}
 
         tree = page("snapshot")["snapshot"]
-        uid = re.search(r'\[uid=([^\]]+)\] button "Hover me"', tree).group(1)
+        match = re.search(r'\[uid=([^\]]+)\] button "Hover me"', tree)
+        assert match is not None
+        uid = match.group(1)
         hovered = page("hover", "--uid", uid)
         assert set(hovered) == {"uid", "x", "y"}
         assert hovered["uid"] == uid
@@ -1243,7 +1248,8 @@ class TestCuratedInChrome:
         page(
             "eval",
             'document.body.innerHTML="<textarea id=i>AB</textarea>"; '
-            'window.events=[]; for(const name of ["beforeinput","input","keydown","keyup","keypress"]) '
+            'window.events=[]; for(const name of ["beforeinput","input","keydown",'
+            '"keyup","keypress"]) '
             "i.addEventListener(name,e=>events.push(e.type)); i.focus(); i.setSelectionRange(1,1)",
         )
         page("type", "--file", str(path))
@@ -1284,7 +1290,8 @@ class TestCuratedInChrome:
     def test_network_get_step_reads_prior_response_without_losing_state(self, page, tmp_path):
         steps = tmp_path / "network.steps"
         steps.write_text(
-            "eval \"window.marker='kept'; fetch('data:text/plain,run-response').then(r=>r.text())\" --await\n"
+            "eval \"window.marker='kept'; "
+            "fetch('data:text/plain,run-response').then(r=>r.text())\" --await\n"
             "network-get --url data:text/plain,run-response\n"
             "eval window.marker\n"
         )
@@ -1313,7 +1320,7 @@ class TestCuratedInChrome:
         from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
         class Fixture(BaseHTTPRequestHandler):
-            def log_message(self, *args):
+            def log_message(self, format: str, *args: object) -> None:
                 pass
 
             def do_GET(self):
@@ -1468,7 +1475,7 @@ async def test_eval_generated_javascript_in_v8(source, expected):
                 node,
                 "-e",
                 program,
-                json.dumps(params["expression"]),
+                json.dumps(params["expression"] if params is not None else ""),
                 "compile" if method == "Runtime.compileScript" else "evaluate",
             ],
             capture_output=True,

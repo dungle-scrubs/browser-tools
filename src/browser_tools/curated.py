@@ -418,7 +418,9 @@ def click(
     tree resolved against it by ordinal and named whatever now sat there.
     """
     standalone = handler is None
-    with _handler_for(handler, instance, target, registry_path, endpoint, all_frames, dialog=dialog) as handler:
+    with _handler_for(
+        handler, instance, target, registry_path, endpoint, all_frames, dialog=dialog
+    ) as handler:
         _refuse_input_to_hidden_tab(handler)
         text = _native_or_raise(handler, "click", {"uid": uid})
         records = handler.dialog_document() if standalone else {}
@@ -447,7 +449,9 @@ def fill(
     ``<input oninput="alert(...)">`` never returned.
     """
     standalone = handler is None
-    with _handler_for(handler, instance, target, registry_path, endpoint, all_frames, dialog=dialog) as handler:
+    with _handler_for(
+        handler, instance, target, registry_path, endpoint, all_frames, dialog=dialog
+    ) as handler:
         _refuse_input_to_hidden_tab(handler)
         result = _native_or_raise(handler, "fill", {"uid": uid, "value": text})
         records = handler.dialog_document() if standalone else {}
@@ -853,7 +857,9 @@ def _action(
     endpoint: str | ResolvedEndpoint | None, handler: CDPHandler | None, all_frames: bool,
     dialog: str | None = "dismiss",
 ) -> dict[str, Any]:
-    with _handler_for(handler, instance, target, registry_path, endpoint, all_frames, url, dialog) as opened:
+    with _handler_for(
+        handler, instance, target, registry_path, endpoint, all_frames, url, dialog
+    ) as opened:
         if name in {"press", "hover", "type"}:
             _refuse_input_to_hidden_tab(opened)
         try:

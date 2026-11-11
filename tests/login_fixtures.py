@@ -390,8 +390,10 @@ def _wait_page_ready(origin: str, registry: str, name: str, *, navigate_url: str
                         check = await cdp.send(
                             method="Runtime.evaluate",
                             params={
-                                "expression": f"document.location.origin === {json.dumps(origin)} && "
-                                              f"Boolean(document.querySelector({selector!r}))",
+                                "expression": (
+                                    f"document.location.origin === {json.dumps(origin)} && "
+                                    f"Boolean(document.querySelector({selector!r}))"
+                                ),
                                 "returnByValue": True,
                             },
                             session_id=session_id, timeout=5.0,

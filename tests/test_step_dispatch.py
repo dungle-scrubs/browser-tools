@@ -220,7 +220,9 @@ async def test_six_verbs_follow_selected_frame(name, arguments, monkeypatch, fra
     frames.update_from_frame_tree({'frame': {'id':'TOP', 'url':'https://top', 'loaderId':'top'},
         'childFrames':[{'frame':{'id':'CHILD','url':'https://child','loaderId':'child'}}]})
     frames._frames['CHILD'].frame_session_id = frame_session
-    frames.handle_execution_context_created({'context': {'id':7, 'auxData':{'frameId':'CHILD','isDefault':True}}}, frame_session)
+    frames.handle_execution_context_created(
+        {'context': {'id':7, 'auxData':{'frameId':'CHILD','isDefault':True}}}, frame_session
+    )
     handler._rt._frame_manager = frames
     page_cdp = Mock(send=AsyncMock())
     selected_cdp = Mock(send=AsyncMock(return_value={'result':{'objectId':'focused'}}))
@@ -252,7 +254,9 @@ async def test_six_verbs_follow_selected_frame(name, arguments, monkeypatch, fra
         assert hover_action.call_args.args == (selected_cdp.send, arguments['uid'])
     else:
         first = selected_cdp.send.call_args_list[0]
-        assert first.args == ('Runtime.evaluate', {'expression':'document.activeElement','contextId':7})
+        assert first.args == (
+            'Runtime.evaluate', {'expression':'document.activeElement','contextId':7}
+        )
         assert selected_cdp.send.call_args_list[1].args == ('DOM.focus', {'objectId':'focused'})
     page_cdp.send.assert_not_called()
 

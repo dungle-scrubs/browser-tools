@@ -77,6 +77,7 @@ class TestValidPolicy:
         """References and selectors are configuration; no secret value exists here."""
         policy = load_policy(write_policy(tmp_path, valid_document()))
         account = policy.account("example")
+        assert account is not None
         assert account.alias in repr(account)
         assert account.username_selector in repr(account)
 
@@ -104,7 +105,9 @@ class TestReviewPolicyBoundary:
         document = valid_document()
         document["accounts"]["example"]["origin"] = origin
         policy = load_policy(write_policy(tmp_path, document))
-        assert policy.account("example").origin == origin
+        account = policy.account("example")
+        assert account is not None
+        assert account.origin == origin
 
     def test_names_can_start_with_an_underscore(self, tmp_path):
         document = valid_document()
@@ -133,7 +136,9 @@ class TestReviewPolicyBoundary:
                 load_policy(path)
         assert "SYNTHETIC" not in str(error.value)
 
-    @pytest.mark.parametrize("case", ["unknown-key", "duplicate-key", "unknown-account", "bad-account"])
+    @pytest.mark.parametrize(
+        "case", ["unknown-key", "duplicate-key", "unknown-account", "bad-account"]
+    )
     def test_usage_diagnostics_do_not_echo_policy_inputs(self, tmp_path, case):
         sentinel = "SYNTHETIC-private-value"
         document = valid_document()
@@ -280,7 +285,9 @@ class TestOriginCanonicalization:
         document = valid_document()
         document["accounts"]["example"]["origin"] = origin
         policy = load_policy(write_policy(tmp_path, document))
-        assert policy.account("example").origin == canonical
+        account = policy.account("example")
+        assert account is not None
+        assert account.origin == canonical
 
     @pytest.mark.parametrize(
         "origin",

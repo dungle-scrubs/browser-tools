@@ -115,7 +115,8 @@ def _node_set_diffs(
         diffs.append(
             ParityDiff(
                 "node_set",
-                f"missing from candidate x{count}: role={key[0]!r} name={key[1]!r} value={key[2]!r}",
+                f"missing from candidate x{count}: role={key[0]!r} "
+                f"name={key[1]!r} value={key[2]!r}",
             )
         )
     # Tuples present in the candidate but absent (or over-counted) in baseline.
@@ -124,7 +125,8 @@ def _node_set_diffs(
         diffs.append(
             ParityDiff(
                 "node_set",
-                f"unexpected in candidate x{count}: role={key[0]!r} name={key[1]!r} value={key[2]!r}",
+                f"unexpected in candidate x{count}: role={key[0]!r} "
+                f"name={key[1]!r} value={key[2]!r}",
             )
         )
     return diffs
@@ -143,17 +145,23 @@ def _uid_target_diffs(
             continue
         if base_target is None:
             diffs.append(
-                ParityDiff("uid_target", f"uid {uid!r} resolves in candidate only -> {cand_target!r}")
+                ParityDiff(
+                    "uid_target", f"uid {uid!r} resolves in candidate only -> {cand_target!r}"
+                )
             )
         elif cand_target is None:
             diffs.append(
-                ParityDiff("uid_target", f"uid {uid!r} does not resolve in candidate (baseline -> {base_target!r})")
+                ParityDiff(
+                    "uid_target",
+                    f"uid {uid!r} does not resolve in candidate (baseline -> {base_target!r})",
+                )
             )
         else:
             diffs.append(
                 ParityDiff(
                     "uid_target",
-                    f"uid {uid!r} resolves to {cand_target!r}, baseline resolves to {base_target!r}",
+                    f"uid {uid!r} resolves to {cand_target!r}, "
+                    f"baseline resolves to {base_target!r}",
                 )
             )
     return diffs
@@ -267,7 +275,8 @@ def _uid_target_superset_diffs(
             diffs.append(
                 ParityDiff(
                     "uid_target",
-                    f"uid {uid!r} resolves to {cand_target!r}, baseline resolves to {base_target!r}",
+                    f"uid {uid!r} resolves to {cand_target!r}, "
+                    f"baseline resolves to {base_target!r}",
                 )
             )
     return diffs

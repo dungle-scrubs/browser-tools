@@ -55,7 +55,11 @@ class DialogPolicy:
         params: dict[str, Any] = {"accept": accept}
         result: Any = None
         if event["type"] == "prompt" and accept:
-            result = self.value.partition(":")[2] if ":" in self.value else event.get("defaultPrompt", "")
+            result = (
+                self.value.partition(":")[2]
+                if ":" in self.value
+                else event.get("defaultPrompt", "")
+            )
             params["promptText"] = result
         elif event["type"] in {"confirm", "beforeunload"}:
             result = accept

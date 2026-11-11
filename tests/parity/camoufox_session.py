@@ -307,7 +307,10 @@ class CamoufoxSession:
             if not check_selector and not check_url:
                 return {
                     "resolved": False,
-                    "reason": "No check condition specified. Use check_selector_gone or check_url_contains.",
+                    "reason": (
+                        "No check condition specified. "
+                        "Use check_selector_gone or check_url_contains."
+                    ),
                 }
 
             time.sleep(poll_interval)

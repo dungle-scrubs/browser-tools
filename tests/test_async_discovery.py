@@ -17,6 +17,10 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable
 
 import pytest
 
@@ -106,7 +110,7 @@ class _SlowDevToolsHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def log_message(self, *args: object) -> None:
+    def log_message(self, format: str, *args: object) -> None:
         """Keep the test output quiet."""
 
 
@@ -124,7 +128,7 @@ def slow_devtools_port() -> object:
         thread.join(timeout=5)
 
 
-async def _worst_tick_lag(during: object) -> float:
+async def _worst_tick_lag(during: Awaitable[Any]) -> float:
     """Run ``during`` and return the worst late arrival of a fixed-rate timer."""
     worst = 0.0
     stop = False

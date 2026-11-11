@@ -198,6 +198,7 @@ class TestImpossibleStatesFailClosed:
     def test_an_unknown_cause_type_fails_closed(self):
         # A cause outside the fixed stop-cause vocabulary.
         progress = progress_in(bound(contract.BoundPhase.OBSERVED_SUCCESS))
-        progress.stop = object()
+        # A cause outside the fixed stop-cause vocabulary.
+        progress.stop = object()  # pyright: ignore[reportAttributeAccessIssue]  # outside the vocabulary
         result = contract.diagnosis(progress, False)
         assert result is not None and "finalization" in str(result)

@@ -161,7 +161,9 @@ class ParityEngine(Protocol):
 class ToolSession(Protocol):
     """The subset of a session the engine uses (``CamoufoxSession`` fits)."""
 
-    def call_tool(self, tool: str, args: dict[str, Any] | None = None) -> dict[str, Any]:  # pragma: no cover - protocol
+    def call_tool(  # pragma: no cover - protocol
+        self, tool: str, args: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
         ...
 
 
@@ -230,7 +232,9 @@ class NativeCdpSession(Protocol):
     def evaluate(self, script: str) -> Any:  # pragma: no cover - protocol
         ...
 
-    def cdp_send(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:  # pragma: no cover - protocol
+    def cdp_send(  # pragma: no cover - protocol
+        self, method: str, params: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
         ...
 
 
@@ -282,7 +286,9 @@ class NativeSnapshotEngine:
                 name=node.name,
                 value=node.value,
                 uid=node.uid,
-                backend_node=str(node.backend_node_id) if node.backend_node_id is not None else None,
+                backend_node=(
+                    str(node.backend_node_id) if node.backend_node_id is not None else None
+                ),
             )
             for node in snapshot.visible_nodes()
         )
@@ -333,7 +339,11 @@ class NativeInteractionEngine:
             return None
         call = self._session.cdp_send(
             RUNTIME_CALL_FUNCTION_ON,
-            {"objectId": object_id, "functionDeclaration": _BACKEND_TARGET_FN, "returnByValue": True},
+            {
+                "objectId": object_id,
+                "functionDeclaration": _BACKEND_TARGET_FN,
+                "returnByValue": True,
+            },
         )
         value = call.get("result", {}).get("value")
         return value if isinstance(value, dict) else None
@@ -359,7 +369,9 @@ class NativeInteractionEngine:
                 name=node.name,
                 value=node.value,
                 uid=node.uid,
-                backend_node=str(node.backend_node_id) if node.backend_node_id is not None else None,
+                backend_node=(
+                    str(node.backend_node_id) if node.backend_node_id is not None else None
+                ),
             )
             for node in snapshot.visible_nodes()
         )
@@ -613,6 +625,8 @@ class NodeEngine:
         )
 
 
-def capture_corpus(engine: ParityEngine, pages: tuple[CorpusPage, ...] = CORPUS) -> dict[str, PageCapture]:
+def capture_corpus(
+    engine: ParityEngine, pages: tuple[CorpusPage, ...] = CORPUS
+) -> dict[str, PageCapture]:
     """Run every corpus page through ``engine`` and collect the captures."""
     return {page.page_id: engine.capture(page) for page in pages}

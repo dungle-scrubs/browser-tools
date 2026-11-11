@@ -20,6 +20,7 @@ from pathlib import Path
 import pytest
 
 from browser_tools import cli, endpoint, lifecycle, passthrough
+from browser_tools.endpoint import ResolvedEndpoint
 
 # --------------------------------------------------------------------------- #
 # Endpoint parsing
@@ -123,13 +124,16 @@ class TestBrowserLifetimeRefusal:
 class TestTheRegistryStaysOut:
     def test_the_port_comes_from_the_url_with_no_registry_read(self, tmp_path):
         registry = tmp_path / "registry.json"
-        assert lifecycle.resolve_cdp_port(None, str(registry), "http://127.0.0.1:9333").port == 9333
+        resolved = lifecycle.resolve_cdp_port(None, str(registry), "http://127.0.0.1:9333")
+        assert isinstance(resolved, ResolvedEndpoint)
+        assert resolved.port == 9333
         assert not registry.exists()
 
     def test_an_instance_name_beside_an_endpoint_is_ignored_not_looked_up(self, tmp_path):
         """No lookup happens, so a name the registry has never heard of is fine."""
         registry = tmp_path / "registry.json"
         port = lifecycle.resolve_cdp_port("no-such-instance", str(registry), "http://127.0.0.1:9444")
+        assert isinstance(port, ResolvedEndpoint)
         assert port.port == 9444
         assert not registry.exists()
 
@@ -318,7 +322,14 @@ class TestAttachOverAnEndpoint:
             target="2",
             endpoint="http://127.0.0.1:9222",
         )
-        assert taken == [(endpoint.resolve_endpoint_port("http://127.0.0.1:9222"), ["Page.loadEventFired"], "2", "index")]
+        assert taken == [
+            (
+                endpoint.resolve_endpoint_port("http://127.0.0.1:9222"),
+                ["Page.loadEventFired"],
+                "2",
+                "index",
+            )
+        ]
 
     def test_an_empty_subscription_list_is_still_a_usage_error(self):
         from browser_tools import events as events_module
@@ -432,7 +443,9 @@ class TestConnectionDiagnosis:
             "browser_tools.process_utils.find_chrome_user_data_dir", lambda pid: None
         )
         monkeypatch.setattr("browser_tools.process_utils.find_chrome_debug_port", lambda pid: None)
-        monkeypatch.setattr("browser_tools.process_utils.read_process_command", lambda pid: "chrome")
+        monkeypatch.setattr(
+            "browser_tools.process_utils.read_process_command", lambda pid: "chrome"
+        )
         described = endpoint.describe_endpoint(9222)
         assert "collision" in described
         assert "pid 1" in described

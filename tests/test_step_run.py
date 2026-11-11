@@ -22,7 +22,10 @@ import argparse
 import contextlib
 import json
 import time
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
+
+if TYPE_CHECKING:
+    from browser_tools.cdp_handler import CDPHandler
 
 import pytest
 from doubles import FakeHandler
@@ -236,7 +239,9 @@ class TestOneSessionForTheWholeRun:
         import contextlib
 
         @contextlib.contextmanager
-        def fake_session(instance, target, url, registry_path, endpoint, all_frames=False, dialog="dismiss"):
+        def fake_session(
+            instance, target, url, registry_path, endpoint, all_frames=False, dialog="dismiss"
+        ):
             opened.append((instance, target, url, endpoint))
             yield handler
 
@@ -608,7 +613,7 @@ class TestALocalWaitClampsItself:
 
         handler = self._Recorder(time.monotonic() + 0.2)
         started = time.monotonic()
-        curated._capture_for(handler, duration=30, max_frames=1000)
+        curated._capture_for(cast("CDPHandler", handler), duration=30, max_frames=1000)
         elapsed = time.monotonic() - started
         assert elapsed < 5, (
             f"the capture ran {elapsed:.1f}s past a deadline 0.2s away, so the "
@@ -620,7 +625,7 @@ class TestALocalWaitClampsItself:
 
         handler = self._Recorder(None)
         started = time.monotonic()
-        curated._capture_for(handler, duration=0.15, max_frames=1000)
+        curated._capture_for(cast("CDPHandler", handler), duration=0.15, max_frames=1000)
         assert time.monotonic() - started >= 0.15, (
             "a bare screencast stopped early, so --duration no longer means what it says"
         )
@@ -631,7 +636,7 @@ class TestALocalWaitClampsItself:
         handler = self._Recorder(None)
         handler.screencast_frame_count = 10
         started = time.monotonic()
-        assert curated._capture_for(handler, duration=30, max_frames=10) == 10
+        assert curated._capture_for(cast("CDPHandler", handler), duration=30, max_frames=10) == 10
         assert time.monotonic() - started < 1
 
 
@@ -802,7 +807,9 @@ class TestTheRunOwnsTheSessionItOpened:
         import contextlib as _ctx
 
         @_ctx.contextmanager
-        def fake_cdp_session(port, spec=None, by=None, external=False, all_frames=False, dialog=None):
+        def fake_cdp_session(
+            port, spec=None, by=None, external=False, all_frames=False, dialog=None
+        ):
             try:
                 yield handler
             finally:
@@ -916,7 +923,9 @@ class TestARunThatOverranIsNeverOk:
             return {"frames": 1}
 
         monkeypatch.setattr(step_run, "_one_step", slow_but_successful)
-        document, ok = step_run.execute([_step(1, "screencast --dir d")], FakeHandler(), timeout=0.02)
+        document, ok = step_run.execute(
+            [_step(1, "screencast --dir d")], FakeHandler(), timeout=0.02
+        )
         assert ok is False, "a run that passed its deadline reported success"
         assert document["run"]["status"] == "timeout"
 
@@ -1000,7 +1009,9 @@ class TestTheGraceIsOneBudgetForTheWholeUnwind:
 
         runtime = CDPRuntime(None)
         runtime._deadline = clock - 1
-        assert runtime.bounded_timeout(30) <= DEADLINE_GRACE_SECONDS
+        bounded = runtime.bounded_timeout(30)
+        assert bounded is not None
+        assert bounded <= DEADLINE_GRACE_SECONDS
 
     def test_a_spent_budget_still_leaves_enough_to_send_one_call(self):
         from browser_tools.cdp_handler import TEARDOWN_FLOOR_SECONDS, CDPRuntime
@@ -1298,5 +1309,7 @@ class TestTheDoublesMatchTheRealHandler:
 
 def test_network_get_response_url_is_not_a_page_selector(monkeypatch):
     monkeypatch.setattr("browser_tools.lifecycle.read_instances", lambda registry_path=None: [])
-    steps = step_list.validate('eval "fetch(\'data:text/plain,ok\')"\nnetwork-get --url data:text/plain,ok')
+    steps = step_list.validate(
+        'eval "fetch(\'data:text/plain,ok\')"\nnetwork-get --url data:text/plain,ok'
+    )
     assert steps[1].as_verb().url == 'data:text/plain,ok'

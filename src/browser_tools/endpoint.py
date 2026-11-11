@@ -176,7 +176,10 @@ def resolve_endpoint_port(endpoint: str) -> ResolvedEndpoint:
         if not parsed.path.startswith(prefix) or not parsed.path[len(prefix):] or any(
             c.isspace() for c in text
         ):
-            raise EndpointUsageError("--endpoint ws URL requires /devtools/browser/ID; HTTP discovery uses http://HOST:PORT")
+            raise EndpointUsageError(
+                "--endpoint ws URL requires /devtools/browser/ID; "
+                "HTTP discovery uses http://HOST:PORT"
+            )
         return ResolvedEndpoint(port, text, text, for_url(host))
     return ResolvedEndpoint(port, text, None, for_url(host))
 

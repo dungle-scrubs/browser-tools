@@ -89,7 +89,9 @@ def test_gate_covers_full_corpus_two_consecutive_runs(captures) -> None:
     for run_index in (0, 1):
         results = corpus_covers(node_runs[run_index], native_runs[run_index])
         broken = {pid: [d.detail for d in r.diffs] for pid, r in results.items() if not r.matched}
-        assert corpus_matches(results), f"run {run_index + 1}: native did not cover Node baseline: {broken}"
+        assert corpus_matches(results), (
+            f"run {run_index + 1}: native did not cover Node baseline: {broken}"
+        )
 
 
 def test_gate_covers_every_frozen_page(captures) -> None:

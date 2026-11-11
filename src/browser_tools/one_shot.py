@@ -74,8 +74,9 @@ from .lifecycle import LifecycleError
 #: Network does not replay past responses on enable. A later wait/network-list
 #: still observes only its own window, while network-get reads the run buffer.
 #: A raw Network.disable step is refused, as for Page and Runtime. Raw
-#: buffer-setting commands can still affect how long Chrome retains bodies. These exemptions also apply standalone,
-#: where detaching the session releases the domain and its body storage.
+#: buffer-setting commands can still affect how long Chrome retains bodies.
+#: These exemptions also apply standalone, where detaching the session releases
+#: the domain and its body storage.
 RUN_OWNED_DOMAINS = frozenset({"Page", "Runtime", "Network"})
 
 

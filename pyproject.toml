@@ -160,7 +160,7 @@ select = [
     "TCH",                   # flake8-type-checking
     "UP",                    # pyupgrade
 ]
-ignore = ["E501", "E731", "F841"]
+ignore = ["E731"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["browser_tools", "login_browser_fixtures", "login_fixtures"]

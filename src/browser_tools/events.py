@@ -273,7 +273,13 @@ async def _attach_external(
                 loop.add_signal_handler(sig, shutdown.set)
 
         print(
-            json.dumps({"status": "ready", "sessionId": session_id[:16], "endpoint": port.port if isinstance(port, ResolvedEndpoint) else port}),
+            json.dumps(
+                {
+                    "status": "ready",
+                    "sessionId": session_id[:16],
+                    "endpoint": port.port if isinstance(port, ResolvedEndpoint) else port,
+                }
+            ),
             flush=True,
         )
 

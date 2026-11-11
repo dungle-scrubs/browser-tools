@@ -21,6 +21,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+from typing import TYPE_CHECKING, cast
+
+if TYPE_CHECKING:
+    from browser_tools.core.cdp_client import CDPClient
 
 import pytest
 
@@ -109,7 +113,12 @@ class TestCollectOnSession:
     def test_catches_event_fired_during_enable(self):
         fake = _RaceFakeCDP([("Runtime.consoleAPICalled", {"n": 1})])
         result = asyncio.run(
-            list_verbs.collect_on_session(fake, "S1", ["Runtime.consoleAPICalled"], duration=0)
+            list_verbs.collect_on_session(
+                cast("CDPClient", fake),
+                "S1",
+                ["Runtime.consoleAPICalled"],
+                duration=0,
+            )
         )
         assert fake.handler_live_at_enable is True
         assert result == [{"method": "Runtime.consoleAPICalled", "params": {"n": 1}}]
@@ -122,7 +131,7 @@ class TestCollectOnSession:
         fake = _RaceFakeCDP([], fired_after_delay=[("Runtime.consoleAPICalled", {"n": 2}, 0.02)])
         result = asyncio.run(
             list_verbs.collect_on_session(
-                fake, "S1", ["Runtime.consoleAPICalled"], duration=0.05
+                cast("CDPClient", fake), "S1", ["Runtime.consoleAPICalled"], duration=0.05
             )
         )
         assert result == [{"method": "Runtime.consoleAPICalled", "params": {"n": 2}}]
@@ -136,7 +145,10 @@ class TestCollectOnSession:
         )
         result = asyncio.run(
             list_verbs.collect_on_session(
-                fake, "S1", ["Network.requestWillBeSent", "Network.responseReceived"], duration=0
+                cast("CDPClient", fake),
+                "S1",
+                ["Network.requestWillBeSent", "Network.responseReceived"],
+                duration=0,
             )
         )
         assert len(result) == 2
@@ -148,14 +160,24 @@ class TestCollectOnSession:
     def test_handlers_removed_after_return(self):
         fake = _RaceFakeCDP([("Runtime.consoleAPICalled", {"n": 1})])
         asyncio.run(
-            list_verbs.collect_on_session(fake, "S1", ["Runtime.consoleAPICalled"], duration=0)
+            list_verbs.collect_on_session(
+                cast("CDPClient", fake),
+                "S1",
+                ["Runtime.consoleAPICalled"],
+                duration=0,
+            )
         )
         assert fake._handlers.get("Runtime.consoleAPICalled") == []
 
     def test_zero_duration_skips_sleep_but_keeps_enable_time_events(self):
         fake = _RaceFakeCDP([("Runtime.consoleAPICalled", {"n": 1})])
         result = asyncio.run(
-            list_verbs.collect_on_session(fake, "S1", ["Runtime.consoleAPICalled"], duration=0)
+            list_verbs.collect_on_session(
+                cast("CDPClient", fake),
+                "S1",
+                ["Runtime.consoleAPICalled"],
+                duration=0,
+            )
         )
         assert result == [{"method": "Runtime.consoleAPICalled", "params": {"n": 1}}]
 
@@ -389,13 +411,17 @@ class TestConsoleListFullPath:
                 )
             ]
         )
-        result = list_verbs.console_list(instance="site-01", duration=0, registry_path=registry_path)
+        result = list_verbs.console_list(
+            instance="site-01", duration=0, registry_path=registry_path
+        )
         assert result == [{"type": "log", "text": "hi", "timestamp": 1.0}]
 
     def test_no_events_returns_empty_list(self, registry_path, list_transport):
         _seed(registry_path, {"site-01": _entry()})
         list_transport([])
-        result = list_verbs.console_list(instance="site-01", duration=0, registry_path=registry_path)
+        result = list_verbs.console_list(
+            instance="site-01", duration=0, registry_path=registry_path
+        )
         assert result == []
 
     def test_unknown_instance_is_lifecycle_error(self, registry_path, list_transport):
@@ -422,11 +448,21 @@ class TestNetworkListFullPath:
                 ),
                 (
                     "Network.responseReceived",
-                    {"requestId": "r1", "type": "Document", "response": {"status": 200, "statusText": "OK", "url": "https://example.com/"}},
+                    {
+                        "requestId": "r1",
+                        "type": "Document",
+                        "response": {
+                            "status": 200,
+                            "statusText": "OK",
+                            "url": "https://example.com/",
+                        },
+                    },
                 ),
             ]
         )
-        result = list_verbs.network_list(instance="site-01", duration=0, registry_path=registry_path)
+        result = list_verbs.network_list(
+            instance="site-01", duration=0, registry_path=registry_path
+        )
         assert result == [
             {
                 "requestId": "r1",
@@ -441,7 +477,9 @@ class TestNetworkListFullPath:
     def test_no_events_returns_empty_list(self, registry_path, list_transport):
         _seed(registry_path, {"site-01": _entry()})
         list_transport([])
-        result = list_verbs.network_list(instance="site-01", duration=0, registry_path=registry_path)
+        result = list_verbs.network_list(
+            instance="site-01", duration=0, registry_path=registry_path
+        )
         assert result == []
 
 

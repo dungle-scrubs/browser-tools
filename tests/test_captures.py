@@ -5,16 +5,21 @@ from __future__ import annotations
 import base64
 import json
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 import pytest
 
 from browser_tools import captures, cli, curated, step_list
 
 
-def invoke(endpoint, capsys, *args):
+def invoke(endpoint, capsys, *args) -> tuple[int, dict[str, Any], str]:
     code = cli.main([*args, "--endpoint", endpoint])
     result = capsys.readouterr()
-    return code, json.loads(result.out) if result.out else None, result.err
+    assert result.out, "the invocation printed no JSON document"
+    return code, json.loads(result.out), result.err
 
 
 @pytest.mark.parametrize(
@@ -64,7 +69,8 @@ def test_validation_precedes_start(tmp_path, capsys, monkeypatch, step):
 
 
 def test_heap_is_a_step():
-    assert step_list.validate("heap --out /tmp/heap.heapsnapshot")[0].args.command == "heap"
+    step = step_list.validate("heap --out /tmp/heap.heapsnapshot")[0]
+    assert step.as_verb().command == "heap"
 
 
 def test_real_interaction_and_heap(curated_browser, tmp_path, capsys):
@@ -86,8 +92,10 @@ def test_real_interaction_and_heap(curated_browser, tmp_path, capsys):
     assert plain["trace"]["endedBy"] == "duration"
     assert plain["trace"]["categories"] == list(captures.DEFAULT_CATEGORIES)
     source.write_text(
-        'Input.dispatchMouseEvent \'{"type":"mousePressed","x":90,"y":365,"button":"left","clickCount":1}\'\n'
-        'Input.dispatchMouseEvent \'{"type":"mouseReleased","x":90,"y":365,"button":"left","clickCount":1}\'\n'
+        'Input.dispatchMouseEvent \'{"type":"mousePressed","x":90,"y":365,'
+        '"button":"left","clickCount":1}\'\n'
+        'Input.dispatchMouseEvent \'{"type":"mouseReleased","x":90,"y":365,'
+        '"button":"left","clickCount":1}\'\n'
         'wait-text "clicked:"\nwait-stable\n'
     )
     interaction = tmp_path / "interaction.json"
@@ -129,7 +137,8 @@ def test_real_interaction_and_heap(curated_browser, tmp_path, capsys):
 
     heap_path = tmp_path / "large.heapsnapshot"
     source.write_text(
-        "eval \"window.held = Array.from({length:100000}, (_,i) => ({index:i, text:'retained-'+i})); window.held.length\"\n"
+        "eval \"window.held = Array.from({length:100000}, (_,i) => "
+        "({index:i, text:'retained-'+i})); window.held.length\"\n"
         f"heap --out {heap_path}\n"
     )
     code, run, err = invoke(endpoint, capsys, "run", str(source))
@@ -180,19 +189,20 @@ async def test_stream_bytes_loss_and_cleanup(tmp_path):
 
     class CDP:
         def __init__(self):
-            self.callback = None
+            self.callback: Callable[[dict[str, Any]], None] | None = None
             self.closed = False
             self.reads = 0
 
         def on(self, event, callback, session):
-            self.callback = callback
+            self.callback: Callable[[dict[str, Any]], None] | None = callback
 
         def off(self, event, callback):
             assert callback is self.callback
             self.callback = None
 
-        async def send(self, method, params=None, **kwargs):
+        async def send(self, method, params: dict[str, Any] | None = None, **kwargs):
             if method == "Tracing.end":
+                assert self.callback is not None
                 self.callback({"stream": "42", "dataLossOccurred": True})
             if method == "IO.read":
                 self.reads += 1
@@ -202,6 +212,7 @@ async def test_stream_bytes_loss_and_cleanup(tmp_path):
                     "eof": True,
                 }
             if method == "IO.close":
+                assert params is not None
                 assert params["handle"] == "42"
                 self.closed = True
             return {}
@@ -231,18 +242,20 @@ def test_cli_preserves_run_outcome_and_loss(tmp_path, monkeypatch, capsys, fail)
 
     class CDP:
         def on(self, event, callback, session_id):
-            self.callback = callback
+            self.callback: Callable[[dict[str, Any]], None] | None = callback
 
         def off(self, event, callback):
             assert self.callback is callback
             self.callback = None
 
-        async def send(self, method, params=None, **kwargs):
+        async def send(self, method, params: dict[str, Any] | None = None, **kwargs):
             calls.append(method)
             if method == "Tracing.start":
+                assert params is not None
                 assert params["traceConfig"]["includedCategories"] == ["blink.user_timing"]
                 assert params["transferMode"] == "ReturnAsStream"
             if method == "Tracing.end":
+                assert self.callback is not None
                 self.callback({"stream": "19", "dataLossOccurred": True})
             if method == "IO.read":
                 return {"data": payload.decode(), "eof": True}
@@ -294,16 +307,17 @@ async def test_heap_collects_synchronous_chunks_and_restores_domain(tmp_path, ke
 
     class CDP:
         def on(self, event, callback, session):
-            self.callback = callback
+            self.callback: Callable[[dict[str, Any]], None] | None = callback
 
         def off(self, event, callback):
             assert callback is self.callback
             self.callback = None
 
-        async def send(self, method, params=None, **kwargs):
+        async def send(self, method, params: dict[str, Any] | None = None, **kwargs):
             calls.append(method)
             if method == "HeapProfiler.takeHeapSnapshot":
                 for part in [payload[:7], payload[7:20], payload[20:]]:
+                    assert self.callback is not None
                     self.callback({"chunk": part})
             return {}
 
@@ -327,21 +341,23 @@ async def test_trace_releases_subscription_and_stream_on_failure(tmp_path, failu
         callback = None
 
         def on(self, event, callback, session):
-            self.callback = callback
+            self.callback: Callable[[dict[str, Any]], None] | None = callback
 
         def off(self, event, callback):
             assert callback is self.callback
             self.callback = None
 
-        async def send(self, method, params=None, **kwargs):
+        async def send(self, method, params: dict[str, Any] | None = None, **kwargs):
             calls.append(method)
             if method == "Tracing.start":
+                assert params is not None
                 config = params["traceConfig"]
                 assert config["excludedCategories"] == ["*"]
                 assert config["includedCategories"] == list(captures.DEFAULT_CATEGORIES[1:])
                 if failure == "start":
                     raise CDPError(-32000, "already tracing")
             if method == "Tracing.end":
+                assert self.callback is not None
                 self.callback({"stream": "7", "dataLossOccurred": False})
             if method == "IO.read":
                 raise CDPError(-32000, "stream read failed")
@@ -372,15 +388,16 @@ async def test_heap_failure_releases_subscription_and_domain(tmp_path):
         callback = None
 
         def on(self, event, callback, session):
-            self.callback = callback
+            self.callback: Callable[[dict[str, Any]], None] | None = callback
 
         def off(self, event, callback):
             assert callback is self.callback
             self.callback = None
 
-        async def send(self, method, params=None, **kwargs):
+        async def send(self, method, params: dict[str, Any] | None = None, **kwargs):
             calls.append(method)
             if method == "HeapProfiler.takeHeapSnapshot":
+                assert self.callback is not None
                 self.callback({"chunk": "partial"})
                 raise CDPError(-32000, "snapshot failed")
             return {}

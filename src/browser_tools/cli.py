@@ -630,7 +630,9 @@ def _add_curated_verbs(
             capture.add_argument(
                 "--steps",
                 metavar="FILE",
-                help="Run a Step List inside the capture; the only shape that reaches an interaction",
+                help=(
+                    "Run a Step List inside the capture; the only shape that reaches an interaction"
+                ),
             )
             capture.add_argument(
                 "--timeout",
@@ -642,7 +644,10 @@ def _add_curated_verbs(
                 "--categories",
                 action="append",
                 metavar="LIST",
-                help="Replace the default DevTools category set; use --categories=LIST when it starts with a dash",
+                help=(
+                    "Replace the default DevTools category set; "
+                    "use --categories=LIST when it starts with a dash"
+                ),
             )
 
     screencast = sub.add_parser(

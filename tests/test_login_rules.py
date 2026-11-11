@@ -1,37 +1,23 @@
-"""Guards for the login test modules' own support code and size.
+"""Guards for the login test modules' own support code.
 
 The round-four review (Quality Q8, Reuse, A's nit) found the approved-login
 work leaving dead scaffolding behind in the two test modules it had modified:
 an orphan private helper method and unused local bindings - a repeat of the
-standing dead-code rule. ``F841`` is deliberately ignored in the repository's
-Ruff config and Pyright checks only ``src/``, so nothing rejected them.
+standing dead-code rule. The repository's Ruff now rejects an unused local
+binding everywhere, so only the private helper *methods* need a check here.
 
-The round-five review (Quality Q10) found the same class of unenforced
-written rule one level up: ``tests/test_login_live.py`` had grown past
-CONTRIBUTING.md's module-size guidance (~800 lines) with nothing rejecting
-an oversized module.
-
-These checks close exactly those gaps, and only those gaps: the first two
-enforce that private helper *methods* and *local variable bindings* in
+This check enforces that private helper methods in
 ``tests/test_login_cancellation.py`` and ``tests/test_login_ownership.py``
-are consumed, and the third enforces the size limit on the two whole-flow
-login modules, ``tests/test_login_live.py`` and ``tests/test_login_bridge.py``
-(the round-six Q10 extraction). This is not a repository-wide dead-code or
-size analysis, and it does not attempt to prove anything about untested
-runtime branches; the first two checks run from the ordinary
-``uv run pytest tests/`` invocation (and therefore CI), using the standard
-``vulture`` analyzer (a dev dependency) and the repository's existing Ruff,
-deliberately re-enabled for this one rule on these two files only, and the
-size check simply reads the two modules' actual line counts.
+are consumed. It is not a repository-wide dead-code analysis, and it does
+not attempt to prove anything about untested runtime branches; it runs from
+the ordinary ``uv run pytest tests/`` invocation (and therefore CI), using
+the standard ``vulture`` analyzer (a dev dependency).
 """
 
 from __future__ import annotations
 
-import subprocess
-import sys
 from pathlib import Path
 
-from module_size_rules import assert_modules_within_size_limit
 from vulture import Vulture
 
 from browser_tools import login as login_module
@@ -79,67 +65,3 @@ def test_login_test_modules_have_no_unused_private_helper_methods() -> None:
     )
 
 
-def test_login_test_modules_have_no_unused_local_bindings() -> None:
-    """Unused local variable bindings in the login test modules fail.
-
-    Runs the repository's own Ruff (through the current interpreter) with
-    ``--isolated --select F841`` on the same two test modules: the global
-    ``F841`` ignore stays untouched for the rest of the repository, and
-    this one scoped invocation still names every unused local in these
-    two files. An awaited call or other needed side effect stays; only
-    the unused *assignment* is rejected.
-    """
-    tests = Path(__file__).parent
-    completed = subprocess.run(
-        [
-            sys.executable, "-m", "ruff",
-            "check", "--isolated", "--select", "F841",
-            *(str(tests / name) for name in TEST_MODULES),
-        ],
-        capture_output=True,
-        text=True,
-    )
-    assert completed.returncode == 0, (
-        "unused local variable binding(s) in the login test modules:\n"
-        f"{completed.stdout}{completed.stderr}"
-        "Remove the unused assignment, keeping the awaited call or other "
-        "needed side effect (assign to the name only when it is read, or "
-        "drop the name entirely); never delete an assertion or a wait"
-    )
-
-
-#: The two whole-flow login test modules kept under the size limit, oldest
-#: first: the limit is checked against the actual files (so a missing module
-#: is itself a failure), and the long-lived ``test_login_live.py`` is named
-#: first so an oversized live module is reported for what it is - extraction
-#: overdue - rather than as a missing ``test_login_bridge.py``.
-SIZE_MODULES = (
-    "test_login_live.py",
-    "test_login_bridge.py",
-)
-
-
-def test_login_test_modules_stay_under_the_module_size_limit() -> None:
-    """A login test module over the size limit fails, named with its count.
-
-    Reads the actual current files rather than any snapshot, so the guard
-    holds for every future change to the two whole-flow login modules: an
-    oversized one is reported with its real line count and the instruction
-    CONTRIBUTING.md already gives - extract a cohesive set of symbols into
-    a new test module - never a license to delete a case to fit the limit.
-    """
-    tests = Path(__file__).parent
-    assert_modules_within_size_limit(
-        tests,
-        SIZE_MODULES,
-        path_prefix="tests/",
-        missing_message=(
-            "the whole-flow login tests are organized as exactly these two modules"
-        ),
-        oversize_remedy=(
-            "extract a cohesive set of symbols into a new test module and "
-            "migrate the references to it, keeping every collected case "
-            "exactly once (do not re-export test classes; pytest would "
-            "collect them twice)"
-        ),
-    )

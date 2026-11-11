@@ -14,7 +14,7 @@ import errno
 import json
 import os
 import stat
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from onepassword_lifecycle_fixtures import DEST_NAME, HOSTS
@@ -72,7 +72,7 @@ def _fail_os_open(
     """
     real_open = os.open
 
-    def failing(path: object, flags: int, *args: object, **kwargs: object) -> object:
+    def failing(path: Any, flags: int, *args: Any, **kwargs: Any) -> object:
         if matches(path, kwargs):
             raise error
         return real_open(path, flags, *args, **kwargs)
@@ -241,7 +241,7 @@ class TestSeedPin:
         session.mkdir()
         real_mkdir = os.mkdir
 
-        def failing_mkdir(path: object, *args: object, **kwargs: object) -> None:
+        def failing_mkdir(path: Any, *args: Any, **kwargs: Any) -> None:
             if kwargs.get("dir_fd") is not None and path == "Default":
                 raise OSError(errno.EACCES, "synthetic default create failure")
             real_mkdir(path, *args, **kwargs)
@@ -267,7 +267,7 @@ class TestSeedPin:
         (session / "Default").mkdir()
         real_stat = os.stat
 
-        def failing_stat(path: object, *args: object, **kwargs: object):
+        def failing_stat(path: Any, *args: Any, **kwargs: Any):
             if kwargs.get("dir_fd") is not None and path == "Preferences":
                 raise OSError(failure_errno, f"synthetic verify failure {failure_errno}")
             return real_stat(path, *args, **kwargs)
@@ -308,7 +308,7 @@ class TestSeedPin:
         else:
             real_link = os.link
 
-            def failing_link(src: object, dst: object, *args: object, **kwargs: object) -> None:
+            def failing_link(src: Any, dst: Any, *args: Any, **kwargs: Any) -> None:
                 if kwargs.get("src_dir_fd") is not None and dst == "Preferences":
                     raise OSError(errno.EPERM, message)
                 real_link(src, dst, *args, **kwargs)
@@ -334,7 +334,7 @@ class TestSeedPin:
         _preferences(session).write_text(original)
         real_stat = os.stat
 
-        def failing_stat(path: object, *args: object, **kwargs: object):
+        def failing_stat(path: Any, *args: Any, **kwargs: Any):
             if kwargs.get("dir_fd") is not None and path == "Preferences":
                 raise OSError(errno.EACCES, "synthetic verify failure")
             return real_stat(path, *args, **kwargs)

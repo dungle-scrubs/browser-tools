@@ -21,6 +21,9 @@ uv run ruff check src/ tests/
 # Run type checks
 uv run pyright src/
 
+# Run type checks over the tests
+uv run pyright -p tests
+
 # Run tests
 uv run pytest tests/ -q
 
@@ -61,8 +64,9 @@ uv run pre-commit install
 ## Module Size
 
 Modules should stay under ~800 lines. When a module exceeds this, extract
-a cohesive set of symbols into a new module and re-export from the original
-for backward compatibility.
+a cohesive set of symbols into a new module, move every reference to it, and
+leave no re-export. Files already over the limit are listed with a ceiling in
+`tests/test_module_size.py`, and the ceiling only goes down.
 
 ## Architecture
 

@@ -86,8 +86,15 @@ class FakeSession:
 
     def call_tool(self, tool: str, args: dict[str, Any] | None = None) -> dict[str, Any]:
         self.calls.append((tool, args or {}))
+        args = args or {}
         if tool == "navigate":
-            return {"result": {"title": "T", "url": args["url"], "interstitial": {"detected": False}}}
+            return {
+                "result": {
+                    "title": "T",
+                    "url": args["url"],
+                    "interstitial": {"detected": False},
+                }
+            }
         if tool == "snapshot":
             return {"result": {"tree": self._tree}}
         if tool == "evaluate":
@@ -157,9 +164,11 @@ _NATIVE_AX_TREE = {
         {"nodeId": "1", "role": {"value": "RootWebArea"}, "name": {"value": "Parity Form Page"},
          "childIds": ["2", "3"], "backendDOMNodeId": 1, "ignored": False},
         {"nodeId": "2", "parentId": "1", "role": {"value": "heading"},
-         "name": {"value": "Parity Form Page"}, "childIds": [], "backendDOMNodeId": 2, "ignored": False},
+         "name": {"value": "Parity Form Page"}, "childIds": [],
+         "backendDOMNodeId": 2, "ignored": False},
         {"nodeId": "3", "parentId": "1", "role": {"value": "textbox"}, "name": {"value": "Email"},
-         "value": {"value": "current@value.com"}, "childIds": [], "backendDOMNodeId": 3, "ignored": False},
+         "value": {"value": "current@value.com"}, "childIds": [],
+         "backendDOMNodeId": 3, "ignored": False},
         {"nodeId": "4", "parentId": "1", "role": {"value": "presentation"}, "name": {"value": ""},
          "childIds": [], "backendDOMNodeId": 4, "ignored": True},
     ]

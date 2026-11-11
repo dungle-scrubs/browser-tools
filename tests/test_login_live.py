@@ -67,7 +67,9 @@ class TestRefusalDiagnostics:
                     pair = await real_read(*read_args)
                     await cdp.send(
                         method="Runtime.evaluate", session_id=session_id,
-                        params={"expression": "document.querySelector('#username').disabled = true"},
+                        params={
+                            "expression": "document.querySelector('#username').disabled = true"
+                        },
                     )
                     return pair
 
@@ -281,15 +283,23 @@ class TestTheWholeFlow:
         assert site.posts == []
         assert not any("?" in path for path in site.gets[before:])
 
-    @pytest.mark.parametrize("change", ["hidden-user", "hidden-password", "hidden-submit", "disabled-fieldset"])
+    @pytest.mark.parametrize(
+        "change", ["hidden-user", "hidden-password", "hidden-submit", "disabled-fieldset"]
+    )
     def test_unusable_fields_are_refused(
         self, site, disposable, fake_relay, tmp_path, monkeypatch, capfd, change
     ):
         page = LOGIN_PAGE
         if change == "disabled-fieldset":
-            page = page.replace('<input id="username"', '<fieldset disabled><input id="username"').replace('</form>', '</fieldset></form>')
+            page = page.replace(
+                '<input id="username"', '<fieldset disabled><input id="username"'
+            ).replace('</form>', '</fieldset></form>')
         else:
-            identifier = {"hidden-user": "username", "hidden-password": "password", "hidden-submit": "go"}[change]
+            identifier = {
+                "hidden-user": "username",
+                "hidden-password": "password",
+                "hidden-submit": "go",
+            }[change]
             page = page.replace(f'id="{identifier}"', f'id="{identifier}" style="display:none"')
         monkeypatch.setattr(site, "page", page)
         _navigate_to(site, disposable)
@@ -494,9 +504,15 @@ class TestFormSemantics:
         )
         empty_action = "\t\n\f\r " if case.startswith("html-space") else ""
         if case == "omitted":
-            form = f'<form method="post">{inputs}<button type="submit" id="go">Sign in</button></form>'
+            form = (
+                f'<form method="post">{inputs}'
+                f'<button type="submit" id="go">Sign in</button></form>'
+            )
         elif case in {"empty", "html-space"}:
-            form = f'<form method="post" action="{empty_action}">{inputs}<button type="submit" id="go">Sign in</button></form>'
+            form = (
+                f'<form method="post" action="{empty_action}">{inputs}'
+                f'<button type="submit" id="go">Sign in</button></form>'
+            )
         else:
             form = (
                 '<form method="post" action="/login">' + inputs +

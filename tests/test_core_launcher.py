@@ -219,7 +219,8 @@ class TestProfilePreferences:
             b'{"homepage": "https://example.test/", "synthetic_overflow": 1e999}',
             b'{"homepage": "https://example.test/", "synthetic_overflow": -1e999}',
             b'{"homepage": "https://example.test/", "credentials_enable_service": 1e999}',
-            b'{"homepage": "https://example.test/", "profile": {"password_manager_enabled": 1e999}}',
+            b'{"homepage": "https://example.test/", '
+            b'"profile": {"password_manager_enabled": 1e999}}',
         ],
     )
     def test_unrepresentable_numeric_overflow_aborts_before_spawn_and_leaves_no_staging(

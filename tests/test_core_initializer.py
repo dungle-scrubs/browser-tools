@@ -19,6 +19,10 @@ import sys
 import threading
 import types
 from pathlib import Path
+from typing import TYPE_CHECKING, Any, TypedDict
+
+if TYPE_CHECKING:
+    from browser_tools.core.registry import InstanceInfo
 
 import pytest
 from launcher_spawn_helpers import discard_spawn_environment
@@ -26,6 +30,17 @@ from launcher_spawn_helpers import discard_spawn_environment
 from browser_tools import session_initialization
 from browser_tools.core import launcher
 from browser_tools.core.connection import PortStatus
+
+
+class _Boundaries(TypedDict):
+    """The stubbed boundaries a witness reads back.
+
+    A typed mapping rather than ``dict[str, object]``, so the order log and
+    the session root keep their own types.
+    """
+
+    order: list[str]
+    sessions_root: Path
 
 
 class _FakeProcess:
@@ -45,7 +60,7 @@ def stubbed_boundaries(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     synthetic_spawn_environment: dict[str, str],
-) -> dict[str, object]:
+) -> _Boundaries:
     """Stub spawn/CDP/sweep; keep allocation, preferences and the registry real."""
     order: list[str] = []
     sessions_root = tmp_path / "sessions"
@@ -111,9 +126,10 @@ def _launch(
 
 def _is_marker_staging(path: object) -> bool:
     """Report whether ``path`` is a marker publication staging name."""
-    try:
-        name = os.path.basename(os.fspath(path))
-    except TypeError:
+    if not isinstance(path, (str, bytes, os.PathLike)):
+        return False
+    name = os.path.basename(os.fspath(path))
+    if not isinstance(name, str):
         return False
     return name.startswith(f"{session_initialization.INITIALIZING_MARKER}-") and name.endswith(
         ".tmp"
@@ -122,7 +138,7 @@ def _is_marker_staging(path: object) -> bool:
 
 class TestInitializerOrdering:
     def test_the_initializer_runs_between_sweep_preferences_and_spawn(
-        self, monkeypatch: pytest.MonkeyPatch, stubbed_boundaries: dict[str, object], tmp_path: Path
+        self, monkeypatch: pytest.MonkeyPatch, stubbed_boundaries: _Boundaries, tmp_path: Path
     ) -> None:
         seen: dict[str, Path] = {}
 
@@ -142,7 +158,7 @@ class TestInitializerOrdering:
         ]
 
     def test_the_initializer_receives_a_freshly_allocated_directory(
-        self, monkeypatch: pytest.MonkeyPatch, stubbed_boundaries: dict[str, object], tmp_path: Path
+        self, monkeypatch: pytest.MonkeyPatch, stubbed_boundaries: _Boundaries, tmp_path: Path
     ) -> None:
         seen: list[Path] = []
 
@@ -163,7 +179,7 @@ class TestInitializerOrdering:
 
 class TestOwnedFailures:
     def test_an_initializer_failure_removes_only_the_freshly_allocated_directory(
-        self, monkeypatch: pytest.MonkeyPatch, stubbed_boundaries: dict[str, object], tmp_path: Path
+        self, monkeypatch: pytest.MonkeyPatch, stubbed_boundaries: _Boundaries, tmp_path: Path
     ) -> None:
         allocated: list[Path] = []
 
@@ -178,7 +194,7 @@ class TestOwnedFailures:
         assert not allocated[0].exists()
 
     def test_an_initializer_interruption_removes_the_freshly_allocated_directory(
-        self, monkeypatch: pytest.MonkeyPatch, stubbed_boundaries: dict[str, object], tmp_path: Path
+        self, monkeypatch: pytest.MonkeyPatch, stubbed_boundaries: _Boundaries, tmp_path: Path
     ) -> None:
         allocated: list[Path] = []
 
@@ -193,7 +209,7 @@ class TestOwnedFailures:
         assert not allocated[0].exists()
 
     def test_a_failure_never_removes_a_supplied_user_data_dir(
-        self, monkeypatch: pytest.MonkeyPatch, stubbed_boundaries: dict[str, object], tmp_path: Path
+        self, monkeypatch: pytest.MonkeyPatch, stubbed_boundaries: _Boundaries, tmp_path: Path
     ) -> None:
         supplied = tmp_path / "named-profile"
         supplied.mkdir()
@@ -209,7 +225,7 @@ class TestOwnedFailures:
         assert (supplied / "keep.txt").read_text() == "profile state"
 
     def test_a_preference_failure_removes_the_freshly_allocated_directory(
-        self, monkeypatch: pytest.MonkeyPatch, stubbed_boundaries: dict[str, object], tmp_path: Path
+        self, monkeypatch: pytest.MonkeyPatch, stubbed_boundaries: _Boundaries, tmp_path: Path
     ) -> None:
         def failing_prepare(path) -> None:
             raise RuntimeError("synthetic preference failure")
@@ -233,7 +249,7 @@ class TestOwnedFailures:
     def test_a_failed_cleanup_preserves_the_original_error_and_the_retained_path(
         self,
         monkeypatch: pytest.MonkeyPatch,
-        stubbed_boundaries: dict[str, object],
+        stubbed_boundaries: _Boundaries,
         tmp_path: Path,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
@@ -253,7 +269,7 @@ class TestOwnedFailures:
         assert str(retained[0]) in caplog.text
 
     def test_a_failure_after_spawn_leaves_the_session_directory_alone(
-        self, monkeypatch: pytest.MonkeyPatch, stubbed_boundaries: dict[str, object], tmp_path: Path
+        self, monkeypatch: pytest.MonkeyPatch, stubbed_boundaries: _Boundaries, tmp_path: Path
     ) -> None:
         dead_process = _FakeProcess(returncode=1)
         registry = str(tmp_path / "registry.json")
@@ -279,7 +295,7 @@ class TestProtectedPublication:
     def test_a_publication_failure_aborts_before_the_initializer_and_spawn(
         self,
         monkeypatch: pytest.MonkeyPatch,
-        stubbed_boundaries: dict[str, object],
+        stubbed_boundaries: _Boundaries,
         tmp_path: Path,
         boundary: types.ModuleType,
         name: str,
@@ -296,12 +312,12 @@ class TestProtectedPublication:
         real_flock = fcntl.flock
         staged: list[object] = []
 
-        def failing_open(path: object, flags: int, *args: object, **kwargs: object) -> object:
+        def failing_open(path: str | bytes, flags: int, *args: int, **kwargs: Any) -> int:
             if _is_marker_staging(path):
                 raise OSError(f"synthetic {name} failure")
             return real_open(path, flags, *args, **kwargs)
 
-        def recording_open(path: object, flags: int, *args: object, **kwargs: object) -> object:
+        def recording_open(path: str | bytes, flags: int, *args: int, **kwargs: Any) -> int:
             fd = real_open(path, flags, *args, **kwargs)
             if _is_marker_staging(path):
                 staged.append(path)
@@ -348,7 +364,7 @@ class TestProtectedPublication:
     def test_a_publication_failure_preserves_its_error_when_cleanup_also_fails(
         self,
         monkeypatch: pytest.MonkeyPatch,
-        stubbed_boundaries: dict[str, object],
+        stubbed_boundaries: _Boundaries,
         tmp_path: Path,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
@@ -424,7 +440,7 @@ class TestInitializationMarker:
         monkeypatch.setattr(launcher, "check_cdp_port_async", fake_check_cdp_port_async)
 
         registry = str(tmp_path / "registry.json")
-        outcome: list[object] = []
+        outcome: list[InstanceInfo] = []
 
         def run_launch():
             outcome.append(
@@ -554,7 +570,7 @@ class TestInitializationMarker:
         assert target.read_text() == ""
 
     def test_a_supplied_directory_gets_no_marker(
-        self, monkeypatch: pytest.MonkeyPatch, stubbed_boundaries: dict[str, object], tmp_path: Path
+        self, monkeypatch: pytest.MonkeyPatch, stubbed_boundaries: _Boundaries, tmp_path: Path
     ) -> None:
         supplied = tmp_path / "named-profile"
         supplied.mkdir()
@@ -566,7 +582,7 @@ class TestInitializationMarker:
         assert not (supplied / session_initialization.INITIALIZING_MARKER).exists()
 
     def test_a_successful_launch_leaves_no_marker_behind(
-        self, monkeypatch: pytest.MonkeyPatch, stubbed_boundaries: dict[str, object], tmp_path: Path
+        self, monkeypatch: pytest.MonkeyPatch, stubbed_boundaries: _Boundaries, tmp_path: Path
     ) -> None:
         registry = str(tmp_path / "registry.json")
         info = _launch(registry, 9491, initialize_directory=lambda d: None)
@@ -674,7 +690,7 @@ class TestStartupLease:
     def test_the_lease_is_held_through_registration_and_released_on_return(
         self,
         monkeypatch: pytest.MonkeyPatch,
-        stubbed_boundaries: dict[str, object],
+        stubbed_boundaries: _Boundaries,
         tmp_path: Path,
     ) -> None:
         """The marker is still locked when the instance is registered, and no
@@ -682,7 +698,7 @@ class TestStartupLease:
         held_at_registration: list[bool] = []
         real_register = launcher.register
 
-        def recording_register(**kwargs: object) -> object:
+        def recording_register(**kwargs: Any) -> Any:
             held_at_registration.append(
                 session_initialization.initialization_marker_holds(str(kwargs["user_data_dir"]))
             )
@@ -699,7 +715,7 @@ class TestStartupLease:
     def test_a_readiness_failure_releases_the_lease_and_keeps_the_directory(
         self,
         monkeypatch: pytest.MonkeyPatch,
-        stubbed_boundaries: dict[str, object],
+        stubbed_boundaries: _Boundaries,
         tmp_path: Path,
     ) -> None:
         """After a spawn may have begun no directory deletion happens; the
@@ -722,7 +738,7 @@ class TestStartupLease:
     def test_a_readiness_cancellation_releases_the_lease_and_keeps_the_directory(
         self,
         monkeypatch: pytest.MonkeyPatch,
-        stubbed_boundaries: dict[str, object],
+        stubbed_boundaries: _Boundaries,
         tmp_path: Path,
     ) -> None:
         """A launch cancelled while readiness is awaited unwinds through the

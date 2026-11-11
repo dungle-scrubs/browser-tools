@@ -308,7 +308,10 @@ class TestSend:
         fake_transport()
         with pytest.raises(LifecycleError):
             passthrough.send(
-                instance="ghost", method="Page.enable", params_json=None, registry_path=registry_path
+                instance="ghost",
+                method="Page.enable",
+                params_json=None,
+                registry_path=registry_path,
             )
 
     def test_malformed_json_params_is_usage_error(self, registry_path, fake_transport):

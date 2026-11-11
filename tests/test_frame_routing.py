@@ -21,7 +21,10 @@ asserted here rather than left to the live run.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
+
+if TYPE_CHECKING:
+    from browser_tools.core.cdp_client import CDPClient
 
 import pytest
 
@@ -46,7 +49,13 @@ class Wire:
     def __init__(self) -> None:
         self.sent: list[tuple[str, str | None, dict[str, Any] | None]] = []
 
-    async def send(self, method, params=None, session_id=None, timeout=None):
+    async def send(
+        self,
+        method: str,
+        params: dict[str, Any] | None = None,
+        session_id: str | None = None,
+        timeout: float | None = None,
+    ) -> dict[str, Any]:
         self.sent.append((method, session_id, params))
         if method == "Network.getCookies":
             return {"cookies": []}
@@ -247,10 +256,20 @@ class TimelineClient(Wire):
         self.timeline: list[str] = []
         self.handlers: list[tuple[str, str | None, Any]] = []
 
-    async def send(self, method, params=None, session_id=None, timeout=None):
+    async def send(
+        self,
+        method: str,
+        params: dict[str, Any] | None = None,
+        session_id: str | None = None,
+        timeout: float | None = None,
+    ) -> dict[str, Any]:
         self.timeline.append(f"send:{method}")
         if method == "Page.getFrameTree":
-            return {"frameTree": {"frame": {"id": "CHILD", "parentId": "ROOT", "url": "http://o/"}}}
+            return {
+                "frameTree": {
+                    "frame": {"id": "CHILD", "parentId": "ROOT", "url": "http://o/"}
+                }
+            }
         return await super().send(method, params, session_id, timeout)
 
     def on(self, event, handler, session_id=None) -> None:
@@ -277,7 +296,12 @@ class TestAChildsContextsAreFiledUnderItsOwnSession:
         child path is the same mistake in a new place.
         """
         client = TimelineClient()
-        sessions = FrameSessions(client, _root_only(), "PAGE-SESSION", "PAGE-TARGET")
+        sessions = FrameSessions(
+            cast("CDPClient", client),
+            _root_only(),
+            "PAGE-SESSION",
+            "PAGE-TARGET",
+        )
         sessions._on_attached(
             {
                 "sessionId": "S1",
@@ -299,7 +323,7 @@ class TestAChildsContextsAreFiledUnderItsOwnSession:
         """
         frames = _page_with_child("S1")
         client = TimelineClient()
-        sessions = FrameSessions(client, frames, "PAGE-SESSION", "PAGE-TARGET")
+        sessions = FrameSessions(cast("CDPClient", client), frames, "PAGE-SESSION", "PAGE-TARGET")
         sessions._subscribe_runtime("S1")
 
         client.handler_for("Runtime.executionContextCreated", "S1")(

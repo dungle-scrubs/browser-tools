@@ -27,7 +27,10 @@ import os
 import stat
 import threading
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypedDict
+
+if TYPE_CHECKING:
+    from browser_tools.core.registry import InstanceInfo
 
 import pytest
 from launcher_spawn_helpers import discard_spawn_environment
@@ -170,7 +173,23 @@ def _unusable_mutex(root: Path, inability: str) -> Path | None:
     return invalid
 
 
-def _launch_kwargs(tmp_path: Path, port: int) -> dict[str, object]:
+class _LaunchKwargs(TypedDict, total=False):
+    """The synthetic launch arguments every witness shares.
+
+    A typed mapping rather than ``dict[str, object]``, so the launch call
+    it is unpacked into keeps its parameter types.
+    """
+
+    binary: str
+    port_override: int
+    headless: bool
+    window_border: bool
+    working_dir: str
+    registry_path: str
+    initialize_directory: Callable[[Path], None]
+
+
+def _launch_kwargs(tmp_path: Path, port: int) -> _LaunchKwargs:
     """The shared synthetic launch arguments every witness uses."""
     return {
         "binary": "synthetic-chrome",
@@ -192,7 +211,7 @@ class _LaunchThread:
         port: int,
         initialize_directory: Callable[[Path], None] | None,
     ) -> None:
-        self.outcomes: list[object] = []
+        self.outcomes: list[InstanceInfo] = []
         self.errors: list[BaseException] = []
         self._started = False
         self._thread = threading.Thread(target=self._run, name=name)
@@ -216,7 +235,7 @@ class _LaunchThread:
         self._thread.join(15)
         assert not self._thread.is_alive(), f"creator {self._thread.name} never finished"
 
-    def result(self) -> object:
+    def result(self) -> InstanceInfo:
         if self.errors:
             raise self.errors[0]
         assert self.outcomes, "the creator finished without an outcome"
@@ -448,7 +467,9 @@ class TestPublicationRace:
         sweeper = threading.Thread(target=sweep, name="sweeper")
         sweeper_started = False
         monkeypatch.setattr(os, "open", opening)
-        monkeypatch.setattr(launcher.subprocess, "Popen", _spawn_double(synthetic_spawn_environment))
+        monkeypatch.setattr(
+            launcher.subprocess, "Popen", _spawn_double(synthetic_spawn_environment)
+        )
         monkeypatch.setattr(launcher, "check_cdp_port_async", _ready)
 
         creator.start()
@@ -529,7 +550,9 @@ class TestPublicationRace:
 
         sweeper = threading.Thread(target=sweep, name="sweeper")
         monkeypatch.setattr(launcher.shutil, "rmtree", pausing_rmtree)
-        monkeypatch.setattr(launcher.subprocess, "Popen", _spawn_double(synthetic_spawn_environment))
+        monkeypatch.setattr(
+            launcher.subprocess, "Popen", _spawn_double(synthetic_spawn_environment)
+        )
         monkeypatch.setattr(launcher, "check_cdp_port_async", _ready)
 
         sweeper.start()
@@ -586,7 +609,9 @@ class TestCriticalSectionBoundaries:
             (directory / "prepared-registration.json").write_text('{"synthetic": true}')
 
         creator = _LaunchThread("creator", tmp_path, 9503, initialize)
-        monkeypatch.setattr(launcher.subprocess, "Popen", _spawn_double(synthetic_spawn_environment))
+        monkeypatch.setattr(
+            launcher.subprocess, "Popen", _spawn_double(synthetic_spawn_environment)
+        )
         monkeypatch.setattr(launcher, "check_cdp_port_async", _ready)
 
         creator.start()
@@ -691,10 +716,10 @@ class TestInabilityPolicies:
         monkeypatch.setattr(launcher.subprocess, "Popen", spawn)
         monkeypatch.setattr(launcher, "check_cdp_port_async", _ready)
 
+        launch_kwargs = _launch_kwargs(tmp_path, port)
+        launch_kwargs["initialize_directory"] = initialize
         with pytest.raises(OSError):
-            asyncio.run(launcher.launch_browser(**_launch_kwargs(tmp_path, port) | {
-                "initialize_directory": initialize,
-            }))
+            asyncio.run(launcher.launch_browser(**launch_kwargs))
 
         assert ran == []
         assert list(root.glob("session-*")) == []
@@ -713,7 +738,9 @@ class TestInabilityPolicies:
         root = tmp_path / "sessions"
         blocked = _blocking_mutex(root)
         monkeypatch.setattr(launcher, "_SESSION_ROOT", str(root))
-        monkeypatch.setattr(launcher.subprocess, "Popen", _spawn_double(synthetic_spawn_environment))
+        monkeypatch.setattr(
+            launcher.subprocess, "Popen", _spawn_double(synthetic_spawn_environment)
+        )
         monkeypatch.setattr(launcher, "check_cdp_port_async", _ready)
 
         instance = asyncio.run(launcher.launch_browser(**_launch_kwargs(tmp_path, 9505)))

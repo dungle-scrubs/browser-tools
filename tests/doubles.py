@@ -128,7 +128,8 @@ class FakeHandler(HandlerSurface):
         self.deadlines.append(deadline)
         self.log.append(("deadline", deadline is not None))
 
-    def require_session(self):
+    def require_session(self) -> tuple[Any, str]:
+        assert self.session is not None, "the double always has a session"
         return self.session
 
     def stop(self) -> None:

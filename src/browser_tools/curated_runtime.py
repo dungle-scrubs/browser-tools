@@ -172,19 +172,23 @@ async def evaluate(
 
 def wait_text_expression(substring: str, timeout_ms: int) -> str:
     """Check and install the observer in one JS task, with no subscription gap."""
-    return """new Promise((resolve) => {
+    js = """new Promise((resolve) => {
       const start = performance.now();
       const substring = SUBSTRING;
       const present = () => (document.body?.innerText ?? '').includes(substring);
       const result = found => ({found, substring, waitedMs: Math.round(performance.now()-start)});
       if (present()) { resolve(result(true)); return; }
       let timer;
-      const finish = found => { observer.disconnect(); clearTimeout(timer); resolve(result(found)); };
+      const finish = found => {
+        observer.disconnect(); clearTimeout(timer); resolve(result(found));
+      };
       const observer = new MutationObserver(() => { if (present()) finish(true); });
-      observer.observe(document, {subtree:true, childList:true, characterData:true, attributes:true});
+      observer.observe(
+        document, {subtree:true, childList:true, characterData:true, attributes:true});
       timer = setTimeout(() => finish(present()), TIMEOUT);
       if (present()) finish(true);
-    })""".replace("TIMEOUT", str(timeout_ms)).replace("SUBSTRING", json.dumps(substring))
+    })"""
+    return js.replace("TIMEOUT", str(timeout_ms)).replace("SUBSTRING", json.dumps(substring))
 
 
 async def wait_text(

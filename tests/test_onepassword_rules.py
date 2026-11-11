@@ -9,7 +9,6 @@ import sys
 from pathlib import Path
 
 import pytest
-from module_size_rules import assert_modules_within_size_limit
 
 from browser_tools import lifecycle, onepassword, onepassword_setup, session_initialization
 from browser_tools.core import launcher
@@ -31,34 +30,6 @@ def test_module_scoped_fixtures_already_see_the_absent_synthetic_source(
     assert official_source_at_module_scope == onepassword.source_manifest_path()
     assert "Library/Application Support" not in str(official_source_at_module_scope)
     assert not official_source_at_module_scope.exists()
-
-
-def test_onepassword_module_respects_the_written_line_limit() -> None:
-    """Enable E501 for the new module without changing the legacy exclusions."""
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "ruff",
-            "check",
-            "--isolated",
-            "--select",
-            "E501",
-            "--line-length",
-            "100",
-            onepassword.__file__,
-            onepassword_setup.__file__,
-            session_initialization.__file__,
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert result.returncode == 0, (
-        "onepassword.py, onepassword_setup.py or session_initialization.py "
-        "breaks CONTRIBUTING.md's 100-character line limit. Run ruff format "
-        "and split any remaining long literals.\n" + result.stdout + result.stderr
-    )
 
 
 @pytest.mark.parametrize(
@@ -371,80 +342,6 @@ def test_launcher_spawn_helpers_reject_guard_is_fully_annotated() -> None:
         "CONTRIBUTING.md requires type annotations on all public functions. "
         "The suite-wide spawn reject guard is a public boundary shared by "
         "every spawn double. Unannotated or undocumented: " + "; ".join(problems)
-    )
-
-
-#: The 1Password lifecycle test modules, the long-lived one first so an
-#: oversized lifecycle module is named for extraction rather than reported as
-#: a missing new file. The spawn-helper module joined the group when the
-#: reject guard moved out of ``conftest.py`` (whole-suite collection), so its
-#: size is held to the same written limit.
-SIZE_MODULES = (
-    "test_onepassword_lifecycle.py",
-    "test_onepassword_cli.py",
-    "onepassword_lifecycle_fixtures.py",
-    "test_onepassword_temporary.py",
-    "test_onepassword_pin.py",
-    "test_core_initializer.py",
-    "test_session_root_mutex.py",
-    "launcher_spawn_helpers.py",
-)
-
-
-#: The #201 source modules the scoped size limit covers, the long-lived
-#: adapted launcher first so an oversized launcher is named for extraction
-#: rather than as a missing new module.
-SOURCE_SIZE_MODULES = (
-    "core/launcher.py",
-    "onepassword_setup.py",
-    "session_initialization.py",
-)
-
-
-def test_onepassword_source_modules_stay_under_the_module_size_limit() -> None:
-    """Keep the #201 source modules within CONTRIBUTING.md's written limit.
-
-    The adapted vendored launcher grew to 823 lines in 683749f, repeating the
-    module-size mistake class of the round-two 812-line lifecycle tests with
-    nothing enforcing it for the source modules. Reads the actual files, the
-    long-lived launcher first.
-    """
-    package = Path(onepassword.__file__).parent
-    assert_modules_within_size_limit(
-        package,
-        SOURCE_SIZE_MODULES,
-        path_prefix="src/browser_tools/",
-        missing_message="the #201 setup source is organized as exactly these modules",
-        oversize_remedy=(
-            "extract a cohesive set of symbols into a new module and migrate "
-            "every caller and test reference to it, without a re-export from "
-            "the old module (a compatibility path would let the size grow "
-            "back unnoticed)"
-        ),
-    )
-
-
-def test_onepassword_test_modules_stay_under_the_module_size_limit() -> None:
-    """Keep the 1Password lifecycle test modules within the written size limit.
-
-    Reads the actual files, the long-lived lifecycle module first. The #201
-    round-two review found it at 812 lines against CONTRIBUTING.md's ~800-line
-    limit (owned by ``tests/module_size_rules.py``, as for the login tests).
-    """
-    tests = Path(__file__).parent
-    assert_modules_within_size_limit(
-        tests,
-        SIZE_MODULES,
-        path_prefix="tests/",
-        missing_message=(
-            "the 1Password lifecycle tests are organized as exactly these modules"
-        ),
-        oversize_remedy=(
-            "extract a cohesive set of symbols into a new test module and "
-            "migrate the references to it, keeping every collected case "
-            "exactly once (do not re-export test classes; pytest would "
-            "collect them twice)"
-        ),
     )
 
 

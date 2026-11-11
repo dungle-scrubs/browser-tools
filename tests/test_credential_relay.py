@@ -47,12 +47,12 @@ SENTINEL_USER = "SENTINEL-user\n\u00e9"
 SENTINEL_PASS = "SENTINEL-pass\n\nwith blank line"
 
 
-def write_fake(bin_dir: Path, name: str, body: str) -> Path:
+def write_fake(bin_dir: Path, name: str, body: str) -> str:
     """Write one executable fake; returns its path."""
     path = bin_dir / name
     path.write_text(textwrap.dedent(body.lstrip("\n")).replace("SYSEXEC", sys.executable))
     path.chmod(0o755)
-    return path
+    return str(path)
 
 
 def good_relay_body(values: dict[str, str] | None = None) -> str:
@@ -790,7 +790,9 @@ class TestPathLookup:
     def test_find_opchain_reads_path(self, bin_dir, monkeypatch):
         write_fake(bin_dir, "opchain", good_relay_body())
         monkeypatch.setenv("PATH", str(bin_dir) + os.pathsep + os.environ.get("PATH", ""))
-        assert find_opchain() is not None and find_opchain().endswith("opchain")
+        found = find_opchain()
+        assert found is not None
+        assert found.endswith("opchain")
 
     def test_find_opchain_missing(self, bin_dir, monkeypatch):
         monkeypatch.setenv("PATH", str(bin_dir))

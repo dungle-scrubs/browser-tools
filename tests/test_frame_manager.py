@@ -93,6 +93,7 @@ class TestFrameTreeParsing:
     def test_nested_children(self, fm: FrameManager) -> None:
         """Nested iframes should be children of their parent."""
         tree = fm.get_frame_tree()
+        assert tree is not None
         iframe1 = next(c for c in tree["children"] if c["frameId"] == "IFRAME1")
         assert len(iframe1["children"]) == 1
         assert iframe1["children"][0]["frameId"] == "NESTED1"

@@ -36,6 +36,10 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import dataclass
+from typing import TYPE_CHECKING, cast
+
+if TYPE_CHECKING:
+    from browser_tools.core.cdp_client import CDPClient
 
 from browser_tools import cli, user_settings
 from browser_tools.core import launcher, supervisor
@@ -200,8 +204,14 @@ class TestSupervisorBuildsOverlayWhenBorderOn:
 
     def test_border_ids_are_stable_per_instance(self):
         """A restarted supervisor must find the border an earlier one drew."""
-        assert supervisor.BorderIds.for_instance("a-01") == supervisor.BorderIds.for_instance("a-01")
-        assert supervisor.BorderIds.for_instance("a-01") != supervisor.BorderIds.for_instance("b-01")
+        assert (
+            supervisor.BorderIds.for_instance("a-01")
+            == supervisor.BorderIds.for_instance("a-01")
+        )
+        assert (
+            supervisor.BorderIds.for_instance("a-01")
+            != supervisor.BorderIds.for_instance("b-01")
+        )
 
     def test_border_off_builds_no_marker(self, monkeypatch):
         assert self._run_supervisor_once(monkeypatch, draw_border=False)["scripts"] is None
@@ -240,9 +250,13 @@ class TestBorderSettingIsAppliedToMarkedTabs:
         cdp, scripts = _FakeCDP(), self._scripts()
         mark = supervisor.TabMark(session_id="S1")
         border = supervisor.BorderSetting(lambda: True)
-        asyncio.run(supervisor._setup_session(cdp, "S1", scripts, mark, border))
+        asyncio.run(supervisor._setup_session(cast("CDPClient", cdp), "S1", scripts, mark, border))
 
-        added = [c[1]["source"] for c in cdp.calls if c[0] == "Page.addScriptToEvaluateOnNewDocument"]
+        added = [
+            c[1]["source"]
+            for c in cdp.calls
+            if c[0] == "Page.addScriptToEvaluateOnNewDocument" and c[1] is not None
+        ]
         assert added == [scripts.title, scripts.border]
         # The resume comes before any marking work.
         assert cdp.calls[0][0] == "Runtime.runIfWaitingForDebugger"
@@ -252,16 +266,20 @@ class TestBorderSettingIsAppliedToMarkedTabs:
         cdp, scripts = _FakeCDP(), self._scripts()
         mark = supervisor.TabMark(session_id="S1")
         border = supervisor.BorderSetting(lambda: False)
-        asyncio.run(supervisor._setup_session(cdp, "S1", scripts, mark, border))
+        asyncio.run(supervisor._setup_session(cast("CDPClient", cdp), "S1", scripts, mark, border))
 
-        added = [c[1]["source"] for c in cdp.calls if c[0] == "Page.addScriptToEvaluateOnNewDocument"]
+        added = [
+            c[1]["source"]
+            for c in cdp.calls
+            if c[0] == "Page.addScriptToEvaluateOnNewDocument" and c[1] is not None
+        ]
         assert added == [scripts.title]
         assert mark.border_script is None
 
     def test_turning_off_removes_the_registered_script_and_the_drawn_border(self):
         cdp, scripts = _FakeCDP(), self._scripts()
         mark = supervisor.TabMark(session_id="S1", border_script="7")
-        asyncio.run(supervisor._set_tab_border(cdp, mark, False, scripts))
+        asyncio.run(supervisor._set_tab_border(cast("CDPClient", cdp), mark, False, scripts))
 
         assert cdp.calls == [
             ("Page.removeScriptToEvaluateOnNewDocument", {"identifier": "7"}, "S1"),
@@ -272,8 +290,13 @@ class TestBorderSettingIsAppliedToMarkedTabs:
     def test_turning_on_again_re_adds_the_border(self):
         cdp, scripts = _FakeCDP(), self._scripts()
         mark = supervisor.TabMark(session_id="S1")
-        asyncio.run(supervisor._set_tab_border(cdp, mark, True, scripts))
-        asyncio.run(supervisor._set_tab_border(cdp, mark, True, scripts))  # idempotent
+        asyncio.run(supervisor._set_tab_border(cast("CDPClient", cdp), mark, True, scripts))
+        asyncio.run(supervisor._set_tab_border(
+            cast("CDPClient", cdp),
+            mark,
+            True,
+            scripts,
+        ))  # idempotent
 
         added = [c for c in cdp.calls if c[0] == "Page.addScriptToEvaluateOnNewDocument"]
         assert len(added) == 1
@@ -286,20 +309,20 @@ class TestBorderSettingIsAppliedToMarkedTabs:
         that can no longer be turned off."""
         cdp, scripts = _FakeCDP(fail={"Runtime.evaluate"}), self._scripts()
         mark = supervisor.TabMark(session_id="S1")
-        asyncio.run(supervisor._set_tab_border(cdp, mark, True, scripts))
+        asyncio.run(supervisor._set_tab_border(cast("CDPClient", cdp), mark, True, scripts))
 
         assert mark.border_script == "1"
 
         cdp.calls.clear()
         cdp.fail = set()
-        asyncio.run(supervisor._set_tab_border(cdp, mark, False, scripts))
+        asyncio.run(supervisor._set_tab_border(cast("CDPClient", cdp), mark, False, scripts))
         assert ("Page.removeScriptToEvaluateOnNewDocument", {"identifier": "1"}, "S1") in cdp.calls
         assert mark.border_script is None
 
     def test_a_failed_removal_keeps_the_id_for_the_next_attempt(self):
         cdp, scripts = _FakeCDP(fail={"Page.removeScriptToEvaluateOnNewDocument"}), self._scripts()
         mark = supervisor.TabMark(session_id="S1", border_script="7")
-        asyncio.run(supervisor._set_tab_border(cdp, mark, False, scripts))
+        asyncio.run(supervisor._set_tab_border(cast("CDPClient", cdp), mark, False, scripts))
 
         assert mark.border_script == "7"
 
@@ -309,7 +332,7 @@ class TestBorderSettingIsAppliedToMarkedTabs:
         expression runs anyway; it is idempotent and keyed to the instance."""
         cdp, scripts = _FakeCDP(), self._scripts()
         mark = supervisor.TabMark(session_id="S1")
-        asyncio.run(supervisor._set_tab_border(cdp, mark, False, scripts))
+        asyncio.run(supervisor._set_tab_border(cast("CDPClient", cdp), mark, False, scripts))
 
         assert ("Runtime.evaluate", {"expression": scripts.border_removal}, "S1") in cdp.calls
         assert "Page.removeScriptToEvaluateOnNewDocument" not in cdp.methods()

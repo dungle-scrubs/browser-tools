@@ -141,8 +141,15 @@ class FakeCDP:
         for callback in list(self._handlers.get(event, [])):
             callback(payload)
 
-    async def send(self, method, params=None, session_id=None, timeout=None):
+    async def send(
+        self,
+        method,
+        params: dict[str, Any] | None = None,
+        session_id=None,
+        timeout=None,
+    ):
         self.log.append((method, params))
+        call_params: dict[str, Any] = params if params is not None else {}
         if method in self.raise_on:
             raise self.raise_on[method]
         if method == "SystemInfo.getProcessInfo":
@@ -163,7 +170,7 @@ class FakeCDP:
             # standalone success probe evaluates without the helper at all.
             # A replaced document never reaches this branch; only the bound
             # session object (callFunctionOn) dies with it.
-            expression = params.get("expression", "")
+            expression = call_params.get("expression", "")
             tail = expression.rsplit(";", 1)[-1].strip()
             if tail.startswith("__btLogin.begin"):
                 if "begin" in self.exception_details_on:
@@ -182,7 +189,7 @@ class FakeCDP:
         if method == "Runtime.callFunctionOn":
             if self.world_dead:
                 raise CDPError(-32000, "Could not find object with given id")
-            declaration = params.get("functionDeclaration", "")
+            declaration = call_params.get("functionDeclaration", "")
             if "this.outcome" in declaration:
                 if "outcome" in self.exception_details_on:
                     return {
@@ -191,7 +198,7 @@ class FakeCDP:
                     }
                 return {"result": {"value": self.outcome}}
             if "this.fill" in declaration:
-                self.log.append(("fill-arguments", params.get("arguments")))
+                self.log.append(("fill-arguments", call_params.get("arguments")))
                 self.log.append(("fill-declaration", declaration))
                 if isinstance(self.fill, Exception):
                     raise self.fill

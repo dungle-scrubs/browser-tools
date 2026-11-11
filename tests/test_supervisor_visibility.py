@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import os
 import subprocess
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
@@ -157,7 +157,7 @@ class TestExitLog:
         monkeypatch.setitem(supervisor._EXIT_CONTEXT, "port", 9222)
         monkeypatch.setitem(supervisor._EXIT_CONTEXT, "registry_path", registry_path)
 
-        installed: dict[int, object] = {}
+        installed: dict[int, Any] = {}
         killed: list[int] = []
         monkeypatch.setattr(
             supervisor.signal,

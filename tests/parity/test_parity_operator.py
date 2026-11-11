@@ -147,7 +147,9 @@ def test_uid_extra_in_candidate_is_caught():
 
 def test_matching_uid_targets_pass():
     targets = {"#go": "path-a", "#stop": "path-b"}
-    assert compare_captures(_capture(uid_targets=targets), _capture(uid_targets=dict(targets))).matched
+    assert compare_captures(
+        _capture(uid_targets=targets), _capture(uid_targets=dict(targets))
+    ).matched
 
 
 # --------------------------------------------------------------------------- #
@@ -232,7 +234,9 @@ def test_compare_corpus_flags_a_page_missing_from_baseline():
 
 def test_parity_result_matched_property():
     assert ParityResult("p").matched
-    assert not ParityResult("p", (compare_captures(_capture(text="x"), _capture(text="y")).diffs[0],)).matched
+    assert not ParityResult(
+        "p", (compare_captures(_capture(text="x"), _capture(text="y")).diffs[0],)
+    ).matched
 
 
 # --------------------------------------------------------------------------- #

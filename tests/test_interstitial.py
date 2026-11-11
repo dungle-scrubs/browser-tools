@@ -95,7 +95,8 @@ class TestParseDetectionResult:
 
     def test_none_returns_empty(self) -> None:
         """None input should return empty list."""
-        results = parse_detection_result(None)
+        # The defensive path: a non-string payload must not raise.
+        results = parse_detection_result(None)  # pyright: ignore[reportArgumentType]  # not a str
         assert results == []
 
     def test_non_array_returns_empty(self) -> None:
@@ -190,6 +191,7 @@ class TestFormatInterstitials:
             {"type": "captcha", "confidence": "medium", "signal": "css", "details": "recaptcha"},
         ]
         text = format_interstitials(detections)
+        assert text is not None
         assert "cloudflare_challenge" in text
         assert "captcha" in text
         assert "2 signal" in text
@@ -198,7 +200,7 @@ class TestFormatInterstitials:
 class TestDetectionScriptContent:
     """Tests for the detection script's patterns against mock HTML."""
 
-    def _run_script_on_html(self, html: str) -> list[dict]:
+    def _run_script_on_html(self, html: str) -> str:
         """Helper: simulate running detection script against HTML content.
 
         Since we can't run real JS, we test the pattern logic indirectly
@@ -288,6 +290,7 @@ class TestFormatInterstitialsRetry:
             }
         ]
         text = format_interstitials(detections)
+        assert text is not None
         assert "Auto-retry" not in text
         assert "E003" in text
 
@@ -302,6 +305,7 @@ class TestFormatInterstitialsRetry:
             }
         ]
         text = format_interstitials(detections, auto_retried=True, retries_used=3)
+        assert text is not None
         assert "Auto-retry was attempted" in text
         assert "3 retries" in text
         assert "~9s wait" in text
@@ -318,6 +322,7 @@ class TestFormatInterstitialsRetry:
             }
         ]
         text = format_interstitials(detections, auto_retried=False, retries_used=0)
+        assert text is not None
         assert "Auto-retry" not in text
 
 

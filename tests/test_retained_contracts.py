@@ -146,7 +146,9 @@ class TestToolResponseBuilders:
         }
 
     def test_extract_bare_legacy(self) -> None:
-        resp: dict[str, Any] = {"content": [{"type": "text", "text": "a"}, {"type": "text", "text": "b"}]}
+        resp: dict[str, Any] = {
+            "content": [{"type": "text", "text": "a"}, {"type": "text", "text": "b"}]
+        }
         assert extract_text_items(resp) == ["a", "b"]
 
     def test_extract_bare_wrapper(self) -> None:
@@ -154,7 +156,11 @@ class TestToolResponseBuilders:
         assert extract_text_items(resp) == ["wrapped"]
 
     def test_extract_jsonrpc_framed(self) -> None:
-        resp = {"jsonrpc": "2.0", "result": {"content": [{"type": "text", "text": "framed"}]}, "id": 7}
+        resp = {
+            "jsonrpc": "2.0",
+            "result": {"content": [{"type": "text", "text": "framed"}]},
+            "id": 7,
+        }
         assert extract_text_items(resp) == ["framed"]
 
     def test_extract_empty_when_no_content(self) -> None:
@@ -162,5 +168,9 @@ class TestToolResponseBuilders:
         assert extract_text_items({"result": {}}) == []
 
     def test_extract_ignores_non_text(self) -> None:
-        resp = {"result": {"content": [{"type": "image", "data": "abc"}, {"type": "text", "text": "ok"}]}}
+        resp = {
+            "result": {
+                "content": [{"type": "image", "data": "abc"}, {"type": "text", "text": "ok"}]
+            }
+        }
         assert extract_text_items(resp) == ["ok"]

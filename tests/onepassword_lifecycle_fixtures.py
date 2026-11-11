@@ -20,7 +20,7 @@ import os
 import subprocess
 import sys
 import types
-from typing import TYPE_CHECKING, NoReturn
+from typing import TYPE_CHECKING, Any, NoReturn, TypedDict
 
 import pytest
 from launcher_spawn_helpers import discard_spawn_environment
@@ -50,7 +50,7 @@ def _never_read_the_real_registration(monkeypatch: pytest.MonkeyPatch, tmp_path:
 
 @pytest.fixture(autouse=True)
 def _no_real_codesign(monkeypatch: pytest.MonkeyPatch) -> None:
-    def fake_run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+    def fake_run(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
         return subprocess.CompletedProcess(args, 0, b"", b"")
 
     monkeypatch.setattr(onepassword, "subprocess", types.SimpleNamespace(run=fake_run))
@@ -58,7 +58,7 @@ def _no_real_codesign(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture(autouse=True)
 def _no_real_camoufox_runner(monkeypatch: pytest.MonkeyPatch) -> None:
-    def forbidden(*args: object, **kwargs: object) -> NoReturn:
+    def forbidden(*args: Any, **kwargs: Any) -> NoReturn:
         raise AssertionError("a provisioning test attempted to launch a real Camoufox")
 
     monkeypatch.setattr(lifecycle, "_spawn_camoufox_process", forbidden)
@@ -79,7 +79,7 @@ def fail_pin_stat(monkeypatch: pytest.MonkeyPatch, error: OSError) -> None:
     """
     real_stat = os.stat
 
-    def failing(path: object, *args: object, **kwargs: object) -> object:
+    def failing(path: Any, *args: Any, **kwargs: Any) -> object:
         if kwargs.get("dir_fd") is not None and path == "Preferences":
             raise error
         return real_stat(path, *args, **kwargs)
@@ -97,7 +97,7 @@ def fail_pin_default_open(monkeypatch: pytest.MonkeyPatch, error: OSError) -> No
     seed_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
     real_open = os.open
 
-    def failing(path: object, flags: int, *args: object, **kwargs: object) -> object:
+    def failing(path: Any, flags: int, *args: Any, **kwargs: Any) -> object:
         if kwargs.get("dir_fd") is not None and path == "Default" and flags == seed_flags:
             raise error
         return real_open(path, flags, *args, **kwargs)
@@ -113,7 +113,7 @@ def fail_pin_default_create(monkeypatch: pytest.MonkeyPatch, error: OSError) -> 
     """
     real_mkdir = os.mkdir
 
-    def failing(path: object, *args: object, **kwargs: object) -> None:
+    def failing(path: Any, *args: Any, **kwargs: Any) -> None:
         if kwargs.get("dir_fd") is not None and path == "Default":
             raise error
         real_mkdir(path, *args, **kwargs)
@@ -132,12 +132,12 @@ def fail_pin_publication(monkeypatch: pytest.MonkeyPatch, kind: str, error: OSEr
     real_open = os.open
     real_link = os.link
 
-    def failing_open(path: object, flags: int, *args: object, **kwargs: object) -> object:
+    def failing_open(path: Any, flags: int, *args: Any, **kwargs: Any) -> object:
         if kwargs.get("dir_fd") is not None and str(path).startswith(".Preferences-"):
             raise error
         return real_open(path, flags, *args, **kwargs)
 
-    def failing_link(src: object, dst: object, *args: object, **kwargs: object) -> None:
+    def failing_link(src: Any, dst: Any, *args: Any, **kwargs: Any) -> None:
         if kwargs.get("src_dir_fd") is not None and dst == "Preferences":
             raise error
         real_link(src, dst, *args, **kwargs)
@@ -189,7 +189,7 @@ def fake_browser_launch(monkeypatch: pytest.MonkeyPatch, registry_path: str) -> 
     """Replace the vendored launcher; record what it was handed."""
     captured: dict[str, object] = {}
 
-    async def fake_launch_browser(**kwargs: object) -> object:
+    async def fake_launch_browser(**kwargs: Any) -> object:
         captured.update(kwargs)
         info = core_registry.register(
             working_dir=str(kwargs.get("working_dir")),
@@ -225,12 +225,23 @@ def synthetic_chrome_binary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
     return binary
 
 
+class _Boundaries(TypedDict):
+    """The stubbed boundaries a witness reads back.
+
+    A typed mapping rather than ``dict[str, object]``, so the order log and
+    the session root keep their own types.
+    """
+
+    order: list[str]
+    sessions_root: Path
+
+
 @pytest.fixture
 def stubbed_core_boundaries(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     synthetic_spawn_environment: dict[str, str],
-) -> dict[str, object]:
+) -> _Boundaries:
     """Stub the spawn/CDP/sweep seams; keep allocation, preferences, registry.
 
     The vendored launcher itself runs. ``order`` records the launch sequence

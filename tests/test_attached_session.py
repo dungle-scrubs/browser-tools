@@ -9,6 +9,11 @@ catch, and the command timeout the page-level client always had survives.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, cast
+
+if TYPE_CHECKING:
+    from browser_tools.core.cdp_client import CDPClient
+
 import pytest
 
 from browser_tools.attached_session import (
@@ -61,7 +66,7 @@ def core() -> FakeCore:
 
 @pytest.fixture
 def client(core: FakeCore) -> AttachedSessionClient:
-    return AttachedSessionClient(core, "SESSION-1")
+    return AttachedSessionClient(cast("CDPClient", core), "SESSION-1")
 
 
 class TestEverySendCarriesTheSession:
@@ -79,7 +84,9 @@ class TestEverySendCarriesTheSession:
 
     @pytest.mark.asyncio
     async def test_the_result_is_returned_as_is(self, core):
-        client = AttachedSessionClient(FakeCore(result={"frameTree": {}}), "S")
+        client = AttachedSessionClient(
+            cast("CDPClient", FakeCore(result={"frameTree": {}})), "S"
+        )
         assert await client.send("Page.getFrameTree") == {"frameTree": {}}
 
     def test_the_session_id_is_readable(self, client):
@@ -96,7 +103,7 @@ class TestTheExceptionTypeCallersCatch:
     @pytest.mark.asyncio
     async def test_a_core_protocol_error_becomes_the_callers_error(self):
         core = FakeCore(raises=CoreCDPError(code=-32000, message="No node"))
-        client = AttachedSessionClient(core, "S")
+        client = AttachedSessionClient(cast("CDPClient", core), "S")
         with pytest.raises(CDPError) as caught:
             await client.send("DOM.querySelector")
         assert "No node" in str(caught.value)
@@ -104,7 +111,7 @@ class TestTheExceptionTypeCallersCatch:
     @pytest.mark.asyncio
     async def test_a_lost_connection_becomes_the_callers_error(self):
         core = FakeCore(raises=ConnectionError("socket gone"))
-        client = AttachedSessionClient(core, "S")
+        client = AttachedSessionClient(cast("CDPClient", core), "S")
         with pytest.raises(CDPError):
             await client.send("Page.enable")
 
@@ -145,7 +152,9 @@ class TestTheCommandTimeoutSurvives:
 
     @pytest.mark.asyncio
     async def test_a_timeout_reaches_the_caller_as_their_own_error(self):
-        client = AttachedSessionClient(FakeCore(raises=TimeoutError()), "S")
+        client = AttachedSessionClient(
+            cast("CDPClient", FakeCore(raises=TimeoutError())), "S"
+        )
         with pytest.raises(CDPError) as caught:
             await client.send("Page.enable", timeout=0.05)
         assert "timed out" in str(caught.value)
