@@ -72,11 +72,16 @@ jobs:
           set -o pipefail
           if ! uv run pytest tests/test_insights_live.py -q -p no:cacheprovider 2>&1 \
               | tee "$RUNNER_TEMP/validated.log"; then
-            version=$(grep -o 'Unsupported trace browser version [^ ]*' \
-              "$RUNNER_TEMP/validated.log" | head -1 | sed 's/.* //; s/\.$//')
-            if [ -n "$version" ]; then
-              echo "::error::The engine passed on $version, but that version is not in" \
-                "validatedVersions in src/browser_tools/_insights/adapter.mjs. Add it."
+            log="$RUNNER_TEMP/validated.log"
+            refusal='Unsupported trace browser version'
+            if grep -q "$refusal (metadata missing)" "$log"; then
+              echo "::error::A captured trace carried no browser version; read the" \
+                "test output above."
+            elif grep -q "$refusal " "$log"; then
+              # "HeadlessChrome/158.0.0.0." -> "158.0.0.0", the form the list uses.
+              version=$(grep -o -m 1 "$refusal [^ ]*" "$log" | sed 's/.* //; s/\.$//; s|.*/||')
+              echo "::error::The engine passed on Chrome $version, but '$version' is not" \
+                "in validatedVersions in src/browser_tools/_insights/adapter.mjs. Add it."
             else
               echo "::error::The validated-mode run failed for a reason other than the" \
                 "version list; read the test output above."
