@@ -68,6 +68,7 @@ from .core.registry import InstanceNotFoundError
 from .core.utils import process_is_ours, process_start_time
 from .endpoint import ResolvedEndpoint
 from .process_utils import (
+    ScanUnknown,
     clean_stale_singleton_lock,
     find_chrome_debug_port,
     find_listeners_on_port,
@@ -1860,43 +1861,66 @@ def _close_tab(ext: ExtendedInstance, target_id: str) -> str:
     return f"Closed tab {target_id[:8]} in {ext.name}"
 
 
-def _browser_exit_verified(ext: ExtendedInstance) -> bool:
+def _unverified_exit_reason(ext: ExtendedInstance) -> str | None:
+    """Return None when the browser has provably exited, else why it has not.
+
+    Args:
+        ext: The instance being stopped.
+
+    Returns:
+        None once no process holds the directory, no process of the browser
+        listens on its port, and the recorded PID is gone or recycled.
+        Otherwise the first check that failed, worded to follow "browser exit
+        unknown for NAME:".
+    """
     remaining = find_user_data_dir_processes(ext.user_data_dir)
-    if remaining is None or any(process_running_state(pid) is not False for pid in remaining):
-        return False
+    if isinstance(remaining, ScanUnknown):
+        return f"process scan {remaining.reason}"
+    for pid in remaining:
+        state = process_running_state(pid)
+        if state is None:
+            return f"state of directory holder {pid} could not be read"
+        if state:
+            return f"process {pid} still holds the user-data directory"
     if ext.engine == "chrome":
         listeners = read_listener_pids(ext.port)
-        if listeners is None or any(
-            read_process_command(pid) is None
-            or pid_holds_user_data_dir(pid, Path(ext.user_data_dir))
-            for pid in listeners
-        ):
-            return False
+        if listeners is None:
+            return f"listeners on port {ext.port} could not be read"
+        for pid in listeners:
+            if read_process_command(pid) is None:
+                return f"command of port {ext.port} listener {pid} could not be read"
+            if pid_holds_user_data_dir(pid, Path(ext.user_data_dir)):
+                return f"process {pid} still listens on port {ext.port}"
     recorded = process_running_state(ext.pid)
     if recorded is None:
-        return False
+        return f"state of recorded process {ext.pid} could not be read"
     if recorded:
         actual_start = process_start_time(ext.pid)
-        return (
-            ext.pid_start is not None and actual_start is not None and actual_start != ext.pid_start
-        )
-    return True
+        if ext.pid_start is None or actual_start is None or actual_start == ext.pid_start:
+            return f"recorded process {ext.pid} is still running"
+    return None
 
 
 def _stop_managed(
     ext: ExtendedInstance,
     registry_path: str | None,
 ) -> str:
+    def unknown(reason: str) -> LifecycleError:
+        return LifecycleError(
+            f"Browser exit unknown for {ext.name}: {reason}; recovery state preserved"
+        )
+
     pids = find_user_data_dir_processes(ext.user_data_dir)
-    if pids is None:
-        raise LifecycleError(f"Browser exit unknown for {ext.name}; recovery state preserved")
+    if isinstance(pids, ScanUnknown):
+        raise unknown(f"process scan {pids.reason}")
     alive = bool(pids)
     for pid in pids:
         replacement = replace(ext, pid=pid, pid_start=process_start_time(pid))
         if not _terminate_verified(replacement):
-            raise LifecycleError(f"Browser exit unknown for {ext.name}; recovery state preserved")
-    if not _browser_exit_verified(ext):
-        raise LifecycleError(f"Browser exit unknown for {ext.name}; recovery state preserved")
+            raise unknown(f"termination of process {pid} could not be verified")
+    reason = _unverified_exit_reason(ext)
+    if reason is not None:
+        raise unknown(reason)
 
     preserve = ext.profile is not None or _is_under_profiles_root(ext.user_data_dir)
     _remove_entry(
@@ -2104,8 +2128,12 @@ def _stop_impl(
         kill_wait=_supervisor_kill_wait,
     )
 
-    if supervisor_note is not None and not _browser_exit_verified(ext):
-        raise LifecycleError(f"Cannot stop {instance}: {supervisor_note}; recovery state preserved")
+    if supervisor_note is not None:
+        reason = _unverified_exit_reason(ext)
+        if reason is not None:
+            raise LifecycleError(
+                f"Cannot stop {instance}: {supervisor_note} ({reason}); recovery state preserved"
+            )
     outcome = _stop_managed(ext, registry_path)
     return outcome if supervisor_note is None else f"{outcome}; {supervisor_note}"
 

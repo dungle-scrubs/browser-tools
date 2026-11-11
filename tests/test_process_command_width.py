@@ -136,7 +136,7 @@ class TestCommandWidth:
 
         pids = process_utils.find_user_data_dir_processes(str(profile_dir))
 
-        assert pids is not None, "the process scan could not be read"
+        assert isinstance(pids, list), f"the process scan could not be read: {pids}"
         assert child.pid in pids, "the scan missed the process holding the directory"
 
     def test_a_narrow_column_would_hide_the_holder(self, wide_command_child):

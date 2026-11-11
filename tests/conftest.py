@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
+import signal
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
 from launcher_spawn_helpers import stub_spawn_environment
 
-from browser_tools import lifecycle
+from browser_tools import lifecycle, process_utils
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -279,4 +281,13 @@ def curated_browser(tmp_path_factory):
     try:
         yield f"http://127.0.0.1:{instance.port}"
     finally:
-        lifecycle.stop(instance=instance.name, registry_path=registry)
+        try:
+            lifecycle.stop(instance=instance.name, registry_path=registry)
+        except lifecycle.LifecycleError:
+            # Teardown still fails with stop's reason, but never leaves the
+            # browser running after the suite (#208). Only a process that
+            # still holds this instance's directory is signalled.
+            if process_utils.pid_holds_user_data_dir(instance.pid, Path(instance.user_data_dir)):
+                with contextlib.suppress(ProcessLookupError):
+                    os.kill(instance.pid, signal.SIGKILL)
+            raise
