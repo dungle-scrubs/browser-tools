@@ -4,14 +4,13 @@ Chrome CPU Profiler via CDP
 
 Keeps its own long-lived process and the ``browser-tools-profiler`` entry
 point (RFC-01, "Profiling"). Target discovery and CDP transport go through
-the vendored ``core.cdp_client`` -- the same client every other adapted
-module uses -- instead of a standalone websocket/protocol path. The
-``Profiler``/``Performance`` CDP calls go through the generated
-``core.domains`` bindings over that same client.
+the vendored ``core.cdp_client``, the same client every other adapted
+module uses, and the ``Profiler``/``Performance`` calls are sent through it
+directly.
 
-This module MUST NOT depend on the MCP front or the daemon: it has no
-imports from ``cli``, ``mcp_server``, ``daemon_supervisor``, or
-``tool_registry``, and runs standalone against a browser's CDP port.
+This module depends on nothing above the core client: it has no imports
+from ``cli`` or ``tool_registry``, and runs standalone against a browser's
+CDP port.
 """
 
 from __future__ import annotations
@@ -23,60 +22,44 @@ import time
 from typing import Any
 
 from .core.cdp_client import CDPClient, get_ws_url_async
-from .core.domains.performance import Performance
-from .core.domains.profiler import Profiler
 
 logger = logging.getLogger(__name__)
 
 
 class CDPProfiler:
-    """CPU profiling session over the vendored core CDP client.
-
-    Wraps ``core.cdp_client.CDPClient`` for the websocket transport and the
-    generated ``core.domains.profiler.Profiler`` / ``core.domains.performance.
-    Performance`` domain bindings for the CDP calls themselves.
-    """
+    """CPU profiling session over the vendored core CDP client."""
 
     def __init__(self, ws_url: str) -> None:
         self.ws_url = ws_url
         self.cdp: CDPClient | None = None
-        self.profiler: Profiler | None = None
-        self.performance: Performance | None = None
         self.profile: dict[str, Any] | None = None
 
     async def connect(self) -> None:
         self.cdp = CDPClient(ws_url=self.ws_url)
         await self.cdp.connect()
-        self.profiler = Profiler(self.cdp)
-        self.performance = Performance(self.cdp)
 
-    def _require_profiler(self) -> Profiler:
-        if self.profiler is None:
+    def _require_cdp(self) -> CDPClient:
+        if self.cdp is None:
             raise RuntimeError("Not connected")
-        return self.profiler
-
-    def _require_performance(self) -> Performance:
-        if self.performance is None:
-            raise RuntimeError("Not connected")
-        return self.performance
+        return self.cdp
 
     async def start_profiling(self) -> None:
         """Enable and start the profiler."""
-        profiler = self._require_profiler()
-        await profiler.enable()
-        await profiler.start()
+        cdp = self._require_cdp()
+        await cdp.send(method="Profiler.enable")
+        await cdp.send(method="Profiler.start")
 
     async def stop_profiling(self) -> dict[str, Any]:
         """Stop the profiler and return the collected profile."""
-        result = await self._require_profiler().stop()
+        result = await self._require_cdp().send(method="Profiler.stop")
         self.profile = result.get("profile", {})
         return self.profile if self.profile is not None else {}
 
     async def enable_performance_metrics(self) -> None:
-        await self._require_performance().enable()
+        await self._require_cdp().send(method="Performance.enable")
 
     async def get_performance_metrics(self) -> dict[str, Any]:
-        return await self._require_performance().get_metrics()
+        return await self._require_cdp().send(method="Performance.getMetrics")
 
     async def close(self) -> None:
         if self.cdp is not None:

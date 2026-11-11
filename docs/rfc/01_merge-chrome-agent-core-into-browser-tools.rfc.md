@@ -5,7 +5,7 @@ type: refactor
 status: Accepted
 author: Kevin Frilot
 date: 2026-08-21
-version: 7
+version: 8
 ---
 
 # RFC-01: Merge chrome-agent core into browser-tools
@@ -175,7 +175,7 @@ The property the design depends on: layer 2 tools MUST call the same CDP client 
 - The verbatim/adapted split in Terminology is normative. Only the adapted modules may change; a needed change to a verbatim module is a spec change to this RFC first.
 - **`core/session.py` is not vendored from Phase 5 onward.** It served the MCP session layer and has no caller once that layer is deleted.
 - **A defect inside a verbatim module is corrected at the call site, never in place.** `core/registry.py` is verbatim, so `deregister()` and `cleanup()` MUST NOT be made profile-aware inside it. Preservation belongs in `lifecycle.py`, and the supervisor MUST reach retirement through a lifecycle-owned operation rather than calling the vendored `deregister()` directly. `core/launcher.py` and `core/supervisor.py` are adapted and may change with a documented header note.
-- The `domains/` typed classes are vendored as an OPTIONAL convenience layer. No curated tool may require them; they MUST NOT gate the passthrough.
+- **`core/domains/` is not vendored from version 8 onward.** It was an optional convenience layer of 54 typed bindings over `send()`. Its only caller was the profiler, which used five one-line wrappers; the profiler now sends those five methods through the core client directly, so no module requires a typed binding and none can gate the passthrough.
 
 ### CLI surface (normative)
 
@@ -483,6 +483,14 @@ Version 6 resolved five recorded disagreements between the shipped code and vers
 10. **Machine-readable output: machine-made.** The JSON-on-stdout rule keeps three documented exceptions: `help` and `guide` print plain text, and `attach` prints JSON Lines. All three were deliberate in the code and none is machine-readable as one JSON document.
 
 ## Changes in this revision
+
+**Version 8** (2026-11-11) removes `core/domains/` from the vendored set,
+as **Vendoring rules** now records. The typed bindings had one caller, the
+profiler, which used five of their methods; it now calls the core client's
+`send()` with the same method names, and its tests, which assert the CDP
+calls issued, pass unchanged. Verbatim modules change only through this
+RFC, so the removal is recorded here, as the removal of `core/session.py`
+was. The version 7 text below is otherwise unchanged.
 
 **Version 7** (2026-09-21) records that the RFC is fully built. Version 6
 described Phase 5 as pending with seven steps and listed the MCP front, the

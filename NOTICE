@@ -6,13 +6,14 @@ src/browser_tools/core/
   Licensed under the MIT License. See the notice below.
 
   chrome-agent's core (instance registry, liveness model, launcher,
-  supervisor, session, attach, CDP client/protocol, fingerprint, and the
-  domains/ typed CDP bindings) is copied into src/browser_tools/core/ per
-  RFC-01 (docs/rfc/01_merge-chrome-agent-core-into-browser-tools.rfc.md),
+  supervisor, attach, CDP client/protocol, and fingerprint) is copied into
+  src/browser_tools/core/ per RFC-01
+  (docs/rfc/01_merge-chrome-agent-core-into-browser-tools.rfc.md),
   "Vendoring rules". Each vendored file carries its own attribution header.
   The vendored core is a hard fork: browser-tools does not depend on
   chrome-agent at runtime and may cherry-pick upstream fixes at its
-  discretion. chrome-agent's cli.py and __main__.py are not vendored.
+  discretion. chrome-agent's cli.py, __main__.py, session.py and domains/
+  typed CDP bindings are not vendored.
 
   ---
 
