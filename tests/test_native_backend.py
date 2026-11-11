@@ -15,7 +15,7 @@ from typing import Any
 import pytest
 
 from browser_tools.cdp_handler import CDPHandler
-from browser_tools.mcp_response import extract_text_items
+from browser_tools.tool_response import extract_text_items
 
 
 def _ax(node_id: str, role: str, name: str = "", *, children=None, backend=None) -> dict[str, Any]:

@@ -5,9 +5,8 @@ package does not pull in ``websockets`` and the CDP client with it. Importing
 the package, or any CLI submodule such as ``browser_tools.cli``, loads only
 what that path needs.
 
-The MCP front and the legacy session stack this lazy layer used to keep out of
-the CLI path no longer exist (#92). Submodule imports
-(``from browser_tools import lifecycle``) resolve directly and are unaffected.
+Submodule imports (``from browser_tools import lifecycle``) resolve directly
+and are unaffected.
 """
 
 from __future__ import annotations

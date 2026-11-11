@@ -201,9 +201,6 @@ class TestPhase5Packaging:
             "daemon_client.py",
             "daemon_supervisor.py",
             "live_chrome.py",
-            "mcp_broker.py",
-            "mcp_daemon.py",
-            "mcp_session.py",
             "page_selection.py",
             "persistent_browser.py",
             "persistent-session-template.mjs",
@@ -215,6 +212,16 @@ class TestPhase5Packaging:
             "session_store.py",
         ]
         left = [name for name in gone if (pkg / name).exists()]
+        assert left == [], f"deleted modules still on disk: {left}"
+
+    def test_no_module_named_for_the_deleted_front_is_left_in_the_tree(self) -> None:
+        """Every module the deleted front used is named ``mcp_*.py``.
+
+        The front's own module names are not spelled out here, so this check
+        covers them all and any one that comes back.
+        """
+        pkg = _PYPROJECT.parent / "src" / "browser_tools"
+        left = sorted(p.name for p in pkg.glob("mcp_*.py"))
         assert left == [], f"deleted modules still on disk: {left}"
 
 

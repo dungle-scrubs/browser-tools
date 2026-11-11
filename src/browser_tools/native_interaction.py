@@ -7,10 +7,6 @@ snapshot rebuild #39 began: #39 produces the accessibility tree and the stable
 UID -> backend-node binding; this module resolves a UID against that binding
 and dispatches the interaction over CDP.
 
-The path is additive. The frozen MCP ``click`` / ``fill`` tools keep their
-name, argument, and response shape; this backend is built beside the Node
-path, and the authoritative flip plus the full parity gate are ticket #41.
-
 Resolution without a snapshot
 -----------------------------
 A UID is ``"<docToken>-<backendNodeId>"``, so it carries everything an

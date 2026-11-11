@@ -658,7 +658,7 @@ class TestAReadBorrowsTheSelectionAndGivesItBack:
         calls: list[tuple[str, dict]] = []
 
         def call_tool(name, arguments):
-            from browser_tools.mcp_response import make_text
+            from browser_tools.tool_response import make_text
 
             calls.append((name, arguments))
             if name == "select_frame":
@@ -683,7 +683,7 @@ class TestAReadBorrowsTheSelectionAndGivesItBack:
         calls: list[str] = []
 
         def call_tool(name, arguments):
-            from browser_tools.mcp_response import make_text
+            from browser_tools.tool_response import make_text
 
             calls.append(name)
             return make_text("Cookies (0):")

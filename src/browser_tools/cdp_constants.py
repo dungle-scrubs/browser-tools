@@ -1,4 +1,4 @@
-"""CDP toolset definitions and constants for browser-tools daemon.
+"""CDP toolset definitions and constants for browser-tools.
 
 Extracted from cdp_handler.py to keep the module under 800 lines.
 """

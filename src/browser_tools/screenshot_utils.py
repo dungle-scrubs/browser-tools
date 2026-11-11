@@ -8,7 +8,6 @@ Two-layer mitigation for blank/half-rendered screenshots:
 from __future__ import annotations
 
 import logging
-from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -21,47 +20,6 @@ SCREENSHOT_BLANK_LUMINANCE_STDDEV_THRESHOLD = 5.0
 SCREENSHOT_PAINT_READY_TIMEOUT_MS = 1500
 SCREENSHOT_BLANK_RETRY_DELAY_SECONDS = 0.25
 SCREENSHOT_BLANK_MAX_RETRIES = 1
-
-
-def extract_screenshot_png_b64(response: dict[str, Any]) -> str | None:
-    """Find the PNG base64 payload in a take_screenshot MCP response.
-
-    chrome-devtools-mcp returns screenshots as either an ``image`` content
-    block (``{"type": "image", "data": "<b64>", ...}``) or, for some
-    versions, embedded as a ``data:image/...`` URI inside a text block.
-    We probe for both shapes and return the raw base64 string, or None
-    if no image is found (e.g. the screenshot was saved-to-file only,
-    or the response is an error).
-    """
-    result = response.get("result")
-    if not isinstance(result, dict):
-        return None
-    content = result.get("content")
-    if not isinstance(content, list):
-        return None
-
-    for block in content:
-        if not isinstance(block, dict):
-            continue
-        if block.get("type") == "image":
-            data = block.get("data")
-            if isinstance(data, str) and data:
-                return data
-        if block.get("type") == "text":
-            text = block.get("text", "")
-            marker = "data:image/"
-            idx = text.find(marker)
-            if idx >= 0:
-                comma = text.find(",", idx)
-                if comma > 0:
-                    payload = text[comma + 1 :].strip()
-                    end = len(payload)
-                    for i, ch in enumerate(payload):
-                        if ch in (" ", "\n", "\r", "\t"):
-                            end = i
-                            break
-                    return payload[:end] or None
-    return None
 
 
 def screenshot_looks_blank(png_b64: str) -> bool:
@@ -77,7 +35,7 @@ def screenshot_looks_blank(png_b64: str) -> bool:
     2. Compressed-size ratio (fallback) — uniform pixels compress to a
        tiny fraction of raw size. Parsing just the IHDR chunk gives us
        width/height with no decoding cost. If Pillow is not importable
-       in the daemon's Python, this is the floor.
+       in this process, this is the floor.
 
     Returns False on any decoding error so we never accidentally drop a
     real screenshot due to a corrupt-looking buffer.

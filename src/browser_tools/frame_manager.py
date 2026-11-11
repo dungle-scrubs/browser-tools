@@ -4,7 +4,8 @@ Maintains a frame tree built from CDP Page.getFrameTree responses and kept
 up-to-date via frame lifecycle events. Handles frame selection by URL pattern
 (D-002) and execution context resolution.
 
-This module is used by the daemon to manage frame state across tool calls.
+The frame tree lives for the lifetime of the CDP runtime that owns it; the
+runtime subscribes this module to the page session's frame events.
 """
 
 from __future__ import annotations

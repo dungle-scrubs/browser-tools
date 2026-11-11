@@ -9,7 +9,9 @@ next to the loop that reads it; CDPHandler exposes only a thread-safe
 its event loop.
 
 Supports project-specific overrides via:
-    ~/.config/tool-proxy/browser-tools/detect-interstitial.js
+    $XDG_CONFIG_HOME/browser-tools/detect-interstitial.js
+    ~/.config/browser-tools/detect-interstitial.js (when XDG_CONFIG_HOME is
+    unset or empty)
 """
 
 from __future__ import annotations
@@ -17,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -27,7 +30,6 @@ logger = logging.getLogger(__name__)
 
 # Built-in detection script
 _BUILTIN_SCRIPT = Path(__file__).parent / "detect_interstitial.js"
-_OVERRIDE_PATH = Path.home() / ".config" / "tool-proxy" / "browser-tools" / "detect-interstitial.js"
 
 # Auto-retry tuning for JS-solvable challenges (Cloudflare JS challenge,
 # access-denied pages). Human-interaction challenges (CAPTCHA, auth walls,
@@ -66,7 +68,7 @@ def detect_total_timeout(max_retries: int | None = None) -> float:
     ``CDPHandler.run_post_navigation_detection``. The budget varies per call
     now that the caller can set it, so this is computed rather than a
     constant. Generous buffer over (initial detect + retries * delay) so a
-    slow page cannot hang the daemon.
+    slow page cannot hang the detection.
 
     Args:
         max_retries: Retry budget, or None for :data:`INTERSTITIAL_MAX_RETRIES`.
@@ -78,6 +80,22 @@ def detect_total_timeout(max_retries: int | None = None) -> float:
     return 10 + retries * (INTERSTITIAL_RETRY_DELAY_SECONDS + 2)
 
 
+def _override_path() -> Path:
+    """Resolve the project override script's path.
+
+    ``$XDG_CONFIG_HOME/browser-tools/detect-interstitial.js`` when the
+    variable is set and non-empty, else
+    ``~/.config/browser-tools/detect-interstitial.js`` -- the same rule
+    ``user_settings`` and ``login_policy`` use. Resolved at call time so a
+    changed environment takes effect without a restart.
+
+    Returns:
+        The path the override script would live at.
+    """
+    config_home = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
+    return Path(config_home) / "browser-tools" / "detect-interstitial.js"
+
+
 def get_detection_script() -> str:
     """Load the interstitial detection JavaScript.
 
@@ -86,9 +104,10 @@ def get_detection_script() -> str:
     Returns:
         JavaScript source code for interstitial detection.
     """
-    if _OVERRIDE_PATH.exists():
+    override = _override_path()
+    if override.exists():
         try:
-            return _OVERRIDE_PATH.read_text()
+            return override.read_text()
         except OSError:
             logger.debug("Failed to read override script, falling back to built-in", exc_info=True)
     return _BUILTIN_SCRIPT.read_text()

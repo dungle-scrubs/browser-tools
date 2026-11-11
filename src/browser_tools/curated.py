@@ -2,10 +2,9 @@
 
 New layer-4 code, alongside ``cli.py``, ``lifecycle.py``, ``passthrough.py``,
 and ``events.py``. It fronts the curated tools -- the high-level actions the
-frozen MCP surface exposes -- as first-class ``browser-tools``/``bt`` verbs, so
-the CLI-first surface matches RFC-01's normative "CLI surface" section.
+CLI exposes -- as first-class ``browser-tools``/``bt`` verbs.
 
-Every verb here dispatches to the *same* implementation the matching MCP tool
+Every verb here dispatches to the *same* implementation the matching tool
 uses. This module builds no second engine (RFC-01 invariant: "curated tools are
 CDP consumers over the same client the passthrough uses"). It reaches those
 implementations through two one-shot transports, chosen by what the tool needs:
@@ -13,20 +12,19 @@ implementations through two one-shot transports, chosen by what the tool needs:
 - **Handler transport** (:func:`_cdp_handler_session`). Spins up one
   :class:`~browser_tools.cdp_handler.CDPHandler` against the running instance,
   drives it through its public ``call_tool`` / ``call_native`` /
-  ``run_post_navigation_detection`` surface -- the exact methods the MCP daemon
-  dispatches to -- then tears it down. Used by the tools whose implementation
-  lives on ``CDPHandler`` / ``CDPRuntime`` and needs the frame manager, native
-  snapshot reader, screencast recorder, or interstitial policy the runtime owns:
-  ``snapshot``, ``click``, ``fill``, ``wait-idle``, ``wait-stable``, ``detect``,
-  ``frames``, ``storage``, ``screencast``.
+  ``run_post_navigation_detection`` surface, then tears it down. Used by the
+  tools whose implementation lives on ``CDPHandler`` / ``CDPRuntime`` and needs
+  the frame manager, native snapshot reader, screencast recorder, or
+  interstitial policy the runtime owns: ``snapshot``, ``click``, ``fill``,
+  ``wait-idle``, ``wait-stable``, ``detect``, ``frames``, ``storage``,
+  ``screencast``.
 
 - **Session transport** (:func:`_capture_screenshot`). Opens one browser-level
   ``core.cdp_client.CDPClient``, resolves a page target, and sends over the
   session -- the same one-shot ``send`` path ``passthrough``/``events`` use.
   Used only by ``screenshot``, whose full-page capture has no Python-native
-  ``CDPHandler`` tool (the frozen ``take_screenshot`` forwards to the Node
-  broker); the CDP-native form is ``Page.captureScreenshot`` plus the existing
-  blank-frame guard (``screenshot_utils.screenshot_looks_blank``).
+  ``CDPHandler`` tool; the CDP-native form is ``Page.captureScreenshot`` plus
+  the existing blank-frame guard (``screenshot_utils.screenshot_looks_blank``).
 
 Instance resolution matches the other verbs: an omitted ``INSTANCE`` resolves
 via :func:`lifecycle.resolve_single_instance` (fails naming the candidates
@@ -75,7 +73,6 @@ from . import lifecycle
 from .cdp_handler import CDPHandler
 from .interstitial import INTERSTITIAL_RETRY_DELAY_SECONDS, format_interstitials
 from .lifecycle import LifecycleError
-from .mcp_response import extract_text_items
 from .one_shot import cli_cdp_errors, one_shot_page_session
 from .passthrough import HIDDEN_TAB_MESSAGE, UsageError
 from .screenshot_utils import (
@@ -83,6 +80,7 @@ from .screenshot_utils import (
     SCREENSHOT_BLANK_RETRY_DELAY_SECONDS,
     screenshot_looks_blank,
 )
+from .tool_response import extract_text_items
 
 #: How long a one-shot handler waits for its CDP connection before giving up.
 HANDLER_CONNECT_TIMEOUT_SECONDS = 10.0
@@ -95,7 +93,7 @@ DEFAULT_SCREENCAST_MAX_FRAMES = 600
 #: How often the capture loop checks whether the frame buffer has filled.
 SCREENCAST_POLL_SECONDS = 0.05
 
-#: ``wait-idle`` / ``wait-stable`` defaults (mirror the MCP tool defaults in
+#: ``wait-idle`` / ``wait-stable`` defaults (mirror the tool defaults in
 #: ``cdp_handler._handle_wait_idle`` / ``_handle_wait_stable``).
 DEFAULT_WAIT_TIMEOUT_MS = 5000
 DEFAULT_IDLE_MS = 500
@@ -233,7 +231,7 @@ def _cdp_handler_session(
     """Yield a connected one-shot :class:`CDPHandler`, then tear it down.
 
     Builds the handler against ``http://127.0.0.1:{port}``, runs its event loop
-    on a background thread (the same runtime the MCP daemon threads), waits for
+    on a background thread, waits for
     the CDP connection to come up, and always stops it afterward. A connection
     that never comes up within :data:`HANDLER_CONNECT_TIMEOUT_SECONDS` is a
     ``LifecycleError`` (CLI exit 1).
@@ -309,9 +307,9 @@ def _cdp_handler_session(
 
 
 def _envelope_text(resp: dict[str, Any]) -> tuple[str, bool]:
-    """Read an MCP envelope into ``(text, is_error)``.
+    """Read a tool response envelope into ``(text, is_error)``.
 
-    Uses the canonical ``mcp_response`` reader so every envelope shape the
+    Uses the canonical ``tool_response`` reader so every envelope shape the
     handler can return is honored. ``is_error`` reflects the envelope's
     ``isError`` flag, which the CLI front maps to exit code 1.
     """
@@ -329,8 +327,7 @@ _ENVELOPE_ERROR_PREFIX = "Error: "
 def _reason(text: str) -> str:
     """The envelope's error text, without the prefix the CLI adds back.
 
-    `mcp_response.make_error` prefixes `Error: ` for a daemon socket that no
-    longer exists (RFC-01 deleted the MCP front), and `cli.py` prefixes
+    `tool_response.make_error` prefixes `Error: `, and `cli.py` prefixes
     `error: ` on the way to stderr. Together they printed
     `error: Error: E002: ...`. Only one prefix belongs to the CLI, and it is
     the CLI's.
@@ -338,8 +335,7 @@ def _reason(text: str) -> str:
     Stripped here rather than at the print, because this is where envelope
     text becomes an exception message and the message is what every caller
     then reads. A message that carries no prefix is returned unchanged, so
-    the diagnostics that write their own wording through `error_response`
-    are untouched.
+    the diagnostics that write their own wording are untouched.
     """
     return text[len(_ENVELOPE_ERROR_PREFIX):] if text.startswith(_ENVELOPE_ERROR_PREFIX) else text
 
@@ -391,7 +387,7 @@ def snapshot(
     handler: CDPHandler | None = None,
     all_frames: bool = False,
 ) -> dict[str, Any]:
-    """Return the native UID accessibility tree (frozen ``take_snapshot``).
+    """Return the native UID accessibility tree (the ``take_snapshot`` tool).
 
     Reading a background tab is fine -- only input is dropped -- so this is
     not focus-guarded. ``target`` selects the page whose UIDs are returned,
@@ -413,7 +409,7 @@ def click(
     all_frames: bool = False,
     dialog: str = "dismiss",
 ) -> dict[str, Any]:
-    """Native UID click (frozen ``click``), over the #40 interaction path.
+    """Native UID click (the ``click`` tool), over the #40 interaction path.
 
     Takes no snapshot. A UID carries the document it was minted against and the
     backend DOM node it names, so the interaction checks the document and acts.
@@ -441,7 +437,7 @@ def fill(
     all_frames: bool = False,
     dialog: str = "dismiss",
 ) -> dict[str, Any]:
-    """Native UID fill (frozen ``fill``), over the #40 interaction path.
+    """Native UID fill (the ``fill`` tool), over the #40 interaction path.
 
     Takes no snapshot, for the reason :func:`click` gives.
 
@@ -472,7 +468,7 @@ def wait_idle(
     endpoint: str | ResolvedEndpoint | None = None,
     handler: CDPHandler | None = None,
 ) -> dict[str, Any]:
-    """Wait for network idle (frozen ``wait_idle``)."""
+    """Wait for network idle (the ``wait_idle`` tool)."""
     with _handler_for(handler, instance, None, registry_path, endpoint) as handler:
         text = _tool_or_raise(handler, "wait_idle", {"timeout_ms": timeout_ms, "idle_ms": idle_ms})
     return {"result": text}
@@ -487,7 +483,7 @@ def wait_stable(
     endpoint: str | ResolvedEndpoint | None = None,
     handler: CDPHandler | None = None,
 ) -> dict[str, Any]:
-    """Wait for DOM quiescence (frozen ``wait_stable``)."""
+    """Wait for DOM quiescence (the ``wait_stable`` tool)."""
     with _handler_for(handler, instance, None, registry_path, endpoint) as handler:
         text = _tool_or_raise(
             handler, "wait_stable", {"timeout_ms": timeout_ms, "stable_ms": stable_ms}
@@ -545,7 +541,7 @@ def detect(
 
     Drives the exact challenge-response policy in ``interstitial.py`` through
     ``CDPHandler.run_post_navigation_detection`` -- the same detect-and-retry
-    the daemon runs automatically post-navigation, surfaced here as a verb.
+    that runs automatically post-navigation, surfaced here as a verb.
     """
     check_detect_wait(wait_seconds)
     max_retries = None
@@ -591,7 +587,7 @@ def frames_list(
     handler: CDPHandler | None = None,
     all_frames: bool = False,
 ) -> dict[str, Any]:
-    """List the page's frames (frozen ``list_frames``)."""
+    """List the page's frames (the ``list_frames`` tool)."""
     with _handler_for(handler, instance, None, registry_path, endpoint, all_frames) as handler:
         text = _tool_or_raise(handler, "list_frames", {})
     return {"frames": text}
@@ -606,7 +602,7 @@ def frames_select(
     handler: CDPHandler | None = None,
     all_frames: bool = False,
 ) -> dict[str, Any]:
-    """Select a frame by URL pattern (frozen ``select_frame``)."""
+    """Select a frame by URL pattern (the ``select_frame`` tool)."""
     with _handler_for(handler, instance, None, registry_path, endpoint, all_frames) as handler:
         text = _tool_or_raise(handler, "select_frame", {"url_pattern": pattern})
     return {"selected": text}
@@ -620,7 +616,7 @@ def frames_reset(
     handler: CDPHandler | None = None,
     all_frames: bool = False,
 ) -> dict[str, Any]:
-    """Clear frame selection back to the top-level page (frozen ``reset_frame``)."""
+    """Clear frame selection back to the top-level page (the ``reset_frame`` tool)."""
     with _handler_for(handler, instance, None, registry_path, endpoint, all_frames) as handler:
         text = _tool_or_raise(handler, "reset_frame", {})
     return {"result": text}
@@ -640,7 +636,7 @@ def storage_get(
     handler: CDPHandler | None = None,
     all_frames: bool = False,
 ) -> dict[str, Any]:
-    """Read a frame's storage (frozen ``get_frame_storage``).
+    """Read a frame's storage (the ``get_frame_storage`` tool).
 
     ``get_frame_storage`` reads the *selected* frame, and frame selection does
     not survive between one-shot CLI processes. ``--key`` names the frame to
@@ -755,7 +751,7 @@ async def _capture_screenshot(
     use) and sends ``Page.captureScreenshot`` over it. Reuses the existing
     blank-frame guard (``screenshot_utils.screenshot_looks_blank`` plus the
     shared retry budget): a near-uniform capture is retried after a short
-    delay, matching the daemon's ``take_screenshot`` post-capture check.
+    delay, matching the post-capture blank-frame check.
     """
     async with one_shot_page_session(port, target_spec, target_by) as (
         cdp,
@@ -797,7 +793,7 @@ def screenshot(
     endpoint: str | ResolvedEndpoint | None = None,
     handler: CDPHandler | None = None,
 ) -> dict[str, Any]:
-    """Capture a page screenshot (frozen ``take_screenshot``, CDP-native form).
+    """Capture a page screenshot (the CDP-native form).
 
     ``handler`` is a session already open, which a Step Run holds for every
     step. This verb runs over a One-Shot Session rather than over the

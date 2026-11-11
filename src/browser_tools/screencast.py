@@ -25,10 +25,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-try:
-    from .mcp_response import make_error, make_text
-except ImportError:  # script-mode execution (mcp_daemon run directly)
-    from mcp_response import make_error, make_text  # type: ignore[import-untyped,no-redef]
+from .tool_response import make_error, make_text
 
 logger = logging.getLogger(__name__)
 
@@ -36,15 +33,11 @@ logger = logging.getLogger(__name__)
 def _cdp_error_class() -> type[Exception]:
     """Import CDPError lazily.
 
-    cdp_client uses a relative import of its own (chrome_utils) that fails
-    outside package context, so importing it at module load breaks the daemon
-    script's --help. Deferring until a capture actually starts keeps this module
-    importable in all execution modes - the same trick cdp_handler uses.
+    The import is deferred until a capture actually starts - the same trick
+    cdp_handler uses.
     """
-    try:
-        from .cdp_client import CDPError
-    except ImportError:
-        from cdp_client import CDPError  # type: ignore[import-untyped,no-redef]
+    from .cdp_client import CDPError
+
     return CDPError
 
 

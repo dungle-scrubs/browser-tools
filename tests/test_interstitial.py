@@ -10,6 +10,7 @@ import pytest
 
 from browser_tools.interstitial import (
     _deduplicate,
+    _override_path,
     detect_with_retry,
     format_interstitials,
     get_detection_script,
@@ -20,29 +21,54 @@ from browser_tools.interstitial import (
 class TestGetDetectionScript:
     """Tests for loading the detection script."""
 
-    def test_loads_builtin_script(self) -> None:
+    def test_loads_builtin_script(self, monkeypatch, tmp_path: Path) -> None:
         """Built-in script should be loadable."""
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+
         script = get_detection_script()
         assert "detectInterstitials" in script
         assert "cloudflare" in script.lower()
 
     def test_override_takes_precedence(self, monkeypatch, tmp_path: Path) -> None:
         """Project override should be preferred over built-in."""
-        override = tmp_path / "detect-interstitial.js"
+        override = tmp_path / "browser-tools" / "detect-interstitial.js"
+        override.parent.mkdir(parents=True)
         override.write_text("// custom override\n(function() { return '[]'; })()")
-        monkeypatch.setattr("browser_tools.interstitial._OVERRIDE_PATH", override)
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
 
         script = get_detection_script()
         assert "custom override" in script
 
     def test_falls_back_on_missing_override(self, monkeypatch, tmp_path: Path) -> None:
         """Missing override should fall back to built-in."""
-        monkeypatch.setattr(
-            "browser_tools.interstitial._OVERRIDE_PATH", tmp_path / "nonexistent.js"
-        )
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
 
         script = get_detection_script()
         assert "detectInterstitials" in script
+
+
+class TestOverridePath:
+    """The override path follows XDG_CONFIG_HOME, with a home-directory fallback."""
+
+    def test_xdg_config_home_is_used(self, monkeypatch, tmp_path: Path) -> None:
+        """A set XDG_CONFIG_HOME puts the override under it."""
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+
+        assert _override_path() == tmp_path / "browser-tools" / "detect-interstitial.js"
+
+    def test_empty_xdg_config_home_falls_back_to_home(self, monkeypatch, tmp_path: Path) -> None:
+        """An empty XDG_CONFIG_HOME falls through to the home directory."""
+        monkeypatch.setenv("XDG_CONFIG_HOME", "")
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+
+        assert _override_path() == tmp_path / ".config" / "browser-tools" / "detect-interstitial.js"
+
+    def test_unset_xdg_config_home_falls_back_to_home(self, monkeypatch, tmp_path: Path) -> None:
+        """An unset XDG_CONFIG_HOME falls through to the home directory."""
+        monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+
+        assert _override_path() == tmp_path / ".config" / "browser-tools" / "detect-interstitial.js"
 
 
 class TestParseDetectionResult:
@@ -551,28 +577,8 @@ class TestStealthRemoved:
         assert "addScriptToEvaluateOnNewDocument" not in source
 
 
-class TestStealthDaemonWiring:
-    """Tests for stealth flag propagation through daemon.
-
-    The ``stealth`` argument stays on the frozen MCP surface (RFC-01, "MCP
-    compatibility contract") -- removing it would change a tool's argument
-    shape. It is accepted and stored but no longer triggers any JS injection
-    (see TestStealthRemoved): the flag is now inert.
-    """
-
-    def test_cdp_handler_accepts_stealth_flag(self) -> None:
-        """CDPHandler should propagate the stealth flag to its CDP runtime."""
-        from browser_tools.cdp_handler import CDPHandler
-
-        handler = CDPHandler(None, mode="full", stealth=True)
-        assert handler._rt._stealth is True
-
-    def test_cdp_handler_defaults_stealth_false(self) -> None:
-        """CDPHandler should default to stealth=False on its CDP runtime."""
-        from browser_tools.cdp_handler import CDPHandler
-
-        handler = CDPHandler(None)
-        assert handler._rt._stealth is False
+class TestEnterpriseDetectionsNotAutoRetried:
+    """Enterprise bot protections should not be in the auto-retry set."""
 
     def test_enterprise_detections_not_auto_retried(self) -> None:
         """Enterprise bot protections should not be in auto-retry set."""

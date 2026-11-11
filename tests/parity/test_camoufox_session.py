@@ -280,11 +280,11 @@ class TestUnknownTool:
         assert "Unknown tool" in result["error"]
 
 
-class TestToolProxyProtocol:
-    """Tool-proxy JSON integration."""
+class TestToolProtocol:
+    """The session's JSON integration."""
 
     def test_result_is_json_serializable(self, mock_camoufox_playwright):
-        """All results must be JSON-serializable for tool-proxy protocol."""
+        """All results must be JSON-serializable."""
         from camoufox_session import CamoufoxSession
 
         session = CamoufoxSession()

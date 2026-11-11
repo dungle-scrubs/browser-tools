@@ -1286,7 +1286,7 @@ def _curated_envelope(
 ) -> dict[str, Any]:
     """Dispatch one curated verb to its ``curated`` implementation.
 
-    Each branch calls the same implementation the matching MCP tool uses.
+    Each branch calls the same implementation the matching tool uses.
     Missing required inputs raise ``PassthroughUsageError`` (exit 2); the
     operational failures the ``curated`` functions raise are ``LifecycleError``
     (exit 1), handled by the caller.
