@@ -636,7 +636,11 @@ class CDPRuntime:
         from .one_shot import one_shot_page_session
 
         browser_url = self._browser_url
-        port = browser_url if isinstance(browser_url, ResolvedEndpoint) else urlparse(browser_url or "").port
+        port = (
+            browser_url
+            if isinstance(browser_url, ResolvedEndpoint)
+            else urlparse(browser_url or "").port
+        )
         if port is None:
             self._connect_error = f"no port in browser url {browser_url}"
             logger.error("%s", self._connect_error)
@@ -812,8 +816,11 @@ class CDPRuntime:
         js = f"""
         (async () => {{
             const timeout = new Promise(r => setTimeout(() => r('timeout'), {int(timeout_ms)}));
-            const paint = new Promise(r => requestAnimationFrame(() => requestAnimationFrame(() => r('paint'))));
-            const fonts = (document.fonts && document.fonts.ready) ? document.fonts.ready : Promise.resolve();
+            const paint = new Promise(r =>
+                requestAnimationFrame(() => requestAnimationFrame(() => r('paint'))));
+            const fonts = (document.fonts && document.fonts.ready)
+                ? document.fonts.ready
+                : Promise.resolve();
             await Promise.race([Promise.all([paint, fonts]), timeout]);
             return true;
         }})()
@@ -1203,7 +1210,8 @@ class CDPHandler:
                     result = await self._native_interactor.click_async(send, uid)
                     assert result.point is not None  # click_steps always sets point
                     return make_text(
-                        f"Clicked uid={result.uid} at ({result.point[0]:.0f}, {result.point[1]:.0f})."
+                        f"Clicked uid={result.uid} at ({result.point[0]:.0f}, "
+                        f"{result.point[1]:.0f})."
                     )
                 value = str(arguments.get("value", ""))
                 result = await self._native_interactor.fill_async(send, uid, value)
@@ -1657,7 +1665,10 @@ class CDPHandler:
                     frame_cdp,
                     "Runtime.evaluate",
                     {
-                        "expression": "JSON.stringify(Object.fromEntries(Object.entries(localStorage).slice(0, 20)))",
+                        "expression": (
+                            "JSON.stringify(Object.fromEntries(Object.entries(localStorage)"
+                            ".slice(0, 20)))"
+                        ),
                         "contextId": ctx_id,
                         "returnByValue": True,
                     },
@@ -1676,7 +1687,10 @@ class CDPHandler:
                     frame_cdp,
                     "Runtime.evaluate",
                     {
-                        "expression": "JSON.stringify(Object.fromEntries(Object.entries(sessionStorage).slice(0, 20)))",
+                        "expression": (
+                            "JSON.stringify(Object.fromEntries(Object.entries(sessionStorage)"
+                            ".slice(0, 20)))"
+                        ),
                         "contextId": ctx_id,
                         "returnByValue": True,
                     },
@@ -1761,7 +1775,8 @@ class CDPHandler:
 
             name_str = f' "{node_name}"' if node_name else ""
             lines.append(
-                f"  [{node_role}]{name_str}{prop_str} (nodeId={node_id} backendDOMNodeId={backend_id})"
+                f"  [{node_role}]{name_str}{prop_str} "
+                f"(nodeId={node_id} backendDOMNodeId={backend_id})"
             )
 
         return make_text("\n".join(lines))

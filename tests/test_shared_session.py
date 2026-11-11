@@ -19,6 +19,11 @@ that is what these tests pin.
 from __future__ import annotations
 
 import asyncio
+from typing import TYPE_CHECKING, cast
+
+if TYPE_CHECKING:
+    from browser_tools.cdp_handler import CDPHandler
+    from browser_tools.core.cdp_client import CDPClient
 
 import pytest
 from doubles import HandlerSurface
@@ -67,10 +72,10 @@ class FakeHandler(HandlerSurface):
 class TestTheAdapterExposesWhatItWraps:
     def test_raw_is_the_underlying_client(self):
         core = FakeCore()
-        assert AttachedSessionClient(core, "S1").raw is core
+        assert AttachedSessionClient(cast("CDPClient", core), "S1").raw is core
 
     def test_the_session_id_travels_with_it(self):
-        client = AttachedSessionClient(FakeCore(), "S1")
+        client = AttachedSessionClient(cast("CDPClient", FakeCore()), "S1")
         assert (client.raw, client.session_id) == (client._client, "S1")
 
 
@@ -79,13 +84,13 @@ class TestAVerbRunsOnASessionItWasGiven:
 
     def test_the_given_handler_is_used(self):
         handler = FakeHandler()
-        with curated._handler_for(handler, None, None, None, None) as got:
+        with curated._handler_for(cast("CDPHandler", handler), None, None, None, None) as got:
             assert got is handler
 
     def test_the_given_handler_is_not_closed(self):
         """The run owns it, so the verb must leave it running for step N+1."""
         handler = FakeHandler()
-        with curated._handler_for(handler, None, None, None, None):
+        with curated._handler_for(cast("CDPHandler", handler), None, None, None, None):
             pass
         assert handler.stopped is False, "a verb closed a session it does not own"
 
@@ -97,11 +102,14 @@ class TestAVerbRunsOnASessionItWasGiven:
         which is exactly when a run must not lose it.
         """
         handler = FakeHandler()
-        with pytest.raises(ValueError), curated._handler_for(handler, None, None, None, None):
+        with pytest.raises(ValueError), curated._handler_for(
+            cast("CDPHandler", handler), None, None, None, None
+        ):
             raise ValueError("the step failed")
 
         assert handler.stopped is False, "a failing step closed the run's session"
-        assert curated.snapshot(instance=None, handler=handler)["snapshot"]
+        snapshot = curated.snapshot(instance=None, handler=cast("CDPHandler", handler))
+        assert snapshot["snapshot"]
 
     def test_no_connection_is_opened(self, monkeypatch):
         opened = []
@@ -111,7 +119,7 @@ class TestAVerbRunsOnASessionItWasGiven:
             lambda *a, **k: opened.append(True) or 9222,
         )
         handler = FakeHandler()
-        with curated._handler_for(handler, None, None, None, None):
+        with curated._handler_for(cast("CDPHandler", handler), None, None, None, None):
             pass
         assert opened == [], "a port was resolved although a session was supplied"
 
@@ -169,7 +177,7 @@ class TestAVerbRunsOnASessionItWasGiven:
 
     def test_a_curated_verb_takes_the_handler_through(self):
         handler = FakeHandler()
-        result = curated.snapshot(instance=None, handler=handler)
+        result = curated.snapshot(instance=None, handler=cast("CDPHandler", handler))
         assert handler.calls == ["take_snapshot"]
         assert "RootWebArea" in result["snapshot"]
         assert handler.stopped is False
@@ -386,7 +394,7 @@ class TestSubmittingToTheRuntimesLoop:
 
         runtime = CDPRuntime(None)
         core = FakeCore()
-        runtime._cdp_client = AttachedSessionClient(core, "S9")
+        runtime._cdp_client = AttachedSessionClient(cast("CDPClient", core), "S9")
         assert runtime.session == (core, "S9")
 
 
@@ -419,6 +427,12 @@ class TestAStepCleansUpAfterItselfOnTheSharedSession:
 
         core = Core()
         with pytest.raises(ConnectionError):
-            await events.wait_on_session(core, "S1", "Page.loadEventFired", None, 1)
+            await events.wait_on_session(
+                cast("CDPClient", core),
+                "S1",
+                "Page.loadEventFired",
+                None,
+                1,
+            )
 
         assert core.handlers == {}, "the subscription outlived the step that made it"

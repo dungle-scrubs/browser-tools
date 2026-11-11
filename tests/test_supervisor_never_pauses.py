@@ -34,6 +34,10 @@ import subprocess
 import sys
 import textwrap
 import threading
+from typing import TYPE_CHECKING, cast
+
+if TYPE_CHECKING:
+    from browser_tools.core.cdp_client import CDPClient
 
 import pytest
 
@@ -45,6 +49,8 @@ class FakeCDP:
 
     def __init__(self, *, fail: set[str] | None = None, reject_filter: bool = False) -> None:
         self.sent: list[tuple[str, dict | None, str | None]] = []
+        #: The session id `Target.attachToTarget` hands back.
+        self.attach_session: str | None = None
         self._fail = fail or set()
         self._reject_filter = reject_filter
         self._connected = True
@@ -71,7 +77,7 @@ class TestTargetsAreWatchedNotIntercepted:
         process answering; discovery is a notification Chrome waits on for
         nothing."""
         cdp = FakeCDP()
-        asyncio.run(supervisor._enable_page_discovery(cdp))
+        asyncio.run(supervisor._enable_page_discovery(cast("CDPClient", cdp)))
 
         assert cdp.methods() == ["Target.setDiscoverTargets"]
         assert "Target.setAutoAttach" not in cdp.methods()
@@ -80,7 +86,7 @@ class TestTargetsAreWatchedNotIntercepted:
         """An OOPIF, a worker, or an extension page is never marked, so the
         supervisor has no reason to attach to one."""
         cdp = FakeCDP()
-        asyncio.run(supervisor._enable_page_discovery(cdp))
+        asyncio.run(supervisor._enable_page_discovery(cast("CDPClient", cdp)))
 
         _, params, _ = cdp.sent[0]
         assert params is not None
@@ -90,7 +96,7 @@ class TestTargetsAreWatchedNotIntercepted:
         """Chrome below 106 rejects ``filter``; the retry drops it and the
         handler filters instead. Discovery is still all that is asked for."""
         cdp = FakeCDP(reject_filter=True)
-        asyncio.run(supervisor._enable_page_discovery(cdp))
+        asyncio.run(supervisor._enable_page_discovery(cast("CDPClient", cdp)))
 
         assert cdp.methods() == ["Target.setDiscoverTargets", "Target.setDiscoverTargets"]
         _, retry, _ = cdp.sent[1]
@@ -104,7 +110,7 @@ def _setup(cdp: FakeCDP) -> None:
     scripts = supervisor.MarkerScripts.for_instance("t-01")
     mark = supervisor.TabMark(session_id="S1")
     border = supervisor.BorderSetting(lambda: True)
-    asyncio.run(supervisor._setup_session(cdp, "S1", scripts, mark, border))
+    asyncio.run(supervisor._setup_session(cast("CDPClient", cdp), "S1", scripts, mark, border))
 
 
 class TestEverySessionIsResumed:
@@ -139,7 +145,7 @@ class TestEverySessionIsResumed:
         marked, and nothing is kept -- an attached session is the only thing
         that can hold a paused target paused."""
         cdp = FakeCDP()
-        asyncio.run(supervisor._release_target(cdp, "S2"))
+        asyncio.run(supervisor._release_target(cast("CDPClient", cdp), "S2"))
 
         assert cdp.methods() == ["Runtime.runIfWaitingForDebugger", "Target.detachFromTarget"]
         assert cdp.sent[1][1] == {"sessionId": "S2"}

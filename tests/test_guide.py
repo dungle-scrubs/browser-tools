@@ -88,7 +88,10 @@ class TestApprovedLoginContract:
 
     @pytest.mark.parametrize("required", [
         "login [INSTANCE] --account ALIAS", "--target SPEC", "--config FILE", "--timeout-ms MS",
-        "--value-fd", "service account", "automation vault", "XDG_CONFIG_HOME/browser-tools/logins.json",
+        "--value-fd",
+        "service account",
+        "automation vault",
+        "XDG_CONFIG_HOME/browser-tools/logins.json",
         "same-origin POST", "success selector", "bounded cleanup", "asynchronous submit handler",
         "MFA/TOTP", "SSO", "passkeys", "iframes", "Step Run", "trace --steps",
         "unrestricted shell", "CDP access",
@@ -104,7 +107,9 @@ class TestApprovedLoginContract:
         path = tmp_path / "guide-policy.json"
         path.write_text(json.dumps(document))
         policy = login_policy.load_policy(path)
-        assert policy.account("example").origin == "https://example.com"
+        account = policy.account("example")
+        assert account is not None
+        assert account.origin == "https://example.com"
 
     def test_documented_default_matches_the_command(self, login_section):
         from browser_tools.login import DEFAULT_LOGIN_TIMEOUT_MS

@@ -226,7 +226,9 @@ class TestLiveCancellation:
 
             monkeypatch.setattr(login.credential_relay, "_kill_group", controlled_kill)
             task = asyncio.create_task(
-                login._read_credentials(str(fake_relay), POLICY, ACCOUNT, login_contract.Deadline(30_000))
+                login._read_credentials(
+                    str(fake_relay), POLICY, ACCOUNT, login_contract.Deadline(30_000)
+                )
             )
             try:
                 pids = await _wait_for_pids(marker, count=1)
@@ -406,7 +408,11 @@ class TestDeadlineCleanup:
             harness.run(timeout_ms=10)
         attempted = any(
             method == "cleanup-attempt" or
-            (method == "Runtime.callFunctionOn" and params and "this.clear" in params.get("functionDeclaration", ""))
+            (
+                method == "Runtime.callFunctionOn"
+                and params
+                and "this.clear" in params.get("functionDeclaration", "")
+            )
             for method, params in harness.log
         )
         assert attempted, "an expired operation still owes sensitive-field cleanup"
@@ -587,7 +593,9 @@ class TestCleanupOutsideTheWorkWall:
         with pytest.raises(asyncio.CancelledError):
             harness.run()
         assert any(
-            m == "Runtime.callFunctionOn" and p and "this.clear" in str(p.get("functionDeclaration"))
+            m == "Runtime.callFunctionOn"
+            and p
+            and "this.clear" in str(p.get("functionDeclaration"))
             for m, p in harness.log
         ), "a cancellation after possible insertion still owes a clear"
 
@@ -712,7 +720,9 @@ class TestUncertainSubmission:
         with pytest.raises(asyncio.CancelledError):
             harness.run()
         assert any(
-            m == "Runtime.callFunctionOn" and p and "this.clear" in str(p.get("functionDeclaration"))
+            m == "Runtime.callFunctionOn"
+            and p
+            and "this.clear" in str(p.get("functionDeclaration"))
             for m, p in harness.log
         ), "a cancellation after a dispatched submit still owes a clear"
 

@@ -20,6 +20,7 @@ from pathlib import Path
 
 import pytest
 from onepassword_lifecycle_fixtures import DEST_NAME, HOSTS, OTHER_ORIGIN, STABLE
+from onepassword_lifecycle_fixtures import _Boundaries as _Boundaries
 from onepassword_lifecycle_fixtures import _darwin as _darwin
 from onepassword_lifecycle_fixtures import (
     _never_read_the_real_registration as _never_read_the_real_registration,
@@ -62,7 +63,7 @@ class TestTemporarySessions:
         registry_path: str,
         valid_installation: Path,
         synthetic_chrome_binary: Path,
-        stubbed_core_boundaries: dict[str, object],
+        stubbed_core_boundaries: _Boundaries,
     ) -> None:
         first = _temporary_launch(registry_path, 9461)
         second = _temporary_launch(registry_path, 9462)
@@ -91,7 +92,7 @@ class TestTemporarySessions:
         registry_path: str,
         valid_installation: Path,
         synthetic_chrome_binary: Path,
-        stubbed_core_boundaries: dict[str, object],
+        stubbed_core_boundaries: _Boundaries,
     ) -> None:
         instance = _temporary_launch(registry_path, 9464)
 
@@ -111,7 +112,7 @@ class TestTemporarySetupBoundaries:
         tmp_path: Path,
         registry_path: str,
         synthetic_chrome_binary: Path,
-        stubbed_core_boundaries: dict[str, object],
+        stubbed_core_boundaries: _Boundaries,
     ) -> None:
         invalid = tmp_path / HOSTS / DEST_NAME
         invalid.parent.mkdir(parents=True)
@@ -135,7 +136,7 @@ class TestTemporarySetupBoundaries:
         tmp_path: Path,
         registry_path: str,
         synthetic_chrome_binary: Path,
-        stubbed_core_boundaries: dict[str, object],
+        stubbed_core_boundaries: _Boundaries,
     ) -> None:
         source = tmp_path / HOSTS / DEST_NAME
         source.parent.mkdir(parents=True)
@@ -151,7 +152,7 @@ class TestTemporarySetupBoundaries:
         self,
         registry_path: str,
         synthetic_chrome_binary: Path,
-        stubbed_core_boundaries: dict[str, object],
+        stubbed_core_boundaries: _Boundaries,
     ) -> None:
         instance = _temporary_launch(registry_path, 9467)
 
@@ -168,7 +169,7 @@ class TestTemporarySetupBoundaries:
         registry_path: str,
         valid_installation: Path,
         synthetic_chrome_binary: Path,
-        stubbed_core_boundaries: dict[str, object],
+        stubbed_core_boundaries: _Boundaries,
     ) -> None:
         monkeypatch.setattr(sys, "platform", "linux")
 
@@ -251,7 +252,7 @@ class TestTemporarySeedBoundaries:
         registry_path: str,
         valid_installation: Path,
         synthetic_chrome_binary: Path,
-        stubbed_core_boundaries: dict[str, object],
+        stubbed_core_boundaries: _Boundaries,
     ) -> None:
         _SEED_BOUNDARIES[boundary](monkeypatch)
 

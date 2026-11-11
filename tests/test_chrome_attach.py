@@ -243,7 +243,8 @@ def shell(profile, port):
                 if process.poll() is not None:
                     if "MachPortRendezvousServer" in text and "Permission denied" in text:
                         pytest.skip(
-                            "sandbox denies headless-shell Mach port registration; live attachment unverified"
+                            "sandbox denies headless-shell Mach port registration; "
+                            "live attachment unverified"
                         )
                     pytest.fail(f"headless shell exited: {text}")
                 time.sleep(0.02)
@@ -582,7 +583,10 @@ def test_a_directory_that_is_not_there_names_the_directory(argv, discovery, caps
     not there. The reviewed build answered "unknown Chrome channel 'bogus'",
     which is the wrong shape of answer for a flag that takes a directory.
     """
-    assert cli.main([*argv[:1], *[a.replace("bogus", str(tmp_path / "nope")) for a in argv[1:]]]) == 2
+    assert (
+        cli.main([*argv[:1], *[a.replace("bogus", str(tmp_path / "nope")) for a in argv[1:]]])
+        == 2
+    )
     error = capsys.readouterr().err
     assert str(tmp_path / "nope") in error
     assert "Traceback" not in error
@@ -964,7 +968,7 @@ def test_the_port_file_guid_is_never_sent_to_the_other_family(discovery, capsys)
             self.send_response(404)
             self.end_headers()
 
-        def log_message(self, *args):
+        def log_message(self, format: str, *args: object) -> None:
             pass
 
     with socket.socket() as probe:
@@ -1009,14 +1013,18 @@ def test_the_per_user_managed_preferences_path_is_read():
 
 
 @pytest.mark.parametrize("value", [False, 0])
-def test_an_integer_zero_policy_is_an_explicit_refusal(value, discovery, monkeypatch, capsys, tmp_path):
+def test_an_integer_zero_policy_is_an_explicit_refusal(
+    value, discovery, monkeypatch, capsys, tmp_path
+):
     """M8. A plist writes <false/> and <integer>0</integer>, and Chrome reads
 
     both as off. Testing `is False` saw only the first.
     """
     plist = tmp_path / "com.google.Chrome.plist"
     plist.write_bytes(plistlib.dumps({"RemoteDebuggingAllowed": value}))
-    assert chrome_discovery._policy_forbids(plistlib.loads(plist.read_bytes())["RemoteDebuggingAllowed"])
+    assert chrome_discovery._policy_forbids(
+        plistlib.loads(plist.read_bytes())["RemoteDebuggingAllowed"]
+    )
     monkeypatch.setattr(chrome_discovery.sys, "platform", "darwin")
     monkeypatch.setattr(chrome_discovery, "_macos_policy_paths", lambda: [plist])
     assert cli.main(["snapshot", "--chrome-profile"]) == 2

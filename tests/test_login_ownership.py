@@ -21,6 +21,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -586,7 +587,7 @@ class TestRecheckOffTheEventLoop:
     async def test_recheck_helper_children_settle_inside_the_budget(
         self, monkeypatch
     ):
-        seen: dict[str, object] = {}
+        seen: dict[str, Any] = {}
 
         def holding(pid: int, path: Path, timeout: float = 2.0) -> bool:
             child = subprocess.Popen(

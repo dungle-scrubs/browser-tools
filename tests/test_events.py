@@ -20,12 +20,16 @@ from __future__ import annotations
 
 import asyncio
 import json
+from typing import TYPE_CHECKING, cast
 
 import pytest
 
 from browser_tools import cli, events, lifecycle
 from browser_tools.core import registry as core_registry
 from browser_tools.core.cdp_client import CDPClient
+
+if TYPE_CHECKING:
+    from websockets.asyncio.client import ClientConnection
 from browser_tools.events import WaitTimeout
 from browser_tools.lifecycle import LifecycleError
 from browser_tools.passthrough import UsageError
@@ -140,7 +144,13 @@ class TestWaitSubscribeFirst:
         # the wait loop examines the buffer. Only subscribe-first catches it.
         fake = _RaceFakeCDP([("Page.loadEventFired", {"timestamp": 1})])
         result = asyncio.run(
-            events.wait_on_session(fake, "S1", "Page.loadEventFired", None, timeout=5)
+            events.wait_on_session(
+                cast("CDPClient", fake),
+                "S1",
+                "Page.loadEventFired",
+                None,
+                timeout=5,
+            )
         )
         # Proof the ordering was subscribe-then-enable: the handler was already
         # registered when Domain.enable fired the event.
@@ -159,7 +169,11 @@ class TestWaitSubscribeFirst:
         )
         result = asyncio.run(
             events.wait_on_session(
-                fake, "S1", "Network.responseReceived", "target.example", timeout=5
+                cast("CDPClient", fake),
+                "S1",
+                "Network.responseReceived",
+                "target.example",
+                timeout=5,
             )
         )
         assert result["params"]["url"] == "https://target.example/api"
@@ -171,13 +185,23 @@ class TestWaitSubscribeFirst:
         with pytest.raises(WaitTimeout):
             asyncio.run(
                 events.wait_on_session(
-                    fake, "S1", "Network.responseReceived", "target.example", timeout=0.05
+                    cast("CDPClient", fake),
+                    "S1",
+                    "Network.responseReceived",
+                    "target.example",
+                    timeout=0.05,
                 )
             )
 
     def test_handler_removed_after_return(self):
         fake = _RaceFakeCDP([("Page.loadEventFired", {"timestamp": 1})])
-        asyncio.run(events.wait_on_session(fake, "S1", "Page.loadEventFired", None, timeout=5))
+        asyncio.run(events.wait_on_session(
+            cast("CDPClient", fake),
+            "S1",
+            "Page.loadEventFired",
+            None,
+            timeout=5,
+        ))
         # off() was called in the finally, leaving no live handler behind.
         assert fake._handlers.get("Page.loadEventFired") == []
 
@@ -211,7 +235,7 @@ def _event_frame(method: str, session_id: str, params: dict) -> str:
 
 async def _drive(cdp: CDPClient, frames: list[str]) -> None:
     """Run the real recv loop over one batch of frames, then stop."""
-    cdp._ws = _FakeWS(frames)
+    cdp._ws = cast("ClientConnection", _FakeWS(frames))
     cdp._connected = True
     await cdp._recv_loop()
 

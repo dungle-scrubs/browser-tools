@@ -11,6 +11,7 @@ websocket, MCP front, or daemon process is ever involved.
 from __future__ import annotations
 
 import json
+from typing import Protocol, cast
 
 import pytest
 
@@ -136,6 +137,12 @@ class TestFormatResults:
 # ---------------------------------------------------------------------------
 
 
+class _ConnectedClient(Protocol):
+    """What the fake client exposes; the real one keeps ``_connected``."""
+
+    connected: bool
+
+
 class TestCDPProfilerTransport:
     @pytest.mark.asyncio
     async def test_connect_uses_core_cdp_client(self, fake_transport):
@@ -143,9 +150,10 @@ class TestCDPProfilerTransport:
         cp = CDPProfiler("ws://fake/page/9222")
         await cp.connect()
         assert cp.cdp is not None
-        assert cp.cdp.connected
+        # The fake client exposes `connected`; the real one keeps `_connected`.
+        assert cast("_ConnectedClient", cp.cdp).connected
         await cp.close()
-        assert not cp.cdp.connected
+        assert not cast("_ConnectedClient", cp.cdp).connected
 
     @pytest.mark.asyncio
     async def test_start_profiling_sends_enable_then_start(self, fake_transport):

@@ -113,7 +113,7 @@ def site(tmp_path_factory: pytest.TempPathFactory) -> Any:
 
 
 class _QuietHandler(SimpleHTTPRequestHandler):
-    def log_message(self, *args: Any) -> None:
+    def log_message(self, format: str, *args: Any) -> None:
         pass
 
 
@@ -371,7 +371,9 @@ def test_the_supervisor_attaches_to_page_targets_only(supervised_browser, site) 
         # One connection opens the page and waits for the iframe, attaching to
         # targets as it probes them; it is closed before the census so what is
         # left attached is the supervisor's doing alone.
-        opener = CDPClient(ws_url=get_ws_url(port=supervised_browser["port"], target_type="browser"))
+        opener = CDPClient(
+            ws_url=get_ws_url(port=supervised_browser["port"], target_type="browser")
+        )
         await opener.connect()
         try:
             await _send(opener, "Target.createTarget", params={"url": site["parent"]})
@@ -380,7 +382,9 @@ def test_the_supervisor_attaches_to_page_targets_only(supervised_browser, site) 
             await opener.close()
         await asyncio.sleep(1)  # let Chrome retire the closed connection's sessions
 
-        census = CDPClient(ws_url=get_ws_url(port=supervised_browser["port"], target_type="browser"))
+        census = CDPClient(
+            ws_url=get_ws_url(port=supervised_browser["port"], target_type="browser")
+        )
         await census.connect()
         try:
             targets = await _send(census, "Target.getTargets")

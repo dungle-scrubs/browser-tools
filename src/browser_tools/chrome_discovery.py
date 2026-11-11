@@ -328,7 +328,9 @@ def discover_chrome(profile: str = "stable") -> ResolvedEndpoint:
             pool.submit(_family_knows_the_guid, host, port, browser_path)
             for host in LOOPBACK_FAMILIES
         ]
-        verified = [host for host, probe in zip(LOOPBACK_FAMILIES, probes, strict=True) if probe.result()]
+        verified = [
+            host for host, probe in zip(LOOPBACK_FAMILIES, probes, strict=True) if probe.result()
+        ]
     for host in verified:
         url = f"ws://{host}:{port}{browser_path}"
         return ResolvedEndpoint(port, url, url, host, "--chrome-profile")

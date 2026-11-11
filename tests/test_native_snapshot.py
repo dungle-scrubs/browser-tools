@@ -574,7 +574,9 @@ async def test_read_stitched_ax_tree_discovers_and_splices_child_frame():
 @pytest.mark.asyncio
 async def test_read_stitched_ax_tree_degrades_to_top_frame_when_no_children():
     class _NoFrames:
-        async def __call__(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        async def __call__(
+            self, method: str, params: dict[str, Any] | None = None
+        ) -> dict[str, Any]:
             if method == AX_GET_FULL_TREE:
                 return _form_tree()
             if method == PAGE_GET_FRAME_TREE:

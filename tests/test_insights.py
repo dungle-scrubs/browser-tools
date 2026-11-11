@@ -71,6 +71,7 @@ def test_before_setup_names_command(tmp_path, monkeypatch, capsys):
 @pytest.mark.parametrize("name", ["load-only", "driven"])
 def test_no_navigation_is_failure(engine, name, capsys):
     code, document, error = invoke(capsys, "--trace", str(FIXTURES / f"{name}.json"))
+    assert document is not None
     assert code == 1
     assert document["navigations"] == []
     assert document["browserVersion"] == "HeadlessChrome/151.0.7922.34"
@@ -82,6 +83,7 @@ def test_navigation_interaction_difference(engine, capsys, name, state):
     code, document, error = invoke(
         capsys, "--trace", str(FIXTURES / f"{name}.json"), "--insight", "INPBreakdown"
     )
+    assert document is not None
     assert code == 0, error
     # One insight per navigation. These fixtures have exactly one navigation;
     # two-navigations.json covers the case where that is not so.
@@ -101,6 +103,7 @@ def test_navigation_interaction_difference(engine, capsys, name, state):
 
 def test_http_probe_has_all_models(engine, capsys):
     code, document, error = invoke(capsys, "--trace", str(FIXTURES / "http-navigation.json"))
+    assert document is not None
     assert code == 0, error
     assert document["engineRevision"] == "0.0.65"
     assert document["browserVersion"] == "HeadlessChrome/153.0.0.0"
@@ -113,6 +116,7 @@ def test_http_probe_has_all_models(engine, capsys):
 
 def test_model_errors_are_not_silently_dropped(engine, capsys):
     code, document, error = invoke(capsys, "--trace", str(FIXTURES / "nav.json"))
+    assert document is not None
     assert code == 1
     assert "DocumentLatency: missing document request timing" in error
     assert len(document["navigations"][0]["insights"]) == 18
@@ -134,10 +138,12 @@ def test_version_refusal_and_override(engine, capsys, tmp_path, version):
     path.write_text(json.dumps(trace))
     args = ["--trace", str(path), "--insight", "INPBreakdown"]
     code, refused, error = invoke(capsys, *args)
+    assert refused is not None
     assert code == 1 and "--ignore-engine-mismatch" in error
     assert refused["browserVersion"] == version
     assert refused["engineRevision"] == "0.0.65"
     code, accepted, error = invoke(capsys, *args, "--ignore-engine-mismatch")
+    assert accepted is not None
     assert code == 0, error
     assert accepted["browserVersion"] == version
     assert accepted["engineRevision"] == refused["engineRevision"]
@@ -147,6 +153,7 @@ def test_version_refusal_and_override(engine, capsys, tmp_path, version):
 def test_text_is_only_upstream_detail(engine, capsys):
     args = ["--trace", str(FIXTURES / "nav-click.json"), "--insight", "INPBreakdown"]
     _, document, _ = invoke(capsys, *args)
+    assert document is not None
     assert cli.main(["insights", *args, "--format", "text"]) == 0
     output = capsys.readouterr()
     assert output.out.strip() == document["navigations"][0]["insights"][0]["detail"]
@@ -258,6 +265,7 @@ def test_bare_insights_names_setup(capsys):
 )
 def test_zero_sets_names_the_cause_that_is_true(engine, capsys, name, expected):
     code, document, error = invoke(capsys, "--trace", str(FIXTURES / f"{name}.json"))
+    assert document is not None
     assert code == 1
     assert document["navigations"] == []
     assert "Zero Insight Sets" in error
@@ -270,6 +278,7 @@ def test_zero_sets_names_the_cause_that_is_true(engine, capsys, name, expected):
 
 def test_error_page_navigation_is_not_reported_as_success(engine, capsys):
     code, document, error = invoke(capsys, "--trace", str(FIXTURES / "error-page.json"))
+    assert document is not None
     assert code == 1
     assert "chrome-error://chromewebdata/" in error and "never loaded" in error
     # The analysis is retained, as it is for model errors.
@@ -278,7 +287,10 @@ def test_error_page_navigation_is_not_reported_as_success(engine, capsys):
     assert len(navigation["insights"]) == 19
     # A failed run prints the stamped document, not pages of text over an
     # error page.
-    assert cli.main(["insights", "--trace", str(FIXTURES / "error-page.json"), "--format", "text"]) == 1
+    assert (
+        cli.main(["insights", "--trace", str(FIXTURES / "error-page.json"), "--format", "text"])
+        == 1
+    )
     assert json.loads(capsys.readouterr().out)["navigations"][0]["url"].startswith("chrome-error:")
 
 
@@ -286,6 +298,7 @@ def test_selected_insight_is_one_per_navigation(engine, capsys):
     code, document, error = invoke(
         capsys, "--trace", str(FIXTURES / "two-navigations.json"), "--insight", "INPBreakdown"
     )
+    assert document is not None
     assert code == 0, error
     assert len(document["navigations"]) == 2
     assert [len(navigation["insights"]) for navigation in document["navigations"]] == [1, 1]
@@ -294,7 +307,11 @@ def test_selected_insight_is_one_per_navigation(engine, capsys):
 def test_text_names_each_navigation_when_there_is_more_than_one(engine, capsys):
     trace = str(FIXTURES / "two-navigations.json")
     _, document, _ = invoke(capsys, "--trace", trace, "--insight", "INPBreakdown")
-    assert cli.main(["insights", "--trace", trace, "--insight", "INPBreakdown", "--format", "text"]) == 0
+    assert document is not None
+    assert (
+        cli.main(["insights", "--trace", trace, "--insight", "INPBreakdown", "--format", "text"])
+        == 0
+    )
     output = capsys.readouterr().out
     for index, navigation in enumerate(document["navigations"], start=1):
         assert f"# Navigation {index} of 2: {navigation['url']}" in output
@@ -307,6 +324,7 @@ def test_version_gate_needs_a_whole_product_token(engine, tmp_path, capsys):
     path = tmp_path / "forged.json"
     path.write_text(json.dumps(trace))
     code, document, error = invoke(capsys, "--trace", str(path))
+    assert document is not None
     assert code == 1 and "--ignore-engine-mismatch" in error
     assert document["browserVersion"] is None
 
@@ -352,6 +370,7 @@ def test_engine_stderr_alone_is_still_not_failure(engine, tmp_path, monkeypatch,
     )
     monkeypatch.setattr(insights, "ADAPTER", directory)
     code, document, error = invoke(capsys, "--trace", str(FIXTURES / "http-navigation.json"))
+    assert document is not None
     assert code == 0, error
     assert len(document["navigations"][0]["insights"]) == 19
 
@@ -411,6 +430,7 @@ def test_missing_marker_restamps_without_reinstalling(engine, tmp_path, monkeypa
 
     monkeypatch.setattr(subprocess, "run", run)
     code, document, error = invoke(capsys, "--setup")
+    assert document is not None
     assert code == 0, error
     assert document["ready"] is True
     assert (directory / ".installed").read_text() == insights._lock_digest(directory)
@@ -422,6 +442,7 @@ def test_a_deleted_setup_lock_is_recreated(engine, tmp_path, monkeypatch, capsys
     monkeypatch.setattr(insights, "ADAPTER", directory)
     assert not (directory / ".setup.lock").exists()
     code, document, error = invoke(capsys, "--trace", str(FIXTURES / "http-navigation.json"))
+    assert document is not None
     assert code == 0, error
     assert len(document["navigations"][0]["insights"]) == 19
 

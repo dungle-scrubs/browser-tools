@@ -119,7 +119,9 @@ async def _send(cdp: Any, session_id: str, method: str, params: dict[str, Any],
     """
     timeout = deadline.command_timeout()
     try:
-        result = await cdp.send(method=method, params=params, session_id=session_id, timeout=timeout)
+        result = await cdp.send(
+            method=method, params=params, session_id=session_id, timeout=timeout
+        )
     except Exception:
         logger.debug("login CDP send failed at %s", phase)
         raise LoginError(contract.SESSION_FAILED.format(phase=phase)) from None
@@ -575,7 +577,9 @@ async def _await_success(cdp: Any, session_id: str, frame: contract.Frame,
     return None
 
 
-async def _try_clear(cdp: Any, session_id: str, session_object: str, frame: contract.Frame) -> bool | None:
+async def _try_clear(
+    cdp: Any, session_id: str, session_object: str, frame: contract.Frame
+) -> bool | None:
     """Clear the bound fields. True=cleared, False=uncertain, None=replaced.
 
     A document replacement (the bound world died with it) is a clean clear:

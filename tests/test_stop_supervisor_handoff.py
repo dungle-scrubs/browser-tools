@@ -80,7 +80,7 @@ class TestStopEndsTheSupervisor:
         proc, pid_start = _live_supervisor_process()
         registry_path = _entry_with_supervisor(tmp_path, proc, pid_start)
         try:
-            outcome = lifecycle.stop(
+            lifecycle.stop(
                 instance="x-01",
                 registry_path=registry_path,
                 _supervisor_term_wait=0.3,

@@ -32,8 +32,9 @@ class NetworkTransport:
             assert session_id == 'S1'
             callback(params)
 
-    async def send(self, method, params=None, session_id=None, timeout=None):
+    async def send(self, method, params: dict | None = None, session_id=None, timeout=None):
         self.calls.append(method)
+        params = params or {}
         assert session_id == 'S1'
         if method == 'Page.getFrameTree':
             return {'frameTree': {'frame': {'id': 'f', 'url': 'https://fixture.test/'}}}
@@ -120,7 +121,10 @@ def test_run_deadline_interrupts_network_window(monkeypatch, tmp_path, capsys):
     path = tmp_path / 'steps'
     path.write_text('network-get --url /never --duration 20\neval 1\n')
     start = time.monotonic()
-    assert cli.main(['run', str(path), '--timeout', '.05', '--endpoint', 'http://127.0.0.1:9222']) == 1
+    assert (
+        cli.main(['run', str(path), '--timeout', '.05', '--endpoint', 'http://127.0.0.1:9222'])
+        == 1
+    )
     elapsed = time.monotonic() - start
     document = json.loads(capsys.readouterr().out)
     assert document['run'] == {'steps': 2, 'completed': 0, 'status': 'timeout'}

@@ -25,7 +25,10 @@ is wrong: the pattern stopped matching, and the old frame id stayed.
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
+
+if TYPE_CHECKING:
+    from browser_tools.core.cdp_client import CDPClient
 
 import pytest
 from doubles import FakeHandler
@@ -194,7 +197,13 @@ class TestTheVerbsThatEnableDomains:
 
         async def drive():
             task = asyncio.ensure_future(
-                events.wait_on_session(cdp, "S1", "Network.requestWillBeSent", None, 0.05)
+                events.wait_on_session(
+                    cast("CDPClient", cdp),
+                    "S1",
+                    "Network.requestWillBeSent",
+                    None,
+                    0.05,
+                )
             )
             with pytest.raises(events.WaitTimeout):
                 await task
@@ -212,7 +221,7 @@ class TestTheVerbsThatEnableDomains:
         async def drive():
             with pytest.raises(events.WaitTimeout):
                 await events.wait_on_session(
-                    cdp, "S1", "Runtime.executionContextCreated", None, 0.05
+                    cast("CDPClient", cdp), "S1", "Runtime.executionContextCreated", None, 0.05
                 )
 
         asyncio.run(drive())
@@ -220,7 +229,12 @@ class TestTheVerbsThatEnableDomains:
 
     def test_console_list_gives_runtime_back_without_disabling_it(self):
         cdp = FakeCDP()
-        asyncio.run(list_verbs.collect_on_session(cdp, "S1", list_verbs.CONSOLE_EVENTS, 0))
+        asyncio.run(list_verbs.collect_on_session(
+            cast("CDPClient", cdp),
+            "S1",
+            list_verbs.CONSOLE_EVENTS,
+            0,
+        ))
         assert "Runtime.disable" not in cdp.calls
         assert all(event in cdp.handlers for event in list_verbs.CONSOLE_EVENTS)
         assert all(cdp.handlers[event] == [] for event in list_verbs.CONSOLE_EVENTS), (
@@ -229,7 +243,12 @@ class TestTheVerbsThatEnableDomains:
 
     def test_network_list_preserves_run_network(self):
         cdp = FakeCDP()
-        asyncio.run(list_verbs.collect_on_session(cdp, "S1", list_verbs.NETWORK_EVENTS, 0))
+        asyncio.run(list_verbs.collect_on_session(
+            cast("CDPClient", cdp),
+            "S1",
+            list_verbs.NETWORK_EVENTS,
+            0,
+        ))
         assert "Network.enable" in cdp.calls
         assert "Network.disable" not in cdp.calls, (
             "network-list disabled the run buffer"
@@ -238,8 +257,18 @@ class TestTheVerbsThatEnableDomains:
     def test_two_network_collections_keep_the_run_buffer_enabled(self):
         """The property the whole rule exists for."""
         cdp = FakeCDP()
-        asyncio.run(list_verbs.collect_on_session(cdp, "S1", list_verbs.NETWORK_EVENTS, 0))
-        asyncio.run(list_verbs.collect_on_session(cdp, "S1", list_verbs.NETWORK_EVENTS, 0))
+        asyncio.run(list_verbs.collect_on_session(
+            cast("CDPClient", cdp),
+            "S1",
+            list_verbs.NETWORK_EVENTS,
+            0,
+        ))
+        asyncio.run(list_verbs.collect_on_session(
+            cast("CDPClient", cdp),
+            "S1",
+            list_verbs.NETWORK_EVENTS,
+            0,
+        ))
         assert cdp.calls == [
             "Network.enable",
             "Network.enable",
@@ -261,7 +290,12 @@ class TestEveryCommandGoesToTheRunsOwnSession:
 
     def test_a_collection_sends_and_subscribes_on_the_session_it_was_given(self):
         cdp = FakeCDP()
-        asyncio.run(list_verbs.collect_on_session(cdp, "S1", list_verbs.NETWORK_EVENTS, 0))
+        asyncio.run(list_verbs.collect_on_session(
+            cast("CDPClient", cdp),
+            "S1",
+            list_verbs.NETWORK_EVENTS,
+            0,
+        ))
         wrong = [entry for entry in cdp.sessions if entry[1] != "S1"]
         assert cdp.sessions and not wrong, f"these did not carry session S1: {wrong}"
 
@@ -270,7 +304,13 @@ class TestEveryCommandGoesToTheRunsOwnSession:
 
         async def drive():
             with pytest.raises(events.WaitTimeout):
-                await events.wait_on_session(cdp, "S1", "Network.requestWillBeSent", None, 0.05)
+                await events.wait_on_session(
+                    cast("CDPClient", cdp),
+                    "S1",
+                    "Network.requestWillBeSent",
+                    None,
+                    0.05,
+                )
 
         asyncio.run(drive())
         wrong = [entry for entry in cdp.sessions if entry[1] != "S1"]
@@ -303,7 +343,13 @@ class TestWaitOnlySeesWhatArrivesAfterItSubscribes:
         async def drive():
             cdp.emit("Page.loadEventFired", {"timestamp": 1})
             with pytest.raises(events.WaitTimeout):
-                await events.wait_on_session(cdp, "S1", "Page.loadEventFired", None, 0.05)
+                await events.wait_on_session(
+                    cast("CDPClient", cdp),
+                    "S1",
+                    "Page.loadEventFired",
+                    None,
+                    0.05,
+                )
 
         asyncio.run(drive())
 
@@ -312,7 +358,13 @@ class TestWaitOnlySeesWhatArrivesAfterItSubscribes:
 
         async def drive():
             task = asyncio.ensure_future(
-                events.wait_on_session(cdp, "S1", "Page.loadEventFired", None, 1.0)
+                events.wait_on_session(
+                    cast("CDPClient", cdp),
+                    "S1",
+                    "Page.loadEventFired",
+                    None,
+                    1.0,
+                )
             )
             while "Page.loadEventFired" not in cdp.handlers:
                 await asyncio.sleep(0)
@@ -377,7 +429,7 @@ class TestAHandWrittenEnableIsNotUndone:
         async def drive():
             await cdp.send("DOM.enable", session_id="S1")
             await list_verbs.collect_on_session(
-                cdp, "S1", ["DOM.documentUpdated"], 0, frozenset({"DOM"})
+                cast("CDPClient", cdp), "S1", ["DOM.documentUpdated"], 0, frozenset({"DOM"})
             )
 
         asyncio.run(drive())
@@ -393,7 +445,12 @@ class TestAHandWrittenEnableIsNotUndone:
             await cdp.send("DOM.enable", session_id="S1")
             with pytest.raises(events.WaitTimeout):
                 await events.wait_on_session(
-                    cdp, "S1", "DOM.documentUpdated", None, 0.05, frozenset({"DOM"})
+                    cast("CDPClient", cdp),
+                    "S1",
+                    "DOM.documentUpdated",
+                    None,
+                    0.05,
+                    frozenset({"DOM"}),
                 )
 
         asyncio.run(drive())
@@ -621,9 +678,13 @@ class TestAReadBorrowsTheSelectionAndGivesItBack:
         frames.select_frame_by_url("account")
         with self._handler(frames).borrowed_frame_selection():
             frames.select_frame_by_url("checkout")
-            assert frames.get_selected_frame().frame_id == "C"
+            selected = frames.get_selected_frame()
+            assert selected is not None
+            assert selected.frame_id == "C"
         assert frames.selection_pattern == "account"
-        assert frames.get_selected_frame().frame_id == "A"
+        restored = frames.get_selected_frame()
+        assert restored is not None
+        assert restored.frame_id == "A"
 
     def test_no_selection_comes_back_as_no_selection(self):
         frames = self._manager()
@@ -890,7 +951,9 @@ class TestTheTwoViewsOfTheFrameTreeAgree:
             "this test needs the two orders to differ, and they no longer do"
         )
         assert [f.frame_id for f in frames._reachable_frames()] == listed
-        assert frames.select_frame_by_url("pay").frame_id == "B", (
+        selected = frames.select_frame_by_url("pay")
+        assert selected is not None
+        assert selected.frame_id == "B", (
             "the selection resolved against the frame map, so it picked a "
             "frame the caller's `frames list` showed second"
         )
@@ -1066,7 +1129,9 @@ class TestAFrameWithNowhereToHangIsDropped:
         frames = self._rooted()
         frames.handle_frame_attached({"frameId": "G", "parentFrameId": "C"})
         assert "G" not in frames._frames
-        assert frames.select_frame_by_url("x.test").frame_id == "R"
+        selected = frames.select_frame_by_url("x.test")
+        assert selected is not None
+        assert selected.frame_id == "R"
 
     def test_a_navigation_for_a_frame_whose_ancestor_is_gone(self):
         frames = self._rooted()

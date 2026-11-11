@@ -192,6 +192,7 @@ class TestExitCodes:
         async def trapped(port, spec, by):
             opened.append(True)
             raise LifecycleError("session")
+            yield None  # unreachable: the trap fails before it hands over a session
 
         monkeypatch.setattr(login_module, "one_shot_page_session", trapped)
         assert cli.main(
@@ -219,7 +220,9 @@ class TestExitCodes:
         ) == 2
         assert "not found" in capsys.readouterr().err
 
-    def test_operational_failure_is_exit_1(self, registry, login_stub, monkeypatch, tmp_path, capsys):
+    def test_operational_failure_is_exit_1(
+        self, registry, login_stub, monkeypatch, tmp_path, capsys
+    ):
         registry(**{"web-01": chrome_entry()})
 
         def failing(**kwargs):
@@ -234,7 +237,9 @@ class TestExitCodes:
         assert "error:" in err
         assert "success condition" in err
 
-    def test_success_prints_exactly_the_small_document(self, registry, login_stub, tmp_path, capsys):
+    def test_success_prints_exactly_the_small_document(
+        self, registry, login_stub, tmp_path, capsys
+    ):
         registry(**{"web-01": chrome_entry()})
         assert cli.main(
             ["login", "--account", "example", "--config", policy_file(tmp_path)]
@@ -266,6 +271,7 @@ class TestPreBrowserRefusals:
         async def trapped(port, spec, by):
             opened.append(True)
             raise LifecycleError("session")
+            yield None  # unreachable: the trap fails before it hands over a session
 
         monkeypatch.setattr(login_module, "one_shot_page_session", trapped)
         return opened

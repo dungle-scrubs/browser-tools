@@ -113,7 +113,12 @@ class TestValidationRefusals:
         harness.fake.outcome = {"ok": False, "reason": "wrong-origin"}
         with pytest.raises(LifecycleError):
             harness.run()
-        assert not any(m == "Runtime.callFunctionOn" and p and "this.fill" in str(p.get("functionDeclaration")) for m, p in harness.log)
+        assert not any(
+            m == "Runtime.callFunctionOn"
+            and p
+            and "this.fill" in str(p.get("functionDeclaration"))
+            for m, p in harness.log
+        )
 
     def test_unknown_reason_stays_fixed(self, harness):
         harness.fake.outcome = {"ok": False, "reason": "page-invented-reason"}
@@ -518,13 +523,17 @@ class TestUntrustedText:
 class TestRelayFailuresSurfaceFixed:
     def test_relay_failure_after_validation_is_operational(self, harness, monkeypatch):
         def failing_read(**kwargs):
-            raise RelayError("the credential relay refused or failed to read the value (relay: token)")
+            raise RelayError(
+                "the credential relay refused or failed to read the value (relay: token)"
+            )
 
         monkeypatch.setattr(credential_relay, "read_reference", failing_read)
         with pytest.raises(LifecycleError, match="relay"):
             harness.run()
 
-    def test_relay_unsupported_fails_before_the_browser_opens(self, monkeypatch, tmp_path, registry):
+    def test_relay_unsupported_fails_before_the_browser_opens(
+        self, monkeypatch, tmp_path, registry
+    ):
         monkeypatch.setattr(
             login_ownership, "verify_recorded_owner",
             lambda entry, deadline: owner_snapshot(),

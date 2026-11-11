@@ -50,7 +50,10 @@ def test_capture_navigation_and_interaction(tmp_path, capsys):
             url = f"http://127.0.0.1:{server.server_port}/fixture.html"
             for driven, state in [(False, "pass"), (True, "fail")]:
                 steps = tmp_path / "steps.txt"
-                text = f"Page.navigate '{json.dumps({'url': url})}'\nwait-text 'block the main thread'\nwait-stable\n"
+                text = (
+                    f"Page.navigate '{json.dumps({'url': url})}'\n"
+                    "wait-text 'block the main thread'\nwait-stable\n"
+                )
                 if driven:
                     # The fixture's button is below the heading at x=32,y~112.
                     for kind in ["mousePressed", "mouseReleased"]:
@@ -131,7 +134,7 @@ def test_zero_set_and_failure_causes_reproduce_live(tmp_path, capsys):
                     time.sleep(10)
                 super().do_GET()
 
-            def log_message(self, *args):
+            def log_message(self, format: str, *args: object) -> None:
                 pass
 
         server = ThreadingHTTPServer(

@@ -16,10 +16,13 @@ import json
 import queue
 import threading
 import time
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
-from node_broker import McpBroker
+from node_broker import McpBroker, _McpTransport
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 
 class _FakeStdout:
@@ -103,7 +106,7 @@ class _FakeProc:
 
 
 @pytest.fixture
-def fake_proc() -> _FakeProc:
+def fake_proc() -> Iterator[_FakeProc]:
     """Provide a fake subprocess the broker can multiplex without spawning."""
     proc = _FakeProc()
     yield proc
@@ -126,7 +129,7 @@ class TestMcpBroker:
     def test_two_requests_get_distinct_ids_and_route_correctly(self, fake_proc: _FakeProc) -> None:
         """Two concurrent requests get distinct incrementing ids and each
         caller receives its own response, not the other's."""
-        broker = McpBroker(["fake"], proc=fake_proc)
+        broker = McpBroker(["fake"], proc=cast("_McpTransport", fake_proc))
         broker.start()
 
         results: dict[str, dict[str, Any]] = {}
@@ -161,7 +164,7 @@ class TestMcpBroker:
 
     def test_timeout_returns_error_envelope(self, fake_proc: _FakeProc) -> None:
         """A request with no response returns the fixed timeout error envelope."""
-        broker = McpBroker(["fake"], proc=fake_proc)
+        broker = McpBroker(["fake"], proc=cast("_McpTransport", fake_proc))
         broker.start()
 
         response = broker.request("never_answered", {}, timeout=0.1)
@@ -175,7 +178,7 @@ class TestMcpBroker:
     def test_late_response_does_not_corrupt_next_request(self, fake_proc: _FakeProc) -> None:
         """A response arriving after its caller timed out is dropped, so a later
         request still resolves with its own response."""
-        broker = McpBroker(["fake"], proc=fake_proc)
+        broker = McpBroker(["fake"], proc=cast("_McpTransport", fake_proc))
         broker.start()
 
         # First request times out; its pending entry is removed.
@@ -218,7 +221,7 @@ class TestMcpBroker:
 
     def test_request_writes_correct_jsonrpc_line(self, fake_proc: _FakeProc) -> None:
         """request() writes a well-formed JSON-RPC line with the internal id."""
-        broker = McpBroker(["fake"], proc=fake_proc)
+        broker = McpBroker(["fake"], proc=cast("_McpTransport", fake_proc))
         broker.start()
 
         outcome: dict[str, Any] = {}

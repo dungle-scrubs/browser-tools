@@ -468,7 +468,11 @@ def _resolve_help_port(
 ) -> int | ResolvedEndpoint | None:
     """Resolve the port to query for live help, or None for static usage."""
     if endpoint is not None:
-        return endpoint if isinstance(endpoint, ResolvedEndpoint) else browser_endpoint.resolve_endpoint_port(endpoint)
+        return (
+            endpoint
+            if isinstance(endpoint, ResolvedEndpoint)
+            else browser_endpoint.resolve_endpoint_port(endpoint)
+        )
     if instance is not None:
         try:
             info = core_registry.lookup(instance_name=instance, registry_path=registry_path)

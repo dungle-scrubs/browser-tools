@@ -26,7 +26,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
+
+if TYPE_CHECKING:
+    from browser_tools.core.cdp_client import CDPClient
 
 import pytest
 from test_handler_transport import FakeCore, RecordingSeam, _connect
@@ -177,7 +180,12 @@ class TestAFrameSessionThatFailsIsStillListed:
     @pytest.mark.asyncio
     async def test_a_setup_failure_leaves_a_row_naming_the_frame(self):
         client = ScriptedClient(fail={"Page.enable"})
-        sessions = FrameSessions(client, _page_map(), "PAGE-SESSION", "PAGE-TARGET")
+        sessions = FrameSessions(
+            cast("CDPClient", client),
+            _page_map(),
+            "PAGE-SESSION",
+            "PAGE-TARGET",
+        )
         sessions._on_attached(_attached("S1", "T1", "http://child/ad"))
         await sessions.settle(timeout=1.0)
 
@@ -190,7 +198,12 @@ class TestAFrameSessionThatFailsIsStillListed:
         client = ScriptedClient(
             answers={"Page.getFrameTree": lambda sid: {"frameTree": _tree("C1", "ROOT")}}
         )
-        sessions = FrameSessions(client, _page_map(), "PAGE-SESSION", "PAGE-TARGET")
+        sessions = FrameSessions(
+            cast("CDPClient", client),
+            _page_map(),
+            "PAGE-SESSION",
+            "PAGE-TARGET",
+        )
         sessions._on_attached(_attached("S1", "T1"))
         await sessions.settle(timeout=1.0)
         assert sessions.unreachable == {}
@@ -207,7 +220,7 @@ class TestEveryHeldTreeSplicesWhateverTheOrder:
     async def test_a_chain_held_in_reverse_order_all_splices(self):
         frames = _page_map()
         client = ScriptedClient()
-        sessions = FrameSessions(client, frames, "PAGE-SESSION", "PAGE-TARGET")
+        sessions = FrameSessions(cast("CDPClient", client), frames, "PAGE-SESSION", "PAGE-TARGET")
 
         # Grandchild first, so the pass that could splice it runs before the
         # pass that supplies its parent.
@@ -228,7 +241,12 @@ class TestEveryHeldTreeSplicesWhateverTheOrder:
     @pytest.mark.asyncio
     async def test_a_tree_whose_parent_never_arrives_is_still_held(self):
         frames = _page_map()
-        sessions = FrameSessions(ScriptedClient(), frames, "PAGE-SESSION", "PAGE-TARGET")
+        sessions = FrameSessions(
+            cast("CDPClient", ScriptedClient()),
+            frames,
+            "PAGE-SESSION",
+            "PAGE-TARGET",
+        )
         sessions._on_attached(_attached("S1", "T1"))
         sessions.sessions["S1"].pending_tree = _tree("C1", "NOT-IN-THE-MAP")
 
@@ -272,7 +290,7 @@ class TestTheDepthBoundUsesTheTree:
 
         deep = _tree("TOO-DEEP", parent, "http://child/deep")
         client = ScriptedClient(answers={"Page.getFrameTree": lambda sid: {"frameTree": deep}})
-        sessions = FrameSessions(client, frames, "PAGE-SESSION", "PAGE-TARGET")
+        sessions = FrameSessions(cast("CDPClient", client), frames, "PAGE-SESSION", "PAGE-TARGET")
         sessions._on_attached(_attached("S1", "T1", "http://child/deep"))
         await sessions.settle(timeout=1.0)
 
@@ -284,7 +302,12 @@ class TestTheDepthBoundUsesTheTree:
 class TestOneTargetGetsOneSession:
     @pytest.mark.asyncio
     async def test_the_same_target_offered_twice_is_taken_once(self):
-        sessions = FrameSessions(ScriptedClient(), _page_map(), "PAGE-SESSION", "PAGE-TARGET")
+        sessions = FrameSessions(
+            cast("CDPClient", ScriptedClient()),
+            _page_map(),
+            "PAGE-SESSION",
+            "PAGE-TARGET",
+        )
         sessions._on_attached(_attached("S1", "T1"))
         sessions._on_attached(_attached("S2", "T1"))
         assert list(sessions.sessions) == ["S1"]
@@ -292,7 +315,12 @@ class TestOneTargetGetsOneSession:
 
     @pytest.mark.asyncio
     async def test_the_runtimes_own_page_target_is_never_taken(self):
-        sessions = FrameSessions(ScriptedClient(), _page_map(), "PAGE-SESSION", "PAGE-TARGET")
+        sessions = FrameSessions(
+            cast("CDPClient", ScriptedClient()),
+            _page_map(),
+            "PAGE-SESSION",
+            "PAGE-TARGET",
+        )
         sessions._on_attached(
             {
                 "sessionId": "S1",
@@ -317,5 +345,10 @@ class TestSettleDrainsWithoutSleeping:
 
         monkeypatch.setattr(asyncio, "wait", refuse)
         monkeypatch.setattr(asyncio, "sleep", refuse)
-        sessions = FrameSessions(ScriptedClient(), _page_map(), "PAGE-SESSION", "PAGE-TARGET")
+        sessions = FrameSessions(
+            cast("CDPClient", ScriptedClient()),
+            _page_map(),
+            "PAGE-SESSION",
+            "PAGE-TARGET",
+        )
         await sessions.settle(timeout=3.0)

@@ -28,6 +28,9 @@ jobs:
       - name: pyright
         run: uv run pyright src/
 
+      - name: pyright (tests)
+        run: uv run pyright -p tests
+
   test:
     # 3.13 is the floor `requires-python` promises. 3.14 is what the work is
     # actually done on, and it was untested here until now.

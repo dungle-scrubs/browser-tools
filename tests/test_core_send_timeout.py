@@ -19,11 +19,15 @@ from __future__ import annotations
 
 import asyncio
 import json
+from typing import TYPE_CHECKING, cast
 
 import pytest
 import pytest_asyncio
 
 from browser_tools.core.cdp_client import CDPClient
+
+if TYPE_CHECKING:
+    from websockets.asyncio.client import ClientConnection
 
 _STOP = object()
 
@@ -68,7 +72,7 @@ async def live():
     """A connected client with a real receive loop and a silent socket."""
     cdp = CDPClient("ws://test")
     ws = ControllableWebSocket()
-    cdp._ws = ws
+    cdp._ws = cast("ClientConnection", ws)
     cdp._connected = True
     loop_task = asyncio.create_task(cdp._recv_loop())
     await _settle()

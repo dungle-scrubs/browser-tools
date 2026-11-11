@@ -111,7 +111,7 @@ class TestAnEmptyStepListIsRefused:
 
 class TestTheStepSurface:
     @pytest.mark.parametrize("verb", sorted(step_list.STEP_VERBS - {"click", "fill"}))
-    def test_every_listed_verb_is_accepted_bare(self, verb, no_instances):
+    def test_every_listed_verb_is_accepted_bare(self, verb: str, no_instances) -> None:
         """Each of these needs nothing beyond the verb to be a valid step."""
         argv = {
             "frames": "frames list",
@@ -383,7 +383,10 @@ class TestThePreconditionsAreTheCLIsOwn:
         assert "line 2" in str(caught.value)
 
     def test_a_good_screencast_and_detect_still_pass(self, no_instances):
-        assert len(validate("screencast --dir /tmp/x --duration 2 --format png\ndetect --wait 3\n")) == 2
+        assert (
+            len(validate("screencast --dir /tmp/x --duration 2 --format png\ndetect --wait 3\n"))
+            == 2
+        )
 
 
 class TestValidationReachesTheCLIsOwnCode:
