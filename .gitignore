@@ -38,3 +38,6 @@ Thumbs.db
 node_modules/
 src/browser_tools/_insights/.installed*
 src/browser_tools/_insights/.setup.lock
+
+# Agent reflection runs: session transcripts and logs, never committed.
+.reflect/
