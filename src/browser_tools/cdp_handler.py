@@ -2112,6 +2112,10 @@ class CDPHandler:
             }}, TIMEOUT_MS);
 
             function resetTimer() {{
+                // A committed document with no root element has received no
+                // content yet, so its silence is not stability: even a
+                // doctype arriving first does not start the quiet period.
+                if (!document.documentElement) return;
                 if (timer) clearTimeout(timer);
                 timer = setTimeout(() => {{
                     clearTimeout(timeout);
@@ -2120,15 +2124,18 @@ class CDPHandler:
                 }}, STABLE_MS);
             }}
 
+            // Observe the document node, not documentElement: right after a
+            // navigation commits, documentElement is still null, and
+            // childList on the document reports the root element's insertion.
             observer = new MutationObserver(resetTimer);
-            observer.observe(document.documentElement, {{
+            observer.observe(document, {{
                 subtree: true,
                 childList: true,
                 attributes: true,
                 characterData: true,
             }});
 
-            // Start the initial stability timer
+            // Start the quiet period now, or at the root element's arrival.
             resetTimer();
         }})
         """
