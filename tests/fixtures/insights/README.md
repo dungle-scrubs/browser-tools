@@ -44,3 +44,9 @@ captures using the merged `bt trace` over a loopback HTTP server. Run after
 Chrome cannot launch. It uses the headless shell selected by `tests/conftest.py`
 and stops only its own instance. Ordinary fixture tests require setup too;
 missing setup is explicitly skipped and cannot establish engine acceptance.
+
+`BT_INSIGHTS_LIVE_UNVALIDATED=1` runs the same assertions with
+`--ignore-engine-mismatch`, for a Chrome build missing from the adapter's
+validated list. A pass is the evidence for adding that build; the weekly
+`.github/workflows/insights-chrome-stable.yml` job runs both modes against the
+current Chrome for Testing stable.

@@ -4,7 +4,7 @@ import { millis } from './vendor/UnitFormatters.js';
 
 const packageData = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8'));
 const engineRevision = packageData.dependencies['@paulirish/trace_engine'];
-const validatedVersions = ['151.0.7922.34', '153.0.0.0'];
+const validatedVersions = ['151.0.7922.34', '153.0.0.0', '157.0.8103.50', '157.0.0.0'];
 const document = {engineRevision, browserVersion: null, navigations: []};
 
 function fail(message, code = 1) {

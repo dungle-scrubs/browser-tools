@@ -1310,9 +1310,12 @@ PERFORMANCE CAPTURES AND CPU PROFILING
       The requested page never loaded, so the insights describe the error page.
 
       Engine pin: @paulirish/trace_engine 0.0.65. Provisional validated versions:
-      Chrome 151.0.7922.34 and 153.0.0.0 only, not intervening builds. The Open
-      Question 4 fixture matrix does not exist. The first version has file
-      navigation/interaction evidence; 153.0.0.0 has HTTP load evidence only.
+      Chrome 151.0.7922.34, 153.0.0.0, 157.0.8103.50 and 157.0.0.0 only, not
+      intervening builds. The Open Question 4 fixture matrix does not exist.
+      151.0.7922.34 has file navigation/interaction evidence; 153.0.0.0 has
+      HTTP load evidence only. Both 157 versions passed the live HTTP
+      acceptance (navigation, interaction, zero-set causes): 157.0.8103.50 is
+      the headless shell, 157.0.0.0 is what full Chrome's headless mode reports.
       File URLs can lack DocumentLatency timing; use HTTP for complete results.
       browserVersion comes from trace metadata (product-version or user-agent),
       never from a browser running now. Missing metadata is null. Missing or
