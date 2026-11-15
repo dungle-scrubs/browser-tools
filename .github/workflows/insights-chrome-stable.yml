@@ -27,13 +27,13 @@ jobs:
         # mode, which a plain `bt launch --headless` uses, reports MAJOR.0.0.0.
         browser: [chrome-headless-shell, chrome]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/setup-uv@v10.3.3
         with:
           python-version: "3.13"
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: "22"
 
