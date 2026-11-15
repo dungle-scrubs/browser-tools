@@ -180,6 +180,8 @@ while time.time() < float(sys.argv[2]):
     time.sleep(0.001)
 instance = lifecycle.launch(headless=True, registry_path=registry, browser_args=["about:blank"])
 try:
+    # Let the other launches run first: each one sweeps the session root.
+    time.sleep(2.0)
     version = f"http://127.0.0.1:{instance.port}/json/version"
     with urllib.request.urlopen(version, timeout=5) as reply:
         answering = json.load(reply)["webSocketDebuggerUrl"]
@@ -194,7 +196,6 @@ try:
         "own_port": int(own_port),
         "answered_by_own_browser": answering.endswith(own_path),
     }), flush=True)
-    time.sleep(1.0)
 finally:
     lifecycle.stop(instance=instance.name, registry_path=registry)
 """
