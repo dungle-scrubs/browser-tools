@@ -1,6 +1,6 @@
 [project]
 name = "browser-tools"
-version = "0.10.0"
+version = "0.11.0"
 description = "Automate and debug Chrome from the command line."
 readme = "README.md"
 license = "MIT"
