@@ -45,6 +45,31 @@ glossary rather than left to name code that does not exist.
   Measured on Chrome 153, the browser refuses remote debugging on its own
   default data directory, so an External Endpoint is always a Chrome started
   for debugging on a profile of its own, never the everyday browser.
+- **Lease** - the registry record that makes one managed instance
+  expirable: its state (`auto`, `closing`, `retained`, `close_failed`), an
+  optional owner, its keeper, its idle timeout, its last-activity stamp, and
+  the running commands protecting it. Every managed launch gets one, owner
+  or not. A lease written before idle expiry existed parses as an owner-only
+  lease with no idle timeout, so it is never expired by a keeper that did
+  not know about it.
+- **Keeper** - the detached per-instance process that watches one lease and
+  closes that instance's browser when the lease says so: the owner exited,
+  or the idle timeout passed. It is the only thing enforcing the timeout, so
+  a keeper that dies leaves the instance unexpired; a missing keeper is
+  visible in `status`. There is no global watchdog and no service.
+- **Idle Timeout** - how long a managed instance may sit without activity
+  before its keeper closes it. The default is one hour, set per instance at
+  launch (`--idle-timeout`) or changed on a running instance (`bt configure`).
+  The deadline is wall-clock time, so an instance that slept through it
+  closes on wake rather than receiving a fresh hour. `bt retain` exempts an
+  instance from it.
+- **Activity** - a browser-tools command that resolved a registered instance
+  and drove it. Activity is the lifetime of that command: it protects the
+  instance while it runs, and the countdown restarts when it finishes,
+  including when it failed. Overlapping commands each hold their own
+  protection. Registry inspection, another instance, a command that failed
+  before it resolved the instance, page-generated traffic and use of the
+  browser outside this tool are not activity.
 - **Interstitial** - an anti-bot challenge page (Cloudflare, DataDome,
   Akamai, PerimeterX, Imperva, AWS WAF). Detected by multi-signal
   heuristics after navigation; some types auto-retry.

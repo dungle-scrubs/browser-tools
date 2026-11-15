@@ -25,7 +25,7 @@ import subprocess
 import sys
 from typing import TYPE_CHECKING
 
-from browser_tools import lifecycle
+from browser_tools import lifecycle, supervisor_process
 from browser_tools.core import supervisor
 from browser_tools.core.utils import process_start_time
 
@@ -106,11 +106,15 @@ class TestStopEndsTheSupervisor:
         proc, pid_start = _live_supervisor_process()
         registry_path = _entry_with_supervisor(tmp_path, proc, pid_start)
         # Stub the liveness read so the process always looks alive, whatever
-        # stop signals: the pathological case, not the timing one.
-        monkeypatch.setattr(lifecycle, "process_is_ours", lambda pid, expected_start=None: True)
-        real_state = lifecycle.process_running_state
+        # stop signals: the pathological case, not the timing one. The
+        # supervisor's identity is read in the module that owns that check,
+        # so the stub lands there.
         monkeypatch.setattr(
-            lifecycle,
+            supervisor_process, "process_is_ours", lambda pid, expected_start=None: True
+        )
+        real_state = supervisor_process.process_running_state
+        monkeypatch.setattr(
+            supervisor_process,
             "process_running_state",
             lambda pid: True if pid == proc.pid else real_state(pid),
         )

@@ -206,6 +206,56 @@ def fake_browser_launch(monkeypatch: pytest.MonkeyPatch, registry_path: str) -> 
     return captured
 
 
+def registered_camoufox_instance(
+    *,
+    name: str | None,
+    profile: str | None,
+    user_data_dir: str,
+    pid: int,
+    port: int,
+    registry_path: str,
+) -> lifecycle.ExtendedInstance:
+    """The instance a Camoufox launch returns, registered as the real one is.
+
+    The real Camoufox launch registers the instance it hands back, so the
+    registry holds it. A managed launch writes its lease into that entry, so
+    a double that skipped the registration would leave the launch with no
+    entry to write into, and the launch would fail instead of returning the
+    instance.
+
+    Args:
+        name: The instance name the launch asked for, or None to derive one.
+        profile: The named profile, or None.
+        user_data_dir: The directory the browser would hold.
+        pid: The process ID to record.
+        port: The port to record.
+        registry_path: The registry to register in.
+
+    Returns:
+        The registered instance, read back through the extended schema.
+    """
+    info = core_registry.register(
+        working_dir=name if name is not None else os.getcwd(),
+        pid=pid,
+        browser_version="camoufox",
+        user_data_dir=user_data_dir,
+        port_override=port,
+        registry_path=registry_path,
+        pid_start="tok",
+    )
+    return lifecycle.ExtendedInstance(
+        name=info.name,
+        port=info.port,
+        pid=info.pid,
+        browser_version=info.browser_version,
+        user_data_dir=user_data_dir,
+        launched=None,
+        pid_start="tok",
+        engine="camoufox",
+        profile=profile,
+    )
+
+
 class _FakeProcess:
     """Stands in for the spawned Chrome process."""
 
@@ -213,6 +263,22 @@ class _FakeProcess:
 
     def poll(self) -> None:
         return None
+
+
+class _LauncherSubprocess:
+    """The vendored launcher's own view of ``subprocess``.
+
+    Only the launcher's process spawn is faked. Every other module keeps the
+    real ``subprocess``, so the process-identity probe that follows a spawn,
+    and the keeper a managed launch starts, are not faked by this double:
+    faking the module attribute globally would break both.
+    """
+
+    def __init__(self, popen: Any) -> None:
+        self.Popen = popen
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(subprocess, name)
 
 
 @pytest.fixture
@@ -258,8 +324,7 @@ def stubbed_core_boundaries(
         # (the copy boundary is stubbed) or the double refuses it, and either
         # way it is discarded before any assertion can print it.
         discard_spawn_environment(env, synthetic_spawn_environment)
-        # The first spawn is Chrome; the process-identity probe after it runs
-        # `ps` through Popen too, and is not a browser spawn.
+        # The first spawn is Chrome.
         if "spawn" not in order:
             order.append("spawn")
         return _FakeProcess()
@@ -271,7 +336,7 @@ def stubbed_core_boundaries(
         order.append("cleanup")
         return []
 
-    monkeypatch.setattr(core_launcher.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(core_launcher, "subprocess", _LauncherSubprocess(fake_popen))
     monkeypatch.setattr(core_launcher, "check_cdp_port_async", fake_check_cdp_port_async)
     monkeypatch.setattr(core_launcher, "cleanup_sessions", fake_cleanup_sessions)
 

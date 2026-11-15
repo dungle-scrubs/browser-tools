@@ -85,7 +85,8 @@ LIFECYCLE VERBS
 
   launch [--engine chrome|camoufox] [--profile NAME] [--name NAME]
          [--channel NAME] [--headless] [--port PORT] [--fingerprint FILE]
-         [--no-window-border] [--owner PID] [--1password] [-- BROWSER_ARGS]
+         [--no-window-border] [--owner PID] [--idle-timeout DURATION]
+         [--1password] [-- BROWSER_ARGS]
       Launch a browser and register it. Prints the new instance as JSON.
       Chrome's debugging port is allocated from 9422 upward, never 9222:
       that is the DevTools default port, so whatever answers there on a
@@ -105,11 +106,20 @@ LIFECYCLE VERBS
       --owner PID opts this instance into automatic owner-exit cleanup. The
       owner must be alive with a readable process-start identity before launch
       (exit 1 otherwise). A detached per-instance keeper watches that identity,
-      including owner exit by SIGKILL. Plain launch has no automatic lifetime.
-      Choose a process that spans the task, not a one-off tool shell. A longer
-      agent-session process can span several tasks: its exit catches crashes,
-      but successful task completion while it stays alive still needs bt stop.
-      No environment owner default, idle timeout or age expiry applies.
+      including owner exit by SIGKILL. Choose a process that spans the task,
+      not a one-off tool shell. A longer agent-session process can span
+      several tasks: its exit catches crashes, but successful task completion
+      while it stays alive still needs bt stop.
+      --idle-timeout DURATION sets how long the instance may sit without
+      activity before its keeper closes it. The default is 1h. A duration is
+      one or more number-and-unit groups -- 90s, 30m, 2h, 1h30m, 1d -- using
+      the units s, m, h and d, largest unit first, each at most once, at most
+      7 days in all. A bare number is refused (exit 2), and so is zero. For
+      a browser that should never expire, use bt retain INSTANCE rather than
+      a very large timeout.
+      Every managed launch is leased and watched, owner or not: there is no
+      environment owner default and no age expiry. See IDLE TIMEOUT for what
+      counts as activity.
       Keeper setup failure is a launch failure (exit 1). Cleanup is truthful:
       any surviving or unverified browser keeps recoverable registry state.
       A new Chrome-engine --profile on macOS registers 1Password
@@ -120,11 +130,28 @@ LIFECYCLE VERBS
   retain INSTANCE [--note TEXT]
       Keep an instance beyond owner exit for handoff to a human or another
       agent. Headless retain is allowed and reports mode "headless"; it does
-      not open a visible window. Headed instances report mode "headed". Plain
-      instances are already manual. Repeated retain is harmless. Once automatic
-      close is claimed, retain refuses (exit 1); it cannot rescue a closing
-      browser. Failed automatic close reports close_failed and close_error;
-      use ordinary bt stop INSTANCE to recover. --endpoint is refused (exit 2).
+      not open a visible window. Headed instances report mode "headed".
+      Repeated retain is harmless. A retained instance is also exempt from
+      the idle timeout: its keeper stops watching it, so nothing closes it
+      while it idles. Once automatic close is claimed, retain refuses (exit
+      1); it cannot rescue a closing browser. Failed automatic close reports
+      close_failed and close_error; use ordinary bt stop INSTANCE to recover.
+      --endpoint is refused (exit 2).
+
+  configure INSTANCE --idle-timeout DURATION
+      Change the idle timeout of a running managed instance and start its
+      countdown again now. The instance must exist (exit 1) and must have a
+      lease (exit 1 otherwise: "not a managed lease"). Once the close has
+      been claimed (state closing or close_failed) configure refuses (exit 1)
+      rather than reporting an extension that will not happen, and so does
+      a retained instance (exit 1), which does not idle-expire, and an
+      instance launched by a release before idle expiry (exit 1): stop that
+      one and launch it again. --idle-timeout
+      is required (exit 2), and the duration is checked the same way launch
+      checks it (exit 2 for a malformed one). Prints the instance name, the
+      new timeout, the new deadline and the lease state as JSON. The
+      instance may also be named ahead of the verb: bt INSTANCE configure
+      --idle-timeout 2h. --endpoint is refused (exit 2).
 
   status [INSTANCE]
       Every registered instance with liveness, engine, profile and page
@@ -136,13 +163,19 @@ LIFECYCLE VERBS
       verified loopback endpoint, use --endpoint URL; see EXTERNAL BROWSERS.
       This does not restore registry management. If identity cannot be
       established, stop and report the mismatch.
-      Owned instances also report lease state (auto, closing, retained or
+      Leased instances also report lease state (auto, closing, retained or
       close_failed, or unverified for malformed lease data), owner observation
-      (alive, gone or unverified), keeper
+      (alive, gone, unverified, or none when the lease has no owner), keeper
       running/missing, keeper observation and headed/headless mode. Unreadable
       identity is unverified, never proof of owner exit. A missing keeper means
       automatic cleanup is not enforced; retain or stop explicitly as needed.
-      Plain instance output has no lease metadata.
+      The lease block also carries the idle fields: idle_timeout (seconds),
+      last_activity and idle_deadline (ISO-8601 UTC), idle_remaining (seconds,
+      never below zero; both null for a retained instance, which does not
+      idle-expire), active_operations (how many running commands are
+      protecting the instance) and close_reason ("owner" or "idle") once a
+      close has been claimed. An instance with no lease reports no lease
+      block at all.
 
   stop [INSTANCE] [--target SPEC]
       Stop a browser and retire its registry entry, or close one tab with
@@ -185,6 +218,48 @@ LIFECYCLE VERBS
       running browser within a second and keeps them off for later launches.
       The tab-title prefix stays either way. --no-window-border on launch
       turns off all marking for that one launch.
+
+
+IDLE TIMEOUT
+
+  Every managed browser is leased. Its own keeper watches that lease and
+  closes the browser when the instance goes idle. The default timeout is one
+  hour, and it is measured from the last activity on that instance.
+
+  ACTIVITY IS A COMMAND ON THAT INSTANCE. Navigation, snapshot, screenshot,
+  click, evaluation, raw CDP, a login, an attach, a wait: each one restarts
+  the countdown. A command that is still running protects the instance while
+  it runs, and when it finishes the countdown starts again from that moment
+  -- including when the command failed. Two commands on one instance overlap
+  safely: each holds its own protection, and one finishing never clears the
+  other's.
+
+  NOT ACTIVITY: help, status, guide, stop, cleanup, retain, profile, window-border, launch, a command on another instance, a command
+  that failed before it reached the instance, and traffic the page generates
+  by itself (polling, animations, background requests). Using the browser by
+  hand is not activity either: only this tool's commands count. A browser you
+  hand to a person can therefore be closed while they are still using it --
+  keep such a browser with bt retain INSTANCE.
+
+  THE DEADLINE IS WALL-CLOCK TIME. A machine that sleeps past the deadline
+  closes the instance when it wakes, rather than getting a fresh hour.
+  Nothing is closed while the machine is asleep.
+
+  THE KEEPER IS THE ONLY THING ENFORCING THIS. If the keeper itself dies,
+  nothing restarts it: there is no global watchdog, no service, no periodic
+  cleanup. A missing keeper is visible in bt status (keeper: missing), and
+  that instance is no longer expiring. Stop it yourself.
+
+  FOR AGENTS
+      1. Use the one-hour default for normal tasks.
+      2. Set a longer duration at launch when a longer pause is expected:
+         bt launch --idle-timeout 4h.
+      3. Extend the existing instance before an anticipated gap exceeds its
+         current timeout: bt configure INSTANCE --idle-timeout 2h.
+      4. Still explicitly stop the browser when the task finishes:
+         bt stop INSTANCE.
+      5. Do not send periodic keepalive commands just to prevent expiry. Use
+         a longer timeout at launch, or configure the instance.
 
 
 CURATED VERBS
@@ -499,8 +574,9 @@ RUNNING MANY STEPS IN ONE INVOCATION
       A step may NOT name an instance, --endpoint, --target, --dialog or a
       page-selecting --url: those belong to the run, which resolves them once.
       attach is not a step (it runs until stdin ends, so nothing could follow
-      it), and neither are launch, status, stop, retain, cleanup, profile,
-      window-border, guide, help, navigate, trace, insights, login or run itself.
+      it), and neither are launch, status, stop, retain, configure, cleanup,
+      profile, window-border, guide, help, navigate, trace, insights, login or
+      run itself.
       Any of these in a step list is a usage error (exit 2).
 
       FRAME SELECTION LASTS. `frames select` in one step governs the steps after
@@ -1219,7 +1295,8 @@ EXTERNAL BROWSERS
   - --endpoint with --profile is refused: a profile is a launch-time identity
     and --endpoint launches nothing. Use `bt launch --profile NAME` instead.
 
-  launch, status, stop, retain, cleanup, guide and profile reject --endpoint (exit 2).
+  launch, status, stop, retain, configure, cleanup, guide and profile reject
+  --endpoint (exit 2).
   Everything under NEVER TAKE THE SCREEN applies unchanged. A browser that
   dies mid-session shows up as a connection error on the next invocation,
   which names the port, any process holding it, and the user-data-dir that

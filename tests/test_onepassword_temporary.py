@@ -37,6 +37,9 @@ from onepassword_lifecycle_fixtures import (
     fail_pin_publication as fail_pin_publication,
 )
 from onepassword_lifecycle_fixtures import fail_pin_stat as fail_pin_stat
+from onepassword_lifecycle_fixtures import (
+    registered_camoufox_instance as registered_camoufox_instance,
+)
 from onepassword_lifecycle_fixtures import registry_path as registry_path
 from onepassword_lifecycle_fixtures import (
     stubbed_core_boundaries as stubbed_core_boundaries,
@@ -191,16 +194,13 @@ class TestTemporarySetupBoundaries:
 
         def fake_camoufox(**kwargs: object) -> lifecycle.ExtendedInstance:
             captured.update(kwargs)
-            return lifecycle.ExtendedInstance(
-                name="cam-01",
-                port=9469,
-                pid=711,
-                browser_version="camoufox",
-                user_data_dir=str(kwargs["user_data_dir"]),
-                launched=None,
-                pid_start=None,
-                engine="camoufox",
+            return registered_camoufox_instance(
+                name=None,
                 profile=None,
+                user_data_dir=str(kwargs["user_data_dir"]),
+                pid=711,
+                port=9469,
+                registry_path=str(kwargs["registry_path"]),
             )
 
         monkeypatch.setattr(lifecycle, "_launch_camoufox", fake_camoufox)

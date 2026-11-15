@@ -34,6 +34,9 @@ from onepassword_lifecycle_fixtures import _no_real_camoufox_runner as _no_real_
 from onepassword_lifecycle_fixtures import _no_real_codesign as _no_real_codesign
 from onepassword_lifecycle_fixtures import fake_browser_launch as fake_browser_launch
 from onepassword_lifecycle_fixtures import profiles_root as profiles_root
+from onepassword_lifecycle_fixtures import (
+    registered_camoufox_instance as registered_camoufox_instance,
+)
 from onepassword_lifecycle_fixtures import registry_path as registry_path
 from onepassword_lifecycle_fixtures import valid_installation as valid_installation
 
@@ -311,16 +314,13 @@ class TestAutomaticRegistration:
 
         def fake_camoufox(**kwargs: object) -> lifecycle.ExtendedInstance:
             captured.update(kwargs)
-            return lifecycle.ExtendedInstance(
-                name="work-01",
-                port=9450,
-                pid=512,
-                browser_version="camoufox",
-                user_data_dir=str(profiles_root / "work"),
-                launched=None,
-                pid_start=None,
-                engine="camoufox",
+            return registered_camoufox_instance(
+                name=None,
                 profile="work",
+                user_data_dir=str(kwargs["user_data_dir"]),
+                pid=512,
+                port=9450,
+                registry_path=str(kwargs["registry_path"]),
             )
 
         monkeypatch.setattr(lifecycle, "_launch_camoufox", fake_camoufox)

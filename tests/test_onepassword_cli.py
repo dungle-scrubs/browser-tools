@@ -41,6 +41,8 @@ LAUNCH_JSON_KEYS = {
     "profile",
     "browser_version",
     "user_data_dir",
+    "idle_timeout",
+    "idle_deadline",
 }
 
 
