@@ -27,6 +27,13 @@ def one_instance(leading: str | None, inline: str | None) -> str | None:
     list rather than a named argument, so the conflict ``main`` catches for
     every other verb has to be caught here instead.
 
+    Args:
+        leading: The instance named before the verb, or None.
+        inline: The instance named inside the verb's arguments, or None.
+
+    Returns:
+        The one instance name, or None when neither spelling was used.
+
     Raises:
         UsageError: Both spellings were used.
     """
@@ -43,6 +50,10 @@ def rfc05_operands(args: argparse.Namespace, known_instances: set[str] | None) -
     The verb's own field (``destination``, ``source``, ``key``, ``text``,
     ``substring``) takes the value, and the instance -- named before the verb
     or inside the operands -- is reconciled into one name.
+
+    Args:
+        args: The parsed command line; its instance and value fields are set.
+        known_instances: The registered instance names, or None when unread.
 
     Raises:
         UsageError: The verb took more operands than it has fields for.

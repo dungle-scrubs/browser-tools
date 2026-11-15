@@ -72,7 +72,7 @@ def test_status_reports_no_deadline_for_a_retained_instance(
     registry: str,
     browser_double: Launches,
 ) -> None:
-    """A retained instance does not idle-expire, so status shows no deadline."""
+    # A retained instance does not idle-expire, so status shows no deadline.
     instance = lifecycle.launch(name="kept", headless=True, registry_path=registry)
     lifecycle.retain(instance.name, registry_path=registry)
     reported = lifecycle.status(instance.name, registry)[0]["lease"]
@@ -143,10 +143,9 @@ def test_waking_past_the_deadline_closes_the_instance(
     stops: Stops,
     clock: Clock,
 ) -> None:
-    """A machine that slept through the deadline closes on wake.
-
-    The deadline is wall-clock, so the jump is the sleep itself.
-    """
+    # A machine that slept through the deadline closes on wake.
+    #
+    # The deadline is wall-clock, so the jump is the sleep itself.
     instance = lifecycle.launch(name="sleeper", headless=True, registry_path=registry)
     generation = lease_value(registry, instance.name)["generation"]
     clock.advance(8 * 3600)
@@ -518,7 +517,7 @@ def test_configure_refuses_a_retained_instance(
     browser_double: Launches,
     capsys: Capture,
 ) -> None:
-    """A retained instance has no keeper, so no deadline may be reported for it."""
+    # A retained instance has no keeper, so no deadline may be reported for it.
     instance = lifecycle.launch(name="kept", headless=True, registry_path=registry)
     lifecycle.retain(instance.name, registry_path=registry)
     before = lease_value(registry, instance.name)
@@ -536,11 +535,10 @@ def test_a_configure_that_races_the_keeper_has_one_truthful_outcome(
     clock: Clock,
     capsys: Capture,
 ) -> None:
-    """The keeper's claim and the extension both take the registry lock.
-
-    Whichever lands first wins, and the other says so: an extension is never
-    reported as done while the browser is closing.
-    """
+    # The keeper's claim and the extension both take the registry lock.
+    #
+    # Whichever lands first wins, and the other says so: an extension is never
+    # reported as done while the browser is closing.
     instance = lifecycle.launch(name="race", headless=True, registry_path=registry)
     generation = lease_value(registry, instance.name)["generation"]
     clock.advance(3601)
@@ -709,13 +707,12 @@ def test_a_real_idle_instance_closes_itself_and_an_extended_one_survives(
     registry: str,
     real_keeper: None,
 ) -> None:
-    """A real browser, a real keeper, and a real expiry.
-
-    Both instances start with a three-second timeout. The first, on a named
-    profile, closes on its own and its profile's saved state survives. The
-    second is extended before its deadline passes and is still alive after
-    the first has closed; it is then stopped explicitly.
-    """
+    # A real browser, a real keeper, and a real expiry.
+    #
+    # Both instances start with a three-second timeout. The first, on a named
+    # profile, closes on its own and its profile's saved state survives. The
+    # second is extended before its deadline passes and is still alive after
+    # the first has closed; it is then stopped explicitly.
     if not os.environ.get(lifecycle.CHROME_BINARY_ENV_VAR):
         pytest.skip(
             "no Chrome outside an application bundle was found; run "

@@ -121,7 +121,18 @@ class Lease:
 def _idle_fields(
     value: dict[str, Any],
 ) -> tuple[int | None, float | None, tuple[ProcessIdentity, ...], str | None]:
-    """Read the idle fields of a lease record, tolerating their absence."""
+    """Read the idle fields of a lease record, tolerating their absence.
+
+    Args:
+        value: The raw lease record.
+
+    Returns:
+        The idle timeout, the last activity, the operations and the close
+        reason, each None or empty when the record lacks it.
+
+    Raises:
+        ValueError: A field is present with the wrong type.
+    """
     idle_timeout = value.get("idle_timeout")
     if idle_timeout is not None and (
         not isinstance(idle_timeout, int) or isinstance(idle_timeout, bool) or idle_timeout <= 0
@@ -298,6 +309,13 @@ def spawn_keeper(argv: list[str], **kwargs: Any) -> subprocess.Popen[str]:
     behind -- has to see the keeper's spawn too, or it proves nothing about
     the keeper: the keeper is the process that outlives the command, so its
     start is the thing under test.
+
+    Args:
+        argv: The keeper's command line.
+        **kwargs: Passed to ``subprocess.Popen`` unchanged.
+
+    Returns:
+        The started keeper process.
     """
     return subprocess.Popen(argv, **kwargs)
 
@@ -465,7 +483,15 @@ def configure(name: str, idle_timeout: int, registry_path: str | None) -> dict[s
 
 
 def _browser_observation(entry: dict[str, Any]) -> Observation:
-    """Whether the instance's own browser process is still there."""
+    """Whether the instance's own browser process is still there.
+
+    Args:
+        entry: The instance's raw registry entry.
+
+    Returns:
+        ``alive``, ``gone``, or ``unverified`` when the entry records no
+        usable process identity or the process cannot be read.
+    """
     pid, start = entry.get("pid"), entry.get("pid_start")
     if not isinstance(pid, int) or isinstance(pid, bool) or not isinstance(start, str) or not start:
         return "unverified"
@@ -603,6 +629,12 @@ def _prune_operations(
     An operation whose process cannot be verified keeps its protection for
     this tick: pruning an unverified identity would close a browser that a
     live command is still using.
+
+    Args:
+        operations: The operations the lease records.
+
+    Returns:
+        The operations to keep, and whether any were dropped.
     """
     remaining: list[ProcessIdentity] = []
     pruned = False
@@ -711,7 +743,13 @@ def finish() -> None:
 
 
 def _close(name: str, generation: str, registry_path: str | None) -> None:
-    """Stop the instance after a close was claimed, recording a failed close."""
+    """Stop the instance after a close was claimed, recording a failed close.
+
+    Args:
+        name: The instance to stop.
+        generation: The lease generation the close was claimed for.
+        registry_path: The registry that holds the instance.
+    """
     try:
         lifecycle.stop(name, registry_path=registry_path, _lease_generation=generation)
     except lifecycle.LifecycleError as exc:

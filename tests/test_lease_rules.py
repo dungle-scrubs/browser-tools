@@ -169,3 +169,39 @@ def test_idle_expiry_tests_and_fixtures_are_fully_annotated(
         }
         gone = sorted(set(only) - defined)
         assert not gone, f"tests/{module} no longer defines {gone}"
+
+
+#: The modules the idle-expiry change added or filled. Every function in
+#: them that has a docstring and takes arguments documents the arguments.
+DOCUMENTED = (
+    "src/browser_tools/idle.py",
+    "src/browser_tools/lease_cli.py",
+    "src/browser_tools/task_lease.py",
+    "src/browser_tools/supervisor_process.py",
+    "src/browser_tools/verb_args.py",
+    "tests/idle_fixtures.py",
+    "tests/test_idle_expiry.py",
+    "tests/test_lease_rules.py",
+)
+
+
+@pytest.mark.parametrize("module", DOCUMENTED)
+def test_every_docstring_in_the_lease_modules_documents_its_arguments(module: str) -> None:
+    # A docstring that explains a function and skips its arguments is the
+    # partial form CONTRIBUTING.md rules out. A test that needs one line of
+    # explanation uses a comment, as this one does.
+    tree = ast.parse((TESTS.parent / module).read_text(encoding="utf-8"))
+    missing = [
+        f"{node.name} (line {node.lineno})"
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+        and ast.get_docstring(node)
+        and {arg.arg for arg in (*node.args.args, *node.args.kwonlyargs)} - {"self", "cls"}
+        and "Args:" not in (ast.get_docstring(node) or "").splitlines()
+    ]
+    assert not missing, (
+        f"{module} has docstrings without an Args: section (CONTRIBUTING.md: "
+        "Google-style docstrings). Add the section, or use a comment where the "
+        "function needs no docstring:\n" + "\n".join(missing)
+    )
+

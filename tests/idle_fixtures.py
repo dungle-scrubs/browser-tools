@@ -53,7 +53,15 @@ def registry(tmp_path: Path, monkeypatch: Patch) -> str:
 
 @pytest.fixture
 def browser_double(tmp_path: Path, monkeypatch: Patch) -> Launches:
-    """A launch that registers an entry without starting a browser."""
+    """A launch that registers an entry without starting a browser.
+
+    Args:
+        tmp_path: The test's temporary directory, for session directories.
+        monkeypatch: Replaces the launcher's browser launch.
+
+    Returns:
+        The keyword arguments of each launch, in order.
+    """
     launched: Launches = []
 
     async def launch(**kwargs):
@@ -89,7 +97,14 @@ class Clock:
 
 @pytest.fixture
 def clock(monkeypatch: Patch) -> Clock:
-    """Replace ``time.time`` with a clock the test moves by hand."""
+    """Replace ``time.time`` with a clock the test moves by hand.
+
+    Args:
+        monkeypatch: Replaces ``time.time``.
+
+    Returns:
+        The clock now behind ``time.time``.
+    """
     value = Clock()
     monkeypatch.setattr(time, "time", value)
     return value
@@ -97,7 +112,14 @@ def clock(monkeypatch: Patch) -> Clock:
 
 @pytest.fixture
 def stops(monkeypatch: Patch) -> Stops:
-    """Record the closes a keeper claims, without stopping anything."""
+    """Record the closes a keeper claims, without stopping anything.
+
+    Args:
+        monkeypatch: Replaces ``lifecycle.stop``.
+
+    Returns:
+        One record per claimed close: name, target and lease generation.
+    """
     calls: Stops = []
 
     def stop(name=None, target=None, registry_path=None, **kwargs):

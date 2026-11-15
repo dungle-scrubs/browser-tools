@@ -29,6 +29,9 @@ def state(entry: dict[str, Any]) -> str | None:
     Without a supervisor a live instance carries no window marking and is
     never retired from the registry when its browser closes, and nothing else
     reports that (#65).
+
+    Args:
+        entry: The instance's raw registry entry.
     """
     pid = entry.get("supervisor_pid")
     if not isinstance(pid, int):
@@ -39,6 +42,10 @@ def state(entry: dict[str, Any]) -> str | None:
 
 def identity_matches(pid: int, expected_start: str | None) -> bool | None:
     """Whether ``pid`` still is the process that was started as ``expected_start``.
+
+    Args:
+        pid: The process to look at.
+        expected_start: The start time recorded for it, or None.
 
     Returns:
         True when the PID still carries the recorded start time, False when
