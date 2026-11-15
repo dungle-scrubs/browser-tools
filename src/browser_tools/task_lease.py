@@ -316,6 +316,9 @@ def spawn_keeper(argv: list[str], **kwargs: Any) -> subprocess.Popen[str]:
 
     Returns:
         The started keeper process.
+
+    Raises:
+        OSError: The process could not be started.
     """
     return subprocess.Popen(argv, **kwargs)
 
@@ -489,8 +492,9 @@ def _browser_observation(entry: dict[str, Any]) -> Observation:
         entry: The instance's raw registry entry.
 
     Returns:
-        ``alive``, ``gone``, or ``unverified`` when the entry records no
-        usable process identity or the process cannot be read.
+        ``alive`` or ``gone`` for a process that could be read, and
+        ``unverified`` when the entry records no usable process identity or
+        the process cannot be read.
     """
     pid, start = entry.get("pid"), entry.get("pid_start")
     if not isinstance(pid, int) or isinstance(pid, bool) or not isinstance(start, str) or not start:
@@ -749,6 +753,12 @@ def _close(name: str, generation: str, registry_path: str | None) -> None:
         name: The instance to stop.
         generation: The lease generation the close was claimed for.
         registry_path: The registry that holds the instance.
+
+    Raises:
+        LifecycleError: The stop failed and the failure could not be
+            recorded either: the registry lock timed out or the registry
+            cannot be parsed.
+        OSError: The failure record could not be written.
     """
     try:
         lifecycle.stop(name, registry_path=registry_path, _lease_generation=generation)

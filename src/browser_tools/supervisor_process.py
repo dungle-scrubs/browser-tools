@@ -21,10 +21,8 @@ from .process_utils import process_running_state
 def state(entry: dict[str, Any]) -> str | None:
     """Whether ``entry``'s supervisor is still running.
 
-    Returns "running", "missing", or None when no supervisor was ever
-    recorded. None is not a fault: a headless launch gets no supervisor by
-    design, and entries written before supervisors were recorded have nothing
-    to check.
+    None is not a fault: a headless launch gets no supervisor by design, and
+    entries written before supervisors were recorded have nothing to check.
 
     Without a supervisor a live instance carries no window marking and is
     never retired from the registry when its browser closes, and nothing else
@@ -32,6 +30,10 @@ def state(entry: dict[str, Any]) -> str | None:
 
     Args:
         entry: The instance's raw registry entry.
+
+    Returns:
+        ``running``, ``missing``, or None when no supervisor was ever
+        recorded.
     """
     pid = entry.get("supervisor_pid")
     if not isinstance(pid, int):
