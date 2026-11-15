@@ -31,6 +31,7 @@ import urllib.parse
 from typing import TYPE_CHECKING
 
 import pytest
+from browser_teardown import stop_or_kill
 
 from browser_tools import lifecycle
 
@@ -335,7 +336,7 @@ def disposable(site, tmp_path_factory):
             "Disposable", (), {"registry": registry, "name": instance.name}
         )()
     finally:
-        lifecycle.stop(instance=instance.name, registry_path=registry)
+        stop_or_kill(instance, registry)
 
 
 @pytest.fixture
@@ -451,5 +452,5 @@ def spa(tmp_path_factory):
             "Spa", (), {"registry": registry, "name": instance.name, "server": server}
         )()
     finally:
-        lifecycle.stop(instance=instance.name, registry_path=registry)
+        stop_or_kill(instance, registry)
         server.stop()

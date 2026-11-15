@@ -12,6 +12,7 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
+from browser_teardown import stop_or_kill
 
 from browser_tools import cli, lifecycle
 
@@ -107,7 +108,7 @@ def test_capture_navigation_and_interaction(tmp_path, capsys):
             thread.join()
             server.server_close()
     finally:
-        lifecycle.stop(instance=instance.name, registry_path=registry)
+        stop_or_kill(instance, registry)
 
 
 @pytest.mark.skipif(
@@ -207,4 +208,4 @@ def test_zero_set_and_failure_causes_reproduce_live(tmp_path, capsys):
             thread.join()
             server.server_close()
     finally:
-        lifecycle.stop(instance=instance.name, registry_path=registry)
+        stop_or_kill(instance, registry)
