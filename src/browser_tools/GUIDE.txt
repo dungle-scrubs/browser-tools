@@ -252,6 +252,18 @@ CURATED VERBS
   wait-stable [--timeout-ms MS] [--stable-ms MS]
       Wait for network idle (default 5000ms deadline, 500ms quiet window), or
       for the DOM to stop changing (5000ms, 300ms).
+      wait-stable watches the document that is current when the step starts.
+      A document with no root element is never stable: the wait continues
+      until a root element arrives, and ends in the E008 timeout if none does.
+
+      A PENDING NAVIGATION IS NOT VISIBLE TO wait-stable. Page.navigate
+      returns when the navigation commits, so a wait-stable placed straight
+      after it watches the new document. A click on a link, a form submit and
+      an eval that assigns location return before the new document commits.
+      A wait-stable placed straight after one of them watches the page being
+      left, and reports it stable while the next page is still loading. After
+      such a step, wait for something only the next page has, with wait-text,
+      and then use wait-stable if the page keeps rendering.
 
   eval '<js>' [--await] [--target SPEC | --url SUB] [--dialog dismiss|accept[:TEXT]]
       Evaluate JavaScript by value. Statement bodies run inside an IIFE and

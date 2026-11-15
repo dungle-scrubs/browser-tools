@@ -2127,11 +2127,13 @@ class CDPHandler:
             }}, TIMEOUT_MS);
 
             function resetTimer() {{
-                // A committed document with no root element has received no
-                // content yet, so its silence is not stability: even a
-                // doctype arriving first does not start the quiet period.
+                // Every mutation ends the running quiet period, including
+                // the one that removes the root element.
+                if (timer) {{ clearTimeout(timer); timer = null; }}
+                // A document with no root element has no content, so its
+                // silence is not stability: even a doctype arriving first
+                // does not start the quiet period.
                 if (!document.documentElement) return;
-                if (timer) clearTimeout(timer);
                 timer = setTimeout(() => {{
                     clearTimeout(timeout);
                     cleanup();
