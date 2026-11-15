@@ -45,7 +45,7 @@ from .endpoint import ResolvedEndpoint
 if TYPE_CHECKING:
     from .core.cdp_client import CDPClient
 
-from . import lifecycle
+from . import lifecycle, task_lease
 from .core import attach as core_attach
 from .core.attach import AmbiguousTargetError, TargetNotFoundError
 from .core.errors import CDPError, NoPageError
@@ -168,9 +168,7 @@ def run_attach(
     # Attaching is driving the browser: the instance's idle countdown
     # restarts (#195). The external path returns above, because an external
     # browser has no lease to refresh.
-    from . import idle
-
-    idle.begin(instance, registry_path)
+    task_lease.begin(instance, registry_path)
 
     spec, target_by = _target_slot(target, url)
 

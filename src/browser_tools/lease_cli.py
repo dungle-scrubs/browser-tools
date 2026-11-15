@@ -27,6 +27,9 @@ def add_launch_timeout(parser: argparse.ArgumentParser) -> None:
 
     The default is the one-hour timeout every managed launch starts with,
     written the way the duration grammar spells it.
+
+    Args:
+        parser: The ``launch`` subparser.
     """
     parser.add_argument(
         "--idle-timeout",
@@ -42,7 +45,11 @@ def add_launch_timeout(parser: argparse.ArgumentParser) -> None:
 def add_configure_verb(
     sub: argparse._SubParsersAction[argparse.ArgumentParser],  # pyright: ignore[reportPrivateUsage]
 ) -> None:
-    """Add ``configure``: change a managed browser's idle timeout."""
+    """Add ``configure``: change a managed browser's idle timeout.
+
+    Args:
+        sub: The subparser collection of the top-level parser.
+    """
     configure = sub.add_parser(
         "configure", help="Change a managed browser's idle timeout"
     )
@@ -63,6 +70,9 @@ def check_timeout(args: argparse.Namespace) -> None:
     A launch validates its timeout before it launches anything: a bad
     duration must not leave a browser running that nobody asked for. An
     empty value is a bad duration, not an absent one.
+
+    Args:
+        args: The parsed command line. ``idle_timeout_seconds`` is set on it.
 
     Raises:
         UsageError: The command named no timeout where one is required, or
@@ -89,6 +99,16 @@ def configure_payload(args: argparse.Namespace, registry_path: str | None) -> di
 
     The instance may be left out when exactly one is registered, the same
     way every other instance-taking command resolves it.
+
+    Args:
+        args: The parsed ``configure`` command line.
+        registry_path: The registry that holds the instance.
+
+    Returns:
+        The JSON payload: ``name``, ``idle_timeout``, ``idle_deadline``, ``state``.
+
+    Raises:
+        LifecycleError: The instance cannot be configured (CLI exit 1).
     """
     from . import task_lease
 
@@ -107,6 +127,13 @@ def launch_fields(name: str, registry_path: str | None) -> dict[str, Any]:
 
     Both fields are always present, even for an instance whose lease could
     not be read: the output shape does not change with the lease.
+
+    Args:
+        name: The instance the launch created.
+        registry_path: The registry that holds it.
+
+    Returns:
+        ``idle_timeout`` and ``idle_deadline``, each None when unreadable.
     """
     from . import task_lease
 

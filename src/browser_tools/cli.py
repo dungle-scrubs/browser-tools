@@ -32,7 +32,6 @@ from . import (
     captures,
     curated,
     events,
-    idle,
     insights,
     lease_cli,
     lifecycle,
@@ -40,6 +39,7 @@ from . import (
     login,
     passthrough,
     step_run,
+    task_lease,
     user_settings,
     verb_args,
 )
@@ -1541,7 +1541,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return _dispatch(argv)
     finally:
-        idle.finish()
+        task_lease.finish()
 
 
 def _dispatch(argv: list[str] | None = None) -> int:

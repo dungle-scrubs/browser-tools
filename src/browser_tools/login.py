@@ -29,7 +29,14 @@ import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from . import credential_relay, curated, lifecycle, login_ownership, login_policy
+from . import (
+    credential_relay,
+    curated,
+    lifecycle,
+    login_ownership,
+    login_policy,
+    task_lease,
+)
 from . import login_contract as contract
 from .core.errors import CDPError
 from .lifecycle import LifecycleError
@@ -721,12 +728,6 @@ def login(*, instance: str | None, account: str, target: str | None = None,
     )
     if entry is None:
         raise LifecycleError(f"no browser instance named '{name}' is registered")
-    # A login drives the browser, so it counts as activity for the idle
-    # timeout (#195). The instance is resolved here, not through
-    # ``lifecycle.resolve_cdp_port``, so the countdown is refreshed here.
-    from . import idle
-
-    idle.begin(name, registry_path)
     if entry.engine != lifecycle.DEFAULT_ENGINE:
         raise LifecycleError(contract.ENGINE_MESSAGE)
     # Positive ownership before anything else runs: the relay probe, the
@@ -737,6 +738,9 @@ def login(*, instance: str | None, account: str, target: str | None = None,
     # liveness lookup, which can spend process time the deadline does not
     # have and treats an unattributable listener as alive.
     ownership = login_ownership.verify_recorded_owner(entry, deadline)
+    # A login that got this far drives the browser, so it counts as activity
+    # for the idle timeout (#195). A refused login above does not.
+    task_lease.begin(name, registry_path)
     port = ownership.port
     binary = _ensure_relay_ready(policy, deadline)
 

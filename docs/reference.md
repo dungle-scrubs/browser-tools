@@ -177,8 +177,8 @@ lifecycle.py               Launch, status, stop, cleanup, profiles
   camoufox_runner.py       Camoufox host process
   process_utils.py         Process and port utilities
   supervisor_process.py    Whether a recorded process is still ours
-  task_lease.py            Lease keeper: owner exit, idle expiry, retain handoff
-  idle.py                  Idle timeout durations and activity
+  task_lease.py            Lease, keeper and activity: owner exit, idle expiry, retain
+  idle.py                  Idle timeout durations and deadlines
 endpoint.py                External endpoint checks and refusals
   chrome_discovery.py      DevToolsActivePort discovery
   external_connection.py   Bounded external connections

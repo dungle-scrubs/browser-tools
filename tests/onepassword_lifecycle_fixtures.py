@@ -222,6 +222,17 @@ def registered_camoufox_instance(
     a double that skipped the registration would leave the launch with no
     entry to write into, and the launch would fail instead of returning the
     instance.
+
+    Args:
+        name: The instance name the launch asked for, or None to derive one.
+        profile: The named profile, or None.
+        user_data_dir: The directory the browser would hold.
+        pid: The process ID to record.
+        port: The port to record.
+        registry_path: The registry to register in.
+
+    Returns:
+        The registered instance, read back through the extended schema.
     """
     info = core_registry.register(
         working_dir=name if name is not None else os.getcwd(),

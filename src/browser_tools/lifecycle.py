@@ -969,11 +969,11 @@ def resolve_cdp_port(
         info = core_registry.lookup(instance_name=instance, registry_path=registry_path)
     except InstanceNotFoundError as exc:
         raise LifecycleError(instance_not_found_message(exc)) from exc
-    from . import idle
+    from . import task_lease
 
     # Resolving a registered instance is what counts as activity for the
     # idle timeout (#195): the command is about to drive that browser.
-    idle.begin(instance, registry_path)
+    task_lease.begin(instance, registry_path)
     return info.port
 
 

@@ -144,7 +144,9 @@ LIFECYCLE VERBS
       lease (exit 1 otherwise: "not a managed lease"). Once the close has
       been claimed (state closing or close_failed) configure refuses (exit 1)
       rather than reporting an extension that will not happen, and so does
-      a retained instance (exit 1), which does not idle-expire. --idle-timeout
+      a retained instance (exit 1), which does not idle-expire, and an
+      instance launched by a release before idle expiry (exit 1): stop that
+      one and launch it again. --idle-timeout
       is required (exit 2), and the duration is checked the same way launch
       checks it (exit 2 for a malformed one). Prints the instance name, the
       new timeout, the new deadline and the lease state as JSON. The
@@ -232,8 +234,7 @@ IDLE TIMEOUT
   safely: each holds its own protection, and one finishing never clears the
   other's.
 
-  NOT ACTIVITY: help, status, guide, stop, cleanup, retain, configure,
-  profile, window-border, launch, a command on another instance, a command
+  NOT ACTIVITY: help, status, guide, stop, cleanup, retain, profile, window-border, launch, a command on another instance, a command
   that failed before it reached the instance, and traffic the page generates
   by itself (polling, animations, background requests). Using the browser by
   hand is not activity either: only this tool's commands count. A browser you

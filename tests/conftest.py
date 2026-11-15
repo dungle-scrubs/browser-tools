@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from browser_teardown import stop_or_kill
@@ -272,7 +272,9 @@ _KEEPER_DOUBLE = {"enabled": True}
 
 
 @pytest.fixture(autouse=True)
-def keeper_double_by_default(monkeypatch):
+def keeper_double_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> Iterator[list[subprocess.Popen[str]]]:
     """Replace the per-instance keeper with a sleeper for every test.
 
     Since #195 every managed launch starts a keeper, and the keeper is a
@@ -291,7 +293,7 @@ def keeper_double_by_default(monkeypatch):
     real_spawn = task_lease.spawn_keeper
     spawned: list[subprocess.Popen[str]] = []
 
-    def spawn(argv, **kwargs):
+    def spawn(argv: list[str], **kwargs: Any) -> subprocess.Popen[str]:
         if _KEEPER_DOUBLE["enabled"] and "browser_tools.task_lease" in argv:
             # Only the program changes. The keeper's own arguments stay, so a
             # test that recognises the keeper's spawn by its module name
@@ -315,7 +317,7 @@ def keeper_double_by_default(monkeypatch):
 
 
 @pytest.fixture
-def real_keeper():
+def real_keeper() -> Iterator[None]:
     """Let this test spawn the real keeper instead of the suite's double."""
     _KEEPER_DOUBLE["enabled"] = False
     try:

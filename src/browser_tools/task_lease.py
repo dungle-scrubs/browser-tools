@@ -57,6 +57,16 @@ def observe(identity: ProcessIdentity) -> Observation:
     return "alive" if actual == identity.start else "gone"
 
 
+#: Instances this process began activity for: the registry each lives in and
+#: the lease generation it had. A process touches only the instances it
+#: began, and only while the lease is still the one it began on.
+_begun: dict[str, tuple[str | None, str]] = {}
+
+#: This process's own identity, cached: the start-time token does not change
+#: while the process lives, and reading it costs a process query.
+_identity: ProcessIdentity | None = None
+
+
 def capture_owner(pid: int) -> ProcessIdentity:
     if isinstance(pid, bool) or pid <= 0:
         raise lifecycle.LifecycleError("Owner must be a positive live process PID")
@@ -134,19 +144,30 @@ def _idle_fields(
 
 
 def load_registry(registry_path: str | None) -> tuple[str, dict[str, Any]]:
-    """Read a parseable registry or refuse a lease operation with unknown state."""
+    """Read a parseable registry or refuse a lease operation with unknown state.
+
+    Args:
+        registry_path: The registry to read, or None for the default one.
+
+    Returns:
+        The resolved registry file and its parsed contents.
+
+    Raises:
+        LifecycleError: The registry cannot be parsed.
+    """
     if not lifecycle.registry_is_parseable(registry_path):
         raise lifecycle.LifecycleError("Registry state unknown; lease operation refused")
     path = core_registry._resolve_path(registry_path)  # pyright: ignore[reportPrivateUsage]
     return path, core_registry._load_registry(path)  # pyright: ignore[reportPrivateUsage]
 
 
-def _save(path: str, registry: dict[str, Any]) -> None:
-    save_registry(path, registry)
-
-
 def save_registry(path: str, registry: dict[str, Any]) -> None:
-    """Write a registry back to disk with the core's own atomic save."""
+    """Write a registry back to disk with the core's own atomic save.
+
+    Args:
+        path: The resolved registry file.
+        registry: The whole registry to write.
+    """
     core_registry._save_registry(registry, path)  # pyright: ignore[reportPrivateUsage]
 
 
@@ -158,6 +179,13 @@ def status(value: Any) -> dict[str, Any]:
     from now, and how many running commands are protecting it. A lease with
     no owner reports ``"none"`` rather than an observation of a process that
     was never there.
+
+    Args:
+        value: The registry entry's raw ``lease`` record.
+
+    Returns:
+        The lease block of the status output. A record that does not parse
+        reports ``unverified`` with a missing keeper.
     """
     try:
         lease = Lease.parse(value)
@@ -191,7 +219,19 @@ def status(value: Any) -> dict[str, Any]:
 
 
 def summary(name: str, registry_path: str | None) -> dict[str, Any]:
-    """Report one instance's idle timeout and deadline, for launch output."""
+    """Report one instance's idle timeout and deadline, for launch output.
+
+    Args:
+        name: The instance to report.
+        registry_path: The registry that holds it.
+
+    Returns:
+        ``idle_timeout`` and ``idle_deadline``, or an empty mapping when the
+        instance has no readable lease.
+
+    Raises:
+        LifecycleError: The registry cannot be parsed.
+    """
     _, registry = load_registry(registry_path)
     entry = registry.get(name)
     value = entry.get("lease") if entry else None
@@ -226,7 +266,7 @@ def retain(name: str, note: str | None, registry_path: str | None) -> dict[str, 
         value["state"] = "retained"
         if note is not None:
             value["note"] = note
-        _save(path, registry)
+        save_registry(path, registry)
         return {
             "name": name,
             "retained": True,
@@ -276,6 +316,17 @@ def establish(
     that enforces the idle timeout, so a launch that cannot start one has no
     expiry at all, and that is a launch failure (exit 1) rather than a
     browser nobody will ever close.
+
+    Args:
+        name: The instance the launch just registered.
+        owner: The process whose exit closes the instance, or None.
+        headless: Whether the browser was launched headless.
+        registry_path: The registry that holds the instance.
+        idle_timeout: Seconds without activity before the keeper closes it.
+
+    Raises:
+        LifecycleError: The keeper did not start. The new browser was
+            stopped, or the message says that stopping it failed too.
     """
     generation = uuid.uuid4().hex
     with lifecycle.registry_lock(registry_path):
@@ -290,7 +341,7 @@ def establish(
             "last_activity": time.time(),
             "operations": [],
         }
-        _save(path, registry)
+        save_registry(path, registry)
         proc: subprocess.Popen[str] | None = None
         try:
             proc = spawn_keeper(
@@ -313,14 +364,14 @@ def establish(
                 raise RuntimeError("keeper identity is unverified")
             _, current = load_registry(registry_path)
             current[name]["lease"]["keeper"] = ProcessIdentity(proc.pid, start).record()
-            _save(path, current)
+            save_registry(path, current)
         except Exception as exc:
             if proc is not None and proc.poll() is None:
                 proc.terminate()
                 threading.Thread(target=_reap_failed_keeper, args=(proc,), daemon=True).start()
             _, current = load_registry(registry_path)
             current[name]["lease"]["state"] = "closing"
-            _save(path, current)
+            save_registry(path, current)
             try:
                 lifecycle.stop(name, registry_path=registry_path, _lease_generation=generation)
             except lifecycle.LifecycleError as cleanup_error:
@@ -344,7 +395,7 @@ def record_failure(name: str, generation: str, error: str, registry_path: str | 
             value = entry["lease"]
             if value.get("generation") == generation and value.get("state") == "closing":
                 value.update(state="close_failed", close_error=error)
-                _save(path, registry)
+                save_registry(path, registry)
 
 
 def configure(name: str, idle_timeout: int, registry_path: str | None) -> dict[str, Any]:
@@ -356,6 +407,19 @@ def configure(name: str, idle_timeout: int, registry_path: str | None) -> dict[s
     extension lands first and the keeper sees a fresh deadline, or the keeper
     claims the close first and the extension is refused. An extension is
     never reported as done while the browser is closing.
+
+    Args:
+        name: The instance to configure.
+        idle_timeout: The new timeout in seconds.
+        registry_path: The registry that holds the instance.
+
+    Returns:
+        ``name``, ``idle_timeout``, ``idle_deadline`` and ``state``.
+
+    Raises:
+        LifecycleError: No such instance, no lease, a lease nothing enforces
+            a deadline for (retained, or written by an earlier release), or
+            a close that has already been claimed (CLI exit 1).
     """
     with lifecycle.registry_lock(registry_path):
         path, registry = load_registry(registry_path)
@@ -381,9 +445,16 @@ def configure(name: str, idle_timeout: int, registry_path: str | None) -> dict[s
             raise lifecycle.LifecycleError(
                 f"Cannot configure {name}: it is retained and does not idle-expire"
             )
+        if lease.idle_timeout is None:
+            # A lease from an earlier release is watched by that release's
+            # keeper, which knows nothing about idle expiry.
+            raise lifecycle.LifecycleError(
+                f"Cannot configure {name}: it was launched by an earlier release and "
+                "does not idle-expire; stop it and launch it again"
+            )
         value["idle_timeout"] = idle_timeout
         value["last_activity"] = time.time()
-        _save(path, registry)
+        save_registry(path, registry)
         deadline = idle.deadline_of(value["last_activity"], idle_timeout)
         return {
             "name": name,
@@ -404,6 +475,17 @@ def _browser_observation(entry: dict[str, Any]) -> Observation:
         return "unverified"
 
 
+def _browser_is_live(name: str, entry: dict[str, Any]) -> bool:
+    """Whether the browser still runs although its recorded process is gone.
+
+    A wrapper install records the wrapper's PID, which exits while the real
+    browser keeps the debug port. The registry's own liveness ladder knows
+    that case, so the keeper asks it before it stops watching.
+    """
+    instance = lifecycle._entry_to_ext(name, entry)  # pyright: ignore[reportPrivateUsage]
+    return lifecycle.instance_is_live(instance)
+
+
 def watch_once(name: str, generation: str, registry_path: str | None) -> bool:
     """Run one keeper tick; return whether this keeper should keep watching.
 
@@ -411,14 +493,26 @@ def watch_once(name: str, generation: str, registry_path: str | None) -> bool:
 
     1. the entry, the lease or the generation is gone, or the lease is not
        ``auto`` (a retained instance has no keeper, as before) -- stop;
-    2. the browser process is gone -- stop without writing, so the
-       supervisor or ``bt cleanup`` retires the entry;
+    2. the browser is gone -- stop without writing, so the supervisor or
+       ``bt cleanup`` retires the entry;
     3. the owner is gone -- claim ``closing`` with reason ``owner`` and stop;
     4. prune operations whose process is gone, refreshing the countdown when
        any were pruned (a crashed command loses its protection);
     5. any operation left -- keep watching;
     6. the deadline has passed -- claim ``closing`` with reason ``idle`` and
        stop.
+
+    Args:
+        name: The instance this keeper watches.
+        generation: The lease generation this keeper was started for.
+        registry_path: The registry that holds the instance.
+
+    Returns:
+        True while the keeper should keep watching.
+
+    Raises:
+        LifecycleError: The registry lock timed out or the registry cannot
+            be parsed; the caller decides whether to try again.
     """
     with lifecycle.registry_lock(registry_path):
         path, registry = load_registry(registry_path)
@@ -431,12 +525,12 @@ def watch_once(name: str, generation: str, registry_path: str | None) -> bool:
             return False
         if lease.generation != generation or lease.state != "auto":
             return False
-        if _browser_observation(entry) == "gone":
+        if _browser_observation(entry) == "gone" and not _browser_is_live(name, entry):
             return False
         if lease.owner is not None and observe(lease.owner) == "gone":
             entry["lease"]["state"] = "closing"
             entry["lease"]["close_reason"] = "owner"
-            _save(path, registry)
+            save_registry(path, registry)
             claimed = True
         else:
             claimed = False
@@ -449,7 +543,7 @@ def watch_once(name: str, generation: str, registry_path: str | None) -> bool:
                 last_activity = time.time()
                 entry["lease"]["operations"] = [operation.record() for operation in remaining]
                 entry["lease"]["last_activity"] = last_activity
-                _save(path, registry)
+                save_registry(path, registry)
             if remaining:
                 return True
             deadline = idle.deadline_of(last_activity, lease.idle_timeout)
@@ -457,7 +551,7 @@ def watch_once(name: str, generation: str, registry_path: str | None) -> bool:
                 return True
             entry["lease"]["state"] = "closing"
             entry["lease"]["close_reason"] = "idle"
-            _save(path, registry)
+            save_registry(path, registry)
             claimed = True
     if claimed:
         _close(name, generation, registry_path)
@@ -481,6 +575,102 @@ def _prune_operations(
             continue
         remaining.append(operation)
     return remaining, pruned
+
+
+def process_identity() -> ProcessIdentity | None:
+    """Return this process's identity.
+
+    The identity is the PID plus its process-start token, so a recycled PID
+    is never mistaken for this process. It is cached once it is known. A
+    read that fails is not cached, so a later call tries again.
+
+    Returns:
+        The identity, or None when the start token cannot be read.
+    """
+    global _identity
+    if _identity is None:
+        start = process_start_time(os.getpid())
+        if not start:
+            return None
+        _identity = ProcessIdentity(os.getpid(), start)
+    return _identity
+
+
+def begin(name: str, registry_path: str | None) -> None:
+    """Record that this process is about to drive the instance ``name``.
+
+    Activity is the lifetime of a ``bt`` process that resolved a registered
+    instance and is about to drive it. Idempotent per process and instance.
+    Nothing happens for an entry without a lease, for a lease that is not
+    ``auto``, for an unknown registry, or when the registry lock cannot be
+    taken: the command still runs, it simply does not count as activity.
+
+    Args:
+        name: The registered instance this process is about to drive.
+        registry_path: The registry that holds it.
+    """
+    if name in _begun:
+        return
+    identity = process_identity()
+    if identity is None:
+        return
+    try:
+        with lifecycle.registry_lock(registry_path):
+            path, registry = load_registry(registry_path)
+            value = (registry.get(name) or {}).get("lease")
+            if not isinstance(value, dict):
+                return
+            try:
+                lease = Lease.parse(value)
+            except ValueError:
+                return
+            if lease.state != "auto":
+                return
+            records = [operation.record() for operation in lease.operations]
+            if identity.record() not in records:
+                value["operations"] = [*records, identity.record()]
+                save_registry(path, registry)
+    except (lifecycle.LifecycleError, OSError):
+        return
+    _begun[name] = (registry_path, lease.generation)
+
+
+def finish() -> None:
+    """Release this process's protection and refresh the idle countdown.
+
+    Runs at the end of every command, successful or not. Only this process's
+    own identity is removed, so overlapping commands each keep their own
+    protection. The countdown starts again from the moment the work ended.
+    A lease with another generation is a replacement instance that reused
+    the name, and is left alone.
+    """
+    begun = dict(_begun)
+    _begun.clear()
+    if not begun:
+        return
+    identity = process_identity()
+    if identity is None:
+        return
+    for name, (registry_path, generation) in begun.items():
+        try:
+            with lifecycle.registry_lock(registry_path):
+                path, registry = load_registry(registry_path)
+                value = (registry.get(name) or {}).get("lease")
+                if not isinstance(value, dict):
+                    continue
+                try:
+                    lease = Lease.parse(value)
+                except ValueError:
+                    continue
+                if lease.generation != generation:
+                    continue
+                value["operations"] = [
+                    operation.record() for operation in lease.operations if operation != identity
+                ]
+                value["last_activity"] = time.time()
+                save_registry(path, registry)
+        except (lifecycle.LifecycleError, OSError):
+            continue
 
 
 def _close(name: str, generation: str, registry_path: str | None) -> None:
