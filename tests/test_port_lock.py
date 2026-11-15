@@ -3,7 +3,7 @@
 Two launches on registries in different directories that allocated at the
 same moment picked the same port, and the one whose browser lost the bind
 registered the other's browser. The unit
-tests use a lock file of their own, so a launch elsewhere on the machine
+tests in this file use a lock file of their own, so a launch elsewhere on the machine
 cannot slow them. The live test uses the real lock, because the machine-wide
 path is the behavior it proves.
 """
@@ -69,6 +69,53 @@ def test_the_lock_file_is_private_and_empty(own_lock: Path) -> None:
 
     assert mode == 0o600
     assert own_lock.stat().st_size == 0
+
+
+def test_a_umask_that_removes_owner_bits_does_not_break_the_next_launch(own_lock: Path) -> None:
+    # The #214 failure: the mask filters the creation mode, and a 0400 file
+    # refuses every later read-write open.
+    own_lock.parent.mkdir(parents=True)
+    previous = os.umask(0o277)
+    try:
+        with port_lock.held():
+            pass
+    finally:
+        os.umask(previous)
+
+    assert stat.S_IMODE(own_lock.stat().st_mode) == 0o600
+    with port_lock.held(wait_seconds=1.0):
+        pass
+
+
+def test_a_file_that_is_not_this_lock_is_refused_and_left_alone(own_lock: Path) -> None:
+    own_lock.parent.mkdir(parents=True)
+    own_lock.write_text("not a lock")
+    own_lock.chmod(0o644)
+
+    with pytest.raises(OSError, match="must be an empty regular file"), port_lock.held():
+        pytest.fail("a file that is not the lock was locked")
+
+    assert own_lock.read_text() == "not a lock"
+    assert stat.S_IMODE(own_lock.stat().st_mode) == 0o644
+
+
+def test_a_camoufox_launch_does_not_take_the_lock(
+    own_lock: Path,
+    another_launch: subprocess.Popen[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # Its runner is already running when its entry is written, so a wait
+    # here could only fail after the browser exists.
+    monkeypatch.setattr(port_lock, "WAIT_SECONDS", 0.3)
+    monkeypatch.setattr(lifecycle, "_spawn_camoufox_process", lambda *_a, **_k: (4321, "token"))
+    monkeypatch.setenv(lifecycle.PROFILES_ENV_VAR, str(tmp_path / "profiles"))
+
+    instance = lifecycle.launch(
+        engine="camoufox", headless=True, registry_path=str(tmp_path / "registry.json")
+    )
+
+    assert instance.engine == "camoufox"
 
 
 def test_a_launch_waits_for_the_launch_ahead_of_it(

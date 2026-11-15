@@ -28,7 +28,7 @@ EXCEPTIONS: dict[str, int] = {
     "src/browser_tools/core/supervisor.py": 1115,
     "src/browser_tools/curated.py": 1010,
     "src/browser_tools/frame_manager.py": 816,
-    "src/browser_tools/lifecycle.py": 2192,
+    "src/browser_tools/lifecycle.py": 2191,
     "tests/test_chrome_attach.py": 1097,
     "tests/test_curated_verbs.py": 1490,
     "tests/test_guide.py": 901,

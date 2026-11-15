@@ -1016,16 +1016,15 @@ def _safe_allocation_base() -> Generator[None]:
     module globals and ``allocate_port`` takes no base argument, so the only
     call-site lever is to set them for the duration of the vendored call and
     restore them after, even on failure. No other thread allocates in this
-    process. Other processes do, so the call also holds the machine-wide
-    port lock (#234): see ``port_lock``.
+    process. Other processes do, so the Chrome launch also holds the
+    machine-wide port lock around this call (#234): see ``port_lock``.
     """
     original_base = core_registry.BASE_PORT
     original_max = core_registry.MAX_PORT
     core_registry.BASE_PORT = ALLOCATION_BASE_PORT
     core_registry.MAX_PORT = ALLOCATION_BASE_PORT + 100
     try:
-        with port_lock.held():
-            yield
+        yield
     finally:
         core_registry.BASE_PORT = original_base
         core_registry.MAX_PORT = original_max
@@ -1384,7 +1383,7 @@ def launch(
             initialize_directory = _temporary_setup_initializer(engine=engine, profile=profile)
 
         try:
-            with _safe_allocation_base():
+            with _safe_allocation_base(), port_lock.held():
                 info = asyncio.run(
                     core_launcher.launch_browser(
                         port_override=port,
