@@ -43,6 +43,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import pytest
+from browser_teardown import stop_or_kill
 
 from browser_tools import lifecycle
 
@@ -121,7 +122,7 @@ def live(tmp_path_factory: pytest.TempPathFactory) -> Iterator[dict[str, Any]]:
         # running when the test already failed for its own reason.
         if instance is not None:
             with contextlib.suppress(Exception):
-                lifecycle.stop(instance.name, registry_path=registry)
+                stop_or_kill(instance, registry)
         patch.undo()
 
 
@@ -169,7 +170,7 @@ def test_stop_retires_the_entry_and_ends_the_process(
         assert not _process_alive(instance.pid), "process outlived stop"
     finally:
         with contextlib.suppress(Exception):
-            lifecycle.stop(instance.name, registry_path=registry)
+            stop_or_kill(instance, registry)
 
 
 def test_the_skip_guard_can_say_no():
