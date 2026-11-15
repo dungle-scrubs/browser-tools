@@ -9,6 +9,8 @@ import sys
 from typing import TYPE_CHECKING
 from urllib.parse import quote
 
+from browser_tools import lifecycle
+
 if TYPE_CHECKING:
     from pathlib import Path
 
@@ -123,3 +125,9 @@ def test_a_root_removed_mid_wait_ends_in_the_timeout(curated_browser: str, tmp_p
     completed = run_cli(curated_browser, steps)
     assert completed.returncode == 1, completed.stdout + completed.stderr
     assert "E008: wait_stable timed out after 1500ms" in completed.stdout + completed.stderr
+
+
+def test_the_guide_states_what_wait_stable_cannot_see() -> None:
+    flat = " ".join(lifecycle.guide_text().split())
+    assert "A PENDING NAVIGATION IS NOT VISIBLE TO wait-stable" in flat
+    assert "A document with no root element is never stable" in flat

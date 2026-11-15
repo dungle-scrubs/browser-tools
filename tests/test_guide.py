@@ -348,8 +348,6 @@ class TestTheNonObviousContracts:
             "never on age",
             "the frame buffer belongs to the process that captured it",
             "A bare leading token is an instance name when the registry knows it",
-            "A PENDING NAVIGATION IS NOT VISIBLE TO wait-stable",
-            "A document with no root element is never stable",
         ],
     )
     def test_the_contract_is_stated_as_a_rule(self, flat, rule):
