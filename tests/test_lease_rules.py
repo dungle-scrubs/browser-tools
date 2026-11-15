@@ -100,12 +100,14 @@ def test_the_idle_module_imports_nothing_above_it() -> None:
         (task_lease.watch_once, ("Args:", "Returns:", "Raises:")),
         (task_lease.process_identity, ("Returns:",)),
         (task_lease.begin, ("Args:",)),
+        (task_lease._browser_is_live, ("Args:", "Returns:")),
+        (task_lease._browser_is_gone, ("Args:", "Returns:", "Raises:")),
     ],
 )
 def test_lease_boundaries_have_google_style_sections(
     function: object, sections: tuple[str, ...]
 ) -> None:
-    """Keep the idle-expiry boundary documentation in CONTRIBUTING's format."""
+    # Keep the idle-expiry boundary documentation in CONTRIBUTING's format.
     doc = inspect.getdoc(function) or ""
     name = getattr(function, "__qualname__", repr(function))
     for section in sections:
@@ -152,7 +154,7 @@ def _unannotated(path: Path, only: tuple[str, ...] | None = None) -> list[str]:
 def test_idle_expiry_tests_and_fixtures_are_fully_annotated(
     module: str, only: tuple[str, ...] | None
 ) -> None:
-    """Every parameter and return of the #195 tests and fixtures is typed."""
+    # Every parameter and return of the #195 tests and fixtures is typed.
     problems = _unannotated(TESTS / module, only)
     assert not problems, (
         f"tests/{module} has unannotated functions (CONTRIBUTING.md: type "

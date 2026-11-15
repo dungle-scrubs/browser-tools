@@ -599,17 +599,12 @@ def test_the_durations_the_cli_refuses(text: str) -> None:
         idle.parse_duration(text)
 
 
-# --------------------------------------------------------------------------- #
-# The live check
-# --------------------------------------------------------------------------- #
-
-
 def test_configure_refuses_a_lease_from_an_earlier_release(
     registry: str,
     browser_double: Launches,
     capsys: Capture,
 ) -> None:
-    """The earlier release's keeper enforces no deadline, so none is reported."""
+    # The earlier release's keeper enforces no deadline, so none is reported.
     instance = lifecycle.launch(name="legacy", headless=True, registry_path=registry)
     lease = lease_value(registry, instance.name)
     for key in ("idle_timeout", "last_activity", "operations"):
@@ -642,7 +637,7 @@ def test_a_refused_login_does_not_restart_the_countdown(
     clock: Clock,
     monkeypatch: Patch,
 ) -> None:
-    """A login refused at the ownership check never drove the browser."""
+    # A login refused at the ownership check never drove the browser.
     instance = lifecycle.launch(name="refused", headless=True, registry_path=registry)
     before = lease_value(registry, instance.name)
 
@@ -659,7 +654,12 @@ def test_a_refused_login_does_not_restart_the_countdown(
 
 
 def _record_browser_process(registry: str, name: str) -> None:
-    """Give the entry a start token, so its dead PID reads as gone."""
+    """Give the entry a start token, so its dead PID reads as gone.
+
+    Args:
+        registry: The registry file that holds the instance.
+        name: The instance whose entry is changed.
+    """
     raw = json.loads(Path(registry).read_text())
     raw[name]["pid_start"] = "token"
     Path(registry).write_text(json.dumps(raw))
@@ -687,7 +687,7 @@ def test_the_keeper_still_expires_a_browser_whose_launching_process_exited(
     clock: Clock,
     monkeypatch: Patch,
 ) -> None:
-    """A wrapper's PID is gone while the browser it started keeps the port."""
+    # A wrapper's PID is gone while the browser it started keeps the port.
     instance = lifecycle.launch(name="wrapped", headless=True, registry_path=registry)
     _record_browser_process(registry, instance.name)
     lease = lease_value(registry, instance.name)
@@ -699,6 +699,11 @@ def test_the_keeper_still_expires_a_browser_whose_launching_process_exited(
     assert lease_value(registry, instance.name)["close_reason"] == "idle"
 
 
+# --------------------------------------------------------------------------- #
+# The live check
+# --------------------------------------------------------------------------- #
+
+
 @pytest.mark.live
 def test_a_real_idle_instance_closes_itself_and_an_extended_one_survives(
     registry: str,
@@ -706,9 +711,10 @@ def test_a_real_idle_instance_closes_itself_and_an_extended_one_survives(
 ) -> None:
     """A real browser, a real keeper, and a real expiry.
 
-    Both instances start with a three-second timeout. The first closes on its
-    own. The second is extended before its deadline passes and is still alive
-    after the first has closed; it is then stopped explicitly.
+    Both instances start with a three-second timeout. The first, on a named
+    profile, closes on its own and its profile's saved state survives. The
+    second is extended before its deadline passes and is still alive after
+    the first has closed; it is then stopped explicitly.
     """
     if not os.environ.get(lifecycle.CHROME_BINARY_ENV_VAR):
         pytest.skip(
@@ -717,6 +723,7 @@ def test_a_real_idle_instance_closes_itself_and_an_extended_one_survives(
         )
     first = lifecycle.launch(
         name="idle-live",
+        profile="idle-profile",
         headless=True,
         registry_path=registry,
         idle_timeout=3,
@@ -729,6 +736,8 @@ def test_a_real_idle_instance_closes_itself_and_an_extended_one_survives(
         idle_timeout=3,
         browser_args=["about:blank"],
     )
+    saved = Path(first.user_data_dir) / "saved-by-the-test"
+    saved.write_text("kept")
     try:
         task_lease.configure(second.name, 300, registry)
         deadline = time.monotonic() + 30
@@ -738,6 +747,7 @@ def test_a_real_idle_instance_closes_itself_and_an_extended_one_survives(
             time.sleep(0.2)
         assert lifecycle.instance_is_registered(first.name, registry) is False
         assert lifecycle.process_running_state(first.pid) is False
+        assert saved.read_text() == "kept"
         assert lifecycle.instance_is_live(second)
         assert lifecycle.status(second.name, registry)[0]["lease"]["state"] == "auto"
     finally:

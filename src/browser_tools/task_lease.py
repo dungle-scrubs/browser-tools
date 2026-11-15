@@ -481,20 +481,57 @@ def _browser_is_live(name: str, entry: dict[str, Any]) -> bool:
     A wrapper install records the wrapper's PID, which exits while the real
     browser keeps the debug port. The registry's own liveness ladder knows
     that case, so the keeper asks it before it stops watching.
+
+    Args:
+        name: The instance the keeper watches.
+        entry: Its raw registry entry.
+
+    Returns:
+        True when the registry's liveness ladder still finds the browser.
     """
     instance = lifecycle._entry_to_ext(name, entry)  # pyright: ignore[reportPrivateUsage]
     return lifecycle.instance_is_live(instance)
 
 
+def _browser_is_gone(name: str, generation: str, registry_path: str | None) -> bool:
+    """Whether the browser this keeper watches has exited.
+
+    Read without the registry lock: observing a process and probing a port
+    take time, and every command on any instance waits for that lock. A
+    stale read is harmless, because a browser that is gone stays gone and
+    the answer is checked against the lease generation.
+
+    Args:
+        name: The instance the keeper watches.
+        generation: The lease generation the keeper was started for.
+        registry_path: The registry that holds the instance.
+
+    Returns:
+        True when the entry still carries this lease and its browser is gone.
+
+    Raises:
+        LifecycleError: The registry cannot be parsed.
+    """
+    _, registry = load_registry(registry_path)
+    entry = registry.get(name)
+    if entry is None:
+        return False
+    lease = entry.get("lease")
+    if not isinstance(lease, dict) or lease.get("generation") != generation:
+        return False
+    return _browser_observation(entry) == "gone" and not _browser_is_live(name, entry)
+
+
 def watch_once(name: str, generation: str, registry_path: str | None) -> bool:
     """Run one keeper tick; return whether this keeper should keep watching.
 
-    The tick is one read-modify-write under the registry lock, in this order:
+    The browser is observed first, without the registry lock. The rest of the
+    tick is one read-modify-write under the lock, in this order:
 
-    1. the entry, the lease or the generation is gone, or the lease is not
-       ``auto`` (a retained instance has no keeper, as before) -- stop;
-    2. the browser is gone -- stop without writing, so the supervisor or
+    1. the browser is gone -- stop without writing, so the supervisor or
        ``bt cleanup`` retires the entry;
+    2. the entry, the lease or the generation is gone, or the lease is not
+       ``auto`` (a retained instance has no keeper, as before) -- stop;
     3. the owner is gone -- claim ``closing`` with reason ``owner`` and stop;
     4. prune operations whose process is gone, refreshing the countdown when
        any were pruned (a crashed command loses its protection);
@@ -514,6 +551,8 @@ def watch_once(name: str, generation: str, registry_path: str | None) -> bool:
         LifecycleError: The registry lock timed out or the registry cannot
             be parsed; the caller decides whether to try again.
     """
+    if _browser_is_gone(name, generation, registry_path):
+        return False
     with lifecycle.registry_lock(registry_path):
         path, registry = load_registry(registry_path)
         entry = registry.get(name)
@@ -524,8 +563,6 @@ def watch_once(name: str, generation: str, registry_path: str | None) -> bool:
         except ValueError:
             return False
         if lease.generation != generation or lease.state != "auto":
-            return False
-        if _browser_observation(entry) == "gone" and not _browser_is_live(name, entry):
             return False
         if lease.owner is not None and observe(lease.owner) == "gone":
             entry["lease"]["state"] = "closing"
