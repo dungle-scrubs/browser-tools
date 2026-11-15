@@ -1,4 +1,4 @@
-"""wait-stable against an isolated Chrome, including a document with no root yet (#190)."""
+"""wait-stable against an isolated Chrome, including documents with no root element (#190, #233)."""
 
 from __future__ import annotations
 
@@ -9,6 +9,8 @@ import sys
 from typing import TYPE_CHECKING
 from urllib.parse import quote
 
+from browser_tools import lifecycle
+
 if TYPE_CHECKING:
     from pathlib import Path
 
@@ -18,11 +20,15 @@ ROOT_DELAY_MS = 400
 STABLE_MS = 300
 
 
-def run_steps(endpoint: str, steps: Path) -> dict:
-    completed = subprocess.run(
+def run_cli(endpoint: str, steps: Path) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
         [sys.executable, "-m", "browser_tools.cli", "run", str(steps), "--endpoint", endpoint],
         capture_output=True, text=True, timeout=20,
     )
+
+
+def run_steps(endpoint: str, steps: Path) -> dict:
+    completed = run_cli(endpoint, steps)
     assert completed.returncode == 0, completed.stdout + completed.stderr
     return json.loads(completed.stdout)
 
@@ -68,3 +74,60 @@ def test_a_quiet_document_is_stable_after_the_quiet_period(
     steps.write_text(f"Page.navigate '{json.dumps({'url': page})}'\nwait-stable\n")
     elapsed = stable_after_ms(run_steps(curated_browser, steps))
     assert STABLE_MS <= elapsed < STABLE_MS + 1000, elapsed
+
+
+def test_a_doctype_arriving_first_does_not_start_the_quiet_period(
+    curated_browser: str, tmp_path: Path
+) -> None:
+    # The doctype is a mutation on a document that still has no root element.
+    # If that mutation started the quiet period, wait-stable would resolve
+    # about STABLE_MS after the doctype, well before the root element arrives.
+    doctype_at_ms = 150
+    root_at_ms = 700
+    restore = (
+        "document.documentElement.remove();"
+        "setTimeout(() => document.appendChild("
+        f"document.implementation.createDocumentType('html', '', '')), {doctype_at_ms});"
+        f"setTimeout(() => document.appendChild(document.createElement('html')), {root_at_ms});"
+        "'removed'"
+    )
+    page = "data:text/html," + quote("<p>root</p>")
+    steps = tmp_path / "doctype-first.steps"
+    steps.write_text(
+        f"Page.navigate '{json.dumps({'url': page})}'\n"
+        "wait-stable\n"
+        f"eval {json.dumps(restore)}\n"
+        "wait-stable\n"
+    )
+    elapsed = stable_after_ms(run_steps(curated_browser, steps))
+    # With the quiet period started by the doctype this is about
+    # doctype_at_ms + STABLE_MS, 450.
+    assert elapsed >= root_at_ms + STABLE_MS - 150, elapsed
+
+
+def test_a_root_removed_mid_wait_ends_in_the_timeout(curated_browser: str, tmp_path: Path) -> None:
+    # A mutation starts the quiet period, then the root element goes away for
+    # good before the period ends. The document now has no content, so the
+    # wait must not resolve on the timer the earlier mutation started.
+    remove = (
+        "setTimeout(() => document.body.appendChild(document.createElement('i')), 100);"
+        "setTimeout(() => document.documentElement.remove(), 200);"
+        "'armed'"
+    )
+    page = "data:text/html," + quote("<p>root</p>")
+    steps = tmp_path / "root-removed.steps"
+    steps.write_text(
+        f"Page.navigate '{json.dumps({'url': page})}'\n"
+        "wait-stable\n"
+        f"eval {json.dumps(remove)}\n"
+        "wait-stable --timeout-ms 1500\n"
+    )
+    completed = run_cli(curated_browser, steps)
+    assert completed.returncode == 1, completed.stdout + completed.stderr
+    assert "E008: wait_stable timed out after 1500ms" in completed.stdout + completed.stderr
+
+
+def test_the_guide_states_what_wait_stable_cannot_see() -> None:
+    flat = " ".join(lifecycle.guide_text().split())
+    assert "A PENDING NAVIGATION IS NOT VISIBLE TO wait-stable" in flat
+    assert "A document with no root element is never stable" in flat
