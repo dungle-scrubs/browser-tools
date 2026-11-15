@@ -586,6 +586,43 @@ class ScanUnknown:
 _SCAN_TIMEOUT_S = 2
 
 
+def _scan_user_data_dir_holders() -> list[tuple[int, Path]] | ScanUnknown:
+    """Read every process that names a user-data directory on its command line.
+
+    Returns:
+        One ``(pid, resolved directory)`` pair per such process, or a
+        ``ScanUnknown`` naming the check that failed when the scan could not
+        be read completely.
+    """
+    try:
+        result = subprocess.run(
+            ["ps", "-ww", "-e", "-o", "pid=", "-o", "args="],
+            capture_output=True,
+            text=True,
+            timeout=_SCAN_TIMEOUT_S,
+        )
+        if result.returncode != 0:
+            return ScanUnknown(f"failed: ps exited {result.returncode}")
+        if not result.stdout.strip():
+            return ScanUnknown("failed: ps printed nothing")
+        holders: list[tuple[int, Path]] = []
+        for number, line in enumerate(result.stdout.splitlines(), start=1):
+            fields = line.strip().split(maxsplit=1)
+            if len(fields) != 2 or not fields[0].isdigit():
+                return ScanUnknown(
+                    f"could not parse ps line {number}: {len(fields)} field(s), "
+                    f"first field {'numeric' if fields and fields[0].isdigit() else 'not numeric'}"
+                )
+            match = _USER_DATA_DIR_PATTERN.search(fields[1])
+            if match:
+                holders.append((int(fields[0]), Path(match[1]).resolve()))
+        return holders
+    except subprocess.TimeoutExpired:
+        return ScanUnknown(f"timed out: ps took longer than {_SCAN_TIMEOUT_S}s")
+    except (OSError, subprocess.SubprocessError, RuntimeError) as exc:
+        return ScanUnknown(f"failed: {type(exc).__name__}")
+
+
 def find_user_data_dir_processes(user_data_dir: str) -> list[int] | ScanUnknown:
     """Return the PIDs whose command line names ``user_data_dir``.
 
@@ -598,34 +635,32 @@ def find_user_data_dir_processes(user_data_dir: str) -> list[int] | ScanUnknown:
     """
     if not user_data_dir:
         return ScanUnknown("had no user-data directory to look for")
+    holders = _scan_user_data_dir_holders()
+    if isinstance(holders, ScanUnknown):
+        return holders
     try:
-        result = subprocess.run(
-            ["ps", "-ww", "-e", "-o", "pid=", "-o", "args="],
-            capture_output=True,
-            text=True,
-            timeout=_SCAN_TIMEOUT_S,
-        )
-        if result.returncode != 0:
-            return ScanUnknown(f"failed: ps exited {result.returncode}")
-        if not result.stdout.strip():
-            return ScanUnknown("failed: ps printed nothing")
         expected = Path(user_data_dir).resolve()
-        pids: list[int] = []
-        for number, line in enumerate(result.stdout.splitlines(), start=1):
-            fields = line.strip().split(maxsplit=1)
-            if len(fields) != 2 or not fields[0].isdigit():
-                return ScanUnknown(
-                    f"could not parse ps line {number}: {len(fields)} field(s), "
-                    f"first field {'numeric' if fields and fields[0].isdigit() else 'not numeric'}"
-                )
-            match = _USER_DATA_DIR_PATTERN.search(fields[1])
-            if match and Path(match[1]).resolve() == expected:
-                pids.append(int(fields[0]))
-        return pids
-    except subprocess.TimeoutExpired:
-        return ScanUnknown(f"timed out: ps took longer than {_SCAN_TIMEOUT_S}s")
-    except (OSError, subprocess.SubprocessError, RuntimeError) as exc:
+    except (OSError, RuntimeError) as exc:
         return ScanUnknown(f"failed: {type(exc).__name__}")
+    return [pid for pid, held in holders if held == expected]
+
+
+def held_user_data_dirs() -> set[str] | ScanUnknown:
+    """Return every user-data directory that a running process names.
+
+    The launch-time sweep reads this before it removes a session directory
+    that no registry it can see tracks. A browser registered somewhere else
+    still holds its directory, and a headless shell writes no SingletonLock
+    to say so.
+
+    Returns:
+        The resolved directories, or a ``ScanUnknown`` naming the check that
+        failed when the scan could not be read completely.
+    """
+    holders = _scan_user_data_dir_holders()
+    if isinstance(holders, ScanUnknown):
+        return holders
+    return {str(held) for _pid, held in holders}
 
 
 def process_running_state(pid: int) -> bool | None:

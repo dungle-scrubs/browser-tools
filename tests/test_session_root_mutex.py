@@ -550,9 +550,9 @@ class TestPublicationRace:
 
         sweeper = threading.Thread(target=sweep, name="sweeper")
         monkeypatch.setattr(launcher.shutil, "rmtree", pausing_rmtree)
-        monkeypatch.setattr(
-            launcher.subprocess, "Popen", _spawn_double(synthetic_spawn_environment)
-        )
+        spawn = _spawn_double(synthetic_spawn_environment)
+        monkeypatch.setattr(launcher.subprocess, "Popen", spawn)
+        monkeypatch.setattr(launcher.process_utils, "held_user_data_dirs", set)
         monkeypatch.setattr(launcher, "check_cdp_port_async", _ready)
 
         sweeper.start()
@@ -609,9 +609,9 @@ class TestCriticalSectionBoundaries:
             (directory / "prepared-registration.json").write_text('{"synthetic": true}')
 
         creator = _LaunchThread("creator", tmp_path, 9503, initialize)
-        monkeypatch.setattr(
-            launcher.subprocess, "Popen", _spawn_double(synthetic_spawn_environment)
-        )
+        spawn = _spawn_double(synthetic_spawn_environment)
+        monkeypatch.setattr(launcher.subprocess, "Popen", spawn)
+        monkeypatch.setattr(launcher.process_utils, "held_user_data_dirs", set)
         monkeypatch.setattr(launcher, "check_cdp_port_async", _ready)
 
         creator.start()

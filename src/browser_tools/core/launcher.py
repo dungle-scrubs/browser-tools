@@ -73,7 +73,7 @@ from pathlib import Path
 from typing import NoReturn
 from urllib.parse import urlsplit
 
-from browser_tools import session_initialization
+from browser_tools import process_utils, session_initialization
 from browser_tools.spawn_environment import detached_environment
 from .connection import check_cdp_port_async
 from .registry import REGISTRY_PATH, InstanceInfo, allocate_port, register, cleanup
@@ -648,6 +648,8 @@ def cleanup_sessions(registry_path: str | None = None) -> list[str]:
             )
         if mutex_fd is not None:
             try:
+                # Directories that running processes hold, read on first need.
+                held: set[str] | process_utils.ScanUnknown | None = None
                 for entry in os.listdir(_SESSION_ROOT):
                     session_dir = os.path.join(_SESSION_ROOT, entry)
                     if not os.path.isdir(session_dir):
@@ -668,6 +670,11 @@ def cleanup_sessions(registry_path: str | None = None) -> list[str]:
 
                     lock_file = os.path.join(session_dir, "SingletonLock")
                     if not os.path.exists(lock_file) and not os.path.islink(lock_file):
+                        # A headless shell writes no lock, and another registry
+                        # may track it. An unreadable scan removes nothing.
+                        held = process_utils.held_user_data_dirs() if held is None else held
+                        if not isinstance(held, set) or os.path.realpath(session_dir) in held:
+                            continue
                         logger.info("Removing orphaned session directory: %s", session_dir)
                         shutil.rmtree(session_dir, ignore_errors=True)
                     else:
