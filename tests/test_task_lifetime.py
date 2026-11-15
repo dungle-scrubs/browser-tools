@@ -64,19 +64,28 @@ def browser_double(tmp_path, monkeypatch):
 @pytest.fixture
 def keeper_double(monkeypatch):
     spawned = []
-    real_popen = subprocess.Popen
+    real_spawn = task_lease.spawn_keeper
 
-    def popen(argv, **kwargs):
+    def spawn(argv, **kwargs):
         if "browser_tools.task_lease" in argv:
-            proc = real_popen(
-                [sys.executable, "-c", "import time; print('ready', flush=True); time.sleep(60)"],
+            # Only the program changes. The keeper's own arguments stay, so a
+            # test that recognises the keeper's spawn by its module name
+            # still recognises this one.
+            module = argv.index("browser_tools.task_lease")
+            proc = real_spawn(
+                [
+                    sys.executable,
+                    "-c",
+                    "import time; print('ready', flush=True); time.sleep(60)",
+                    *argv[module:],
+                ],
                 **kwargs,
             )
             spawned.append(proc)
             return proc
-        return real_popen(argv, **kwargs)
+        return real_spawn(argv, **kwargs)
 
-    monkeypatch.setattr(task_lease.subprocess, "Popen", popen)
+    monkeypatch.setattr(task_lease, "spawn_keeper", spawn)
     try:
         yield spawned
     finally:
@@ -103,10 +112,18 @@ def owner_gone(monkeypatch, pid):
     )
 
 
-def test_plain_launch_has_no_lease_or_keeper(registry, browser_double, keeper_double):
+def test_plain_launch_gets_a_lease_and_a_keeper(registry, browser_double, keeper_double):
+    """Every managed launch is leased, owner or not (#195).
+
+    The owner is an extra cleanup rule; the lease is what makes the idle
+    timeout enforceable, and it needs a keeper of its own.
+    """
     instance = lifecycle.launch(name="plain", headless=True, registry_path=registry)
-    assert "lease" not in lifecycle.status(instance.name, registry)[0]
-    assert keeper_double == []
+    lease = lease_value(registry, instance.name)
+    assert lease["state"] == "auto"
+    assert lease["owner"] is None
+    assert lease["idle_timeout"] == 3600
+    assert len(keeper_double) == 1
     assert len(browser_double) == 1
 
 
@@ -264,14 +281,14 @@ def test_cli_owner_and_retain_contract(registry, owner, browser_double, keeper_d
 def test_keeper_setup_failure_truthfully_cleans_only_new_browser(
     registry, owner, browser_double, monkeypatch
 ):
-    real_popen = subprocess.Popen
+    real_spawn = task_lease.spawn_keeper
 
-    def popen(argv, **kwargs):
+    def spawn(argv, **kwargs):
         if "browser_tools.task_lease" in argv:
             raise OSError("disposable keeper spawn failed")
-        return real_popen(argv, **kwargs)
+        return real_spawn(argv, **kwargs)
 
-    monkeypatch.setattr(task_lease.subprocess, "Popen", popen)
+    monkeypatch.setattr(task_lease, "spawn_keeper", spawn)
     with pytest.raises(lifecycle.LifecycleError, match=r"Keeper setup failed.*new browser stopped"):
         launch_owned(registry, owner)
     assert lifecycle.read_instances(registry) == []
@@ -279,7 +296,9 @@ def test_keeper_setup_failure_truthfully_cleans_only_new_browser(
 
 @pytest.mark.parametrize("retain", [False, True])
 @pytest.mark.parametrize("owner_signal", [signal.SIGTERM, signal.SIGKILL])
-def test_real_keeper_handles_sigkill_owner_and_named_profile(registry, owner, retain, owner_signal):
+def test_real_keeper_handles_sigkill_owner_and_named_profile(
+    registry, owner, retain, owner_signal, real_keeper
+):
     instance = lifecycle.launch(
         name="live",
         profile="task-profile",
@@ -321,17 +340,17 @@ def test_real_keeper_handles_sigkill_owner_and_named_profile(registry, owner, re
 def test_keeper_setup_cleanup_failure_retains_error_and_generation(
     registry, owner, browser_double, monkeypatch
 ):
-    real_popen = subprocess.Popen
+    real_spawn = task_lease.spawn_keeper
 
-    def popen(argv, **kwargs):
+    def spawn(argv, **kwargs):
         if "browser_tools.task_lease" in argv:
             raise OSError("keeper unavailable")
-        return real_popen(argv, **kwargs)
+        return real_spawn(argv, **kwargs)
 
     def survivor(*args, **kwargs):
         raise lifecycle.LifecycleError("owned survivor")
 
-    monkeypatch.setattr(task_lease.subprocess, "Popen", popen)
+    monkeypatch.setattr(task_lease, "spawn_keeper", spawn)
     monkeypatch.setattr(lifecycle, "stop", survivor)
     with pytest.raises(lifecycle.LifecycleError, match="browser cleanup failed: owned survivor"):
         launch_owned(registry, owner)

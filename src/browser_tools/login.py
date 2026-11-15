@@ -721,6 +721,12 @@ def login(*, instance: str | None, account: str, target: str | None = None,
     )
     if entry is None:
         raise LifecycleError(f"no browser instance named '{name}' is registered")
+    # A login drives the browser, so it counts as activity for the idle
+    # timeout (#195). The instance is resolved here, not through
+    # ``lifecycle.resolve_cdp_port``, so the countdown is refreshed here.
+    from . import idle
+
+    idle.begin(name, registry_path)
     if entry.engine != lifecycle.DEFAULT_ENGINE:
         raise LifecycleError(contract.ENGINE_MESSAGE)
     # Positive ownership before anything else runs: the relay probe, the

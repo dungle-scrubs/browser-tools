@@ -165,6 +165,13 @@ def run_attach(
     if instance is None:
         instance = lifecycle.resolve_single_instance(registry_path=registry_path)
 
+    # Attaching is driving the browser: the instance's idle countdown
+    # restarts (#195). The external path returns above, because an external
+    # browser has no lease to refresh.
+    from . import idle
+
+    idle.begin(instance, registry_path)
+
     spec, target_by = _target_slot(target, url)
 
     try:

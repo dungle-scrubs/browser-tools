@@ -92,6 +92,7 @@ EXCLUDED_VERBS: dict[str, str] = {
     ),
     "cleanup": "it does not drive the attached browser",
     "retain": "it changes instance lifetime, not the attached browser",
+    "configure": "it changes instance lifetime, not the attached browser",
     "status": "it does not drive the attached browser",
     "profile": "it does not drive the attached browser",
     "window-border": "it does not drive the attached browser",

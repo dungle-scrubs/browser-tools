@@ -41,7 +41,7 @@ from typing import TYPE_CHECKING, cast
 if TYPE_CHECKING:
     from browser_tools.core.cdp_client import CDPClient
 
-from browser_tools import cli, user_settings
+from browser_tools import cli, task_lease, user_settings
 from browser_tools.core import launcher, supervisor
 from browser_tools.core.connection import PortStatus
 
@@ -97,6 +97,13 @@ def _patch_headed_launch(monkeypatch, captured: dict, tmp_path) -> None:
     # launch_browser does ``from .supervisor import spawn_supervisor`` at call
     # time, so the attribute must be patched on the supervisor module itself.
     monkeypatch.setattr(supervisor, "spawn_supervisor", fake_spawn)
+
+    # Since #195 every managed launch also starts a keeper, and the keeper
+    # proves its own identity by reading the process table -- which the
+    # ``subprocess`` stub above makes unreadable. The keeper has its own
+    # tests; this one is about the window marking, so the lease is stubbed
+    # out here.
+    monkeypatch.setattr(task_lease, "establish", lambda *args, **kwargs: None)
 
 
 class TestFlagThreadsThroughToSupervisor:

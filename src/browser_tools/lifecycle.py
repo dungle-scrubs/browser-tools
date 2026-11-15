@@ -60,7 +60,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from . import endpoint as endpoint_module
-from . import port_lock
+from . import port_lock, supervisor_process
 from .core import instance_status as core_status
 from .core import launcher as core_launcher
 from .core import registry as core_registry
@@ -342,25 +342,6 @@ def record_supervisor(
         core_registry._save_registry(reg, path)  # pyright: ignore[reportPrivateUsage]
 
 
-def supervisor_state(entry: dict[str, Any]) -> str | None:
-    """Whether ``entry``'s supervisor is still running.
-
-    Returns "running", "missing", or None when no supervisor was ever
-    recorded. None is not a fault: a headless launch gets no supervisor by
-    design, and entries written before supervisors were recorded have nothing
-    to check.
-
-    Without a supervisor a live instance carries no window marking and is
-    never retired from the registry when its browser closes, and nothing else
-    reports that (#65).
-    """
-    pid = entry.get("supervisor_pid")
-    if not isinstance(pid, int):
-        return None
-    ours = process_is_ours(pid=pid, expected_start=entry.get("supervisor_pid_start"))
-    return "running" if ours else "missing"
-
-
 #: Canonical lock paths held by this thread for :func:`registry_lock`. `launch`
 #: holds the lock across the whole sequence including `annotate_entry`, and
 #: `stop`/`cleanup` nest the same way, so re-entry for the same lock must pass
@@ -444,7 +425,7 @@ def _entry_to_ext(name: str, entry: dict[str, Any]) -> ExtendedInstance:
         pid_start=entry.get("pid_start"),
         engine=engine,
         profile=profile,
-        supervisor=supervisor_state(entry),
+        supervisor=supervisor_process.state(entry),
     )
 
 
@@ -988,6 +969,11 @@ def resolve_cdp_port(
         info = core_registry.lookup(instance_name=instance, registry_path=registry_path)
     except InstanceNotFoundError as exc:
         raise LifecycleError(instance_not_found_message(exc)) from exc
+    from . import idle
+
+    # Resolving a registered instance is what counts as activity for the
+    # idle timeout (#195): the command is about to drive that browser.
+    idle.begin(instance, registry_path)
     return info.port
 
 
@@ -1202,6 +1188,7 @@ def launch(
     registry_path: str | None = None,
     name: str | None = None,
     owner: int | None = None,
+    idle_timeout: int | None = None,
 ) -> ExtendedInstance:
     """Launch a browser instance and record it with the extended schema.
 
@@ -1231,10 +1218,16 @@ def launch(
     seeds the new-profile pin default into the same directory. An
     existing profile never is, and a machine without the source keeps the
     launch plain.
+
+    Every managed launch gets a lease and a keeper (#195), owner or not: the
+    keeper closes the browser after ``idle_timeout`` seconds without
+    activity, and a launch that cannot start one fails rather than leaving a
+    browser nobody will ever close.
     """
-    from . import task_lease
+    from . import idle, task_lease
 
     owner_identity = task_lease.capture_owner(owner) if owner is not None else None
+    timeout = idle.DEFAULT_IDLE_TIMEOUT if idle_timeout is None else idle_timeout
     engine = (engine or DEFAULT_ENGINE).lower()
     if engine not in VALID_ENGINES:
         raise LifecycleError(
@@ -1358,8 +1351,9 @@ def launch(
                 registry_path=registry_path,
                 name=name,
             )
-            if owner_identity is not None:
-                task_lease.establish(result.name, owner_identity, headless, registry_path)
+            task_lease.establish(
+                result.name, owner_identity, headless, registry_path, idle_timeout=timeout
+            )
             return result
 
         # The environment variable wins, including over an explicit --channel.
@@ -1427,8 +1421,9 @@ def launch(
             profile=profile,
         )
 
-        if owner_identity is not None:
-            task_lease.establish(result.name, owner_identity, headless, registry_path)
+        task_lease.establish(
+            result.name, owner_identity, headless, registry_path, idle_timeout=timeout
+        )
         return result
 
 
@@ -1935,16 +1930,6 @@ def _stop_managed(
     return f"{verb} {ext.name}"
 
 
-def _supervisor_identity_state(pid: int, expected_start: str | None) -> bool | None:
-    running = process_running_state(pid)
-    if running is not True:
-        return running
-    actual_start = process_start_time(pid)
-    if expected_start is None or actual_start is None:
-        return None
-    return actual_start == expected_start
-
-
 def _stop_supervisor(
     instance: str,
     *,
@@ -1973,7 +1958,7 @@ def _stop_supervisor(
     if not isinstance(pid, int):
         return None
     pid_start = entry.get("supervisor_pid_start")
-    state = _supervisor_identity_state(pid, pid_start)
+    state = supervisor_process.identity_matches(pid, pid_start)
     if state is False:
         return None
     if state is None:
@@ -1987,14 +1972,14 @@ def _stop_supervisor(
         return f"supervisor pid {pid} could not be stopped: {exc}"
     deadline = time.monotonic() + term_wait
     while time.monotonic() < deadline:
-        state = _supervisor_identity_state(pid, pid_start)
+        state = supervisor_process.identity_matches(pid, pid_start)
         if state is False:
             return None
         if state is None:
             return f"supervisor pid {pid} exit unknown"
         time.sleep(0.05)
 
-    state = _supervisor_identity_state(pid, pid_start)
+    state = supervisor_process.identity_matches(pid, pid_start)
     if state is False:
         return None
     if state is None:
@@ -2007,7 +1992,7 @@ def _stop_supervisor(
         return f"supervisor pid {pid} could not be stopped: {exc}"
     deadline = time.monotonic() + kill_wait
     while time.monotonic() < deadline:
-        state = _supervisor_identity_state(pid, pid_start)
+        state = supervisor_process.identity_matches(pid, pid_start)
         if state is False:
             return None
         if state is None:

@@ -129,7 +129,7 @@ bt guide
 
 `launch` appends the first free two-digit suffix to its base name, such as `web-01`. Without `--name`, the base comes from the current directory. Repeated unnamed launches from one directory succeed with successive suffixes. Each launch prints the chosen name in its JSON result.
 
-A plain launch outlives the command until stopped. `--owner PID` opts into closing it when that process exits, and `bt retain INSTANCE` keeps it for a handoff.
+A plain launch outlives the command until stopped or until it goes idle. Every managed launch gets a one-hour idle timeout by default: `--idle-timeout 2h` changes it at launch, and `bt configure INSTANCE --idle-timeout 2h` changes it on a running instance. `--owner PID` opts into closing it when that process exits, and `bt retain INSTANCE` keeps it for a handoff.
 
 | Task | Commands |
 | --- | --- |
@@ -139,6 +139,7 @@ A plain launch outlives the command until stopped. `--owner PID` opts into closi
 | Inspect frames and storage | `frames`, `storage get` |
 | Capture and profile | `screenshot`, `screencast`, `trace`, `heap`, `insights`, `browser-tools-profiler` |
 | Manage saved state | `profile list`, `profile delete`, `profile migrate`, `cleanup` |
+| Manage browser lifetime | `retain`, `configure` |
 
 `bt guide` is the full installed manual, including raw CDP recipes, dialog policy, frame selection, and command output. `bt COMMAND --help` lists flags; `bt help Domain.method` reads the protocol signature from a running browser.
 

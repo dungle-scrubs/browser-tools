@@ -8,7 +8,7 @@ This page covers command groups, configuration, browser lifetime, and the intern
 
 | Task | Commands |
 | --- | --- |
-| Manage browsers | `launch`, `status`, `stop`, `retain`, `cleanup` |
+| Manage browsers | `launch`, `status`, `stop`, `retain`, `configure`, `cleanup` |
 | Manage saved logins | `profile list`, `profile delete NAME`, `profile migrate` |
 | Read help | `guide`, `help`, `--help`, `--version` |
 | Configure window marking | `window-border` |
@@ -36,6 +36,7 @@ Chrome is the default engine. Without a channel or binary override, the launcher
 | `--profile NAME` | Reuse a persistent browser profile and its login state. |
 | `--1password` | With `--profile` on macOS, provision the signed installed 1Password desktop helper for the official stable extension. Fresh macOS Chrome sessions, named or temporary, get the registration and the pin default automatically when the official source exists. See `bt guide` for policy and limits. |
 | `--owner PID` | Close the browser when that process exits. |
+| `--idle-timeout DURATION` | Close the browser after this long without activity. The default is `1h`. |
 | `--engine camoufox` | Use the optional Camoufox engine. |
 | `--port PORT` | Use an explicit debugging port instead of auto-allocation from 9422 upward. |
 | `--fingerprint FILE` | Pass a fingerprint profile's launch flags. This file is not a saved login. |
@@ -46,9 +47,17 @@ Fresh macOS Chrome sessions, meaning a brand-new named profile or a temporary un
 
 An instance name is the base name plus the first free two-digit suffix. A launch from a directory called `web` starts with `web-01`; `--name demo` starts with `demo-01`. Names are lowercased. Read the actual name from launch output rather than assuming a suffix.
 
-A plain launch runs until stopped. With `--owner PID`, a detached keeper checks the owner's process identity and closes the browser when the owner exits, including after SIGKILL. Choose a process that spans the task, not a temporary command shell. Task completion still needs `bt stop` if the owner remains alive.
+A plain launch runs until stopped or until it goes idle. Every managed launch gets a lease and its own detached keeper. The keeper closes the browser after `--idle-timeout` (one hour by default) with no activity on that instance, and with `--owner PID` it also closes the browser when the owner exits, including after SIGKILL. Choose an owner process that spans the task, not a temporary command shell. Task completion still needs `bt stop` if the owner remains alive.
 
-`bt retain INSTANCE` cancels automatic owner-exit cleanup for a handoff. It does not turn a headless browser into a visible one. A browser whose automatic close has started cannot be retained. `status` reports lease state and cleanup failures; `stop` is the recovery command.
+Activity is a browser-tools command on that instance: navigation, snapshot, screenshot, click, evaluation, raw CDP, a login, an attach, a wait. A running command protects the instance while it runs, and the countdown restarts when it finishes, including when it failed. Help, status, registry inspection, another instance, and traffic the page generates on its own are not activity, and neither is using the browser by hand. Overlapping commands each hold their own protection.
+
+A duration is one or more number-and-unit groups (`90s`, `30m`, `2h`, `1h30m`, `1d`), the units `s`, `m`, `h` and `d`, largest unit first, each at most once, at most seven days in all. A bare number is refused.
+
+`bt configure INSTANCE --idle-timeout DURATION` changes the timeout of a running managed instance and restarts its countdown. It refuses once the close has been claimed, so an extension is never reported as done while the browser is closing.
+
+The deadline is wall-clock time: an instance that slept through its deadline closes when the machine wakes. The keeper is the only thing enforcing the timeout, so a keeper that dies leaves the instance unexpired; `status` reports a missing keeper.
+
+`bt retain INSTANCE` cancels automatic owner-exit cleanup and the idle timeout for a handoff. It does not turn a headless browser into a visible one. A browser whose automatic close has started cannot be retained. `status` reports lease state, the idle deadline, the active operations and cleanup failures; `stop` is the recovery command.
 
 `stop` closes the browser and removes its registry entry. Persistent profiles remain. `cleanup` removes stale entries and orphaned session directories, never live instances or saved profiles. `profile delete NAME` deletes the profile's login state and refuses a profile held by a live instance.
 
@@ -161,11 +170,15 @@ Source files are under `src/browser_tools/`:
 
 ```text
 cli.py                     Argument parsing, dispatch, exit codes
+  lease_cli.py             The lease feature's arguments and dispatch
+  verb_args.py             The instance and value a free-form verb names
 lifecycle.py               Launch, status, stop, cleanup, profiles
   onepassword.py           Opt-in signed desktop-helper registration
   camoufox_runner.py       Camoufox host process
   process_utils.py         Process and port utilities
+  supervisor_process.py    Whether a recorded process is still ours
   task_lease.py            Owner-exit keeper and retain handoff
+  idle.py                  Idle timeout durations and activity
 endpoint.py                External endpoint checks and refusals
   chrome_discovery.py      DevToolsActivePort discovery
   external_connection.py   Bounded external connections

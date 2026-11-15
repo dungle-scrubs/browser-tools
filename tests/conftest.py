@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -13,6 +14,7 @@ from launcher_spawn_helpers import stub_spawn_environment
 from browser_tools import lifecycle
 
 if TYPE_CHECKING:
+    import subprocess
     from collections.abc import Iterator
 
 
@@ -255,6 +257,71 @@ def sample_tool_response():
 def sample_error_response():
     """Sample error response."""
     return {"error": {"code": -32600, "message": "Element not found"}}
+
+
+#: The keeper every managed launch now spawns. Suite-wide it is replaced by a
+#: sleeper (see :func:`keeper_double_by_default`), because a real keeper is a
+#: detached process that outlives the test that launched it: nothing in the
+#: suite would reap it, and a leaked keeper is exactly what the suite must
+#: never leave behind.
+_KEEPER_SLEEPER = "import time; print('ready', flush=True); time.sleep(3600)"
+
+#: Whether the suite's keeper double is in force. A test that needs the real
+#: keeper asks for the ``real_keeper`` fixture, which turns it off.
+_KEEPER_DOUBLE = {"enabled": True}
+
+
+@pytest.fixture(autouse=True)
+def keeper_double_by_default(monkeypatch):
+    """Replace the per-instance keeper with a sleeper for every test.
+
+    Since #195 every managed launch starts a keeper, and the keeper is a
+    detached process that watches the registry until its instance is gone. A
+    test that launches a browser and never stops it would leave that keeper
+    running for the rest of the session, and the suite would end with
+    processes nobody owns.
+
+    The double keeps the launch path intact: the keeper still starts, still
+    reports itself ready, and still has to be recorded as the instance's
+    keeper. Only the watching is replaced. A test that exercises the keeper
+    itself asks for ``real_keeper``.
+    """
+    from browser_tools import task_lease
+
+    real_spawn = task_lease.spawn_keeper
+    spawned: list[subprocess.Popen[str]] = []
+
+    def spawn(argv, **kwargs):
+        if _KEEPER_DOUBLE["enabled"] and "browser_tools.task_lease" in argv:
+            # Only the program changes. The keeper's own arguments stay, so a
+            # test that recognises the keeper's spawn by its module name
+            # still recognises this one.
+            module = argv.index("browser_tools.task_lease")
+            proc = real_spawn([sys.executable, "-c", _KEEPER_SLEEPER, *argv[module:]], **kwargs)
+            spawned.append(proc)
+            return proc
+        return real_spawn(argv, **kwargs)
+
+    monkeypatch.setattr(task_lease, "spawn_keeper", spawn)
+    try:
+        yield spawned
+    finally:
+        for proc in spawned:
+            if proc.poll() is None:
+                proc.kill()
+            wait = getattr(proc, "wait", None)
+            if wait is not None:
+                wait()
+
+
+@pytest.fixture
+def real_keeper():
+    """Let this test spawn the real keeper instead of the suite's double."""
+    _KEEPER_DOUBLE["enabled"] = False
+    try:
+        yield
+    finally:
+        _KEEPER_DOUBLE["enabled"] = True
 
 
 @pytest.fixture(scope="module")

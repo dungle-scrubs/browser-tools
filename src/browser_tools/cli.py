@@ -32,13 +32,16 @@ from . import (
     captures,
     curated,
     events,
+    idle,
     insights,
+    lease_cli,
     lifecycle,
     list_verbs,
     login,
     passthrough,
     step_run,
     user_settings,
+    verb_args,
 )
 from .lifecycle import LifecycleError
 from .passthrough import UsageError as PassthroughUsageError
@@ -60,6 +63,7 @@ KNOWN_VERBS = {
     "status",
     "stop",
     "retain",
+    "configure",
     "cleanup",
     "profile",
     "guide",
@@ -98,7 +102,9 @@ KNOWN_VERBS = {
 #: registry, or launch a browser, and an external browser has no entry there.
 #: Keeping them flagless is what stops ``stop`` and ``cleanup`` from ever
 #: seeing the user's real profile directory.
-REGISTRY_VERBS = frozenset({"launch", "status", "stop", "retain", "cleanup", "guide", "profile"})
+REGISTRY_VERBS = frozenset(
+    {"launch", "status", "stop", "retain", "configure", "cleanup", "guide", "profile"}
+)
 
 ENDPOINT_HELP = (
     "Drive an external browser at URL (loopback only, e.g. http://127.0.0.1:9222) "
@@ -222,6 +228,7 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="PID",
         help="Close this browser when the explicit owner process exits",
     )
+    lease_cli.add_launch_timeout(launch)
     launch.add_argument(
         "--port", type=int, metavar="PORT", help="CDP port (default: auto-allocate)"
     )
@@ -257,6 +264,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     retain.add_argument("instance", nargs="?", metavar="INSTANCE")
     retain.add_argument("--note", metavar="TEXT", help="Optional handoff note")
+
+    lease_cli.add_configure_verb(sub)
 
     sub.add_parser("cleanup", help="Remove stale registry entries and session dirs")
 
@@ -703,23 +712,6 @@ def _run_profile(args: argparse.Namespace, registry_path: str | None) -> int:
     raise PassthroughUsageError("profile takes one sub-action: list, delete NAME, or migrate")
 
 
-def _one_instance(leading: str | None, inline: str | None) -> str | None:
-    """Reconcile a leading ``INSTANCE`` with one inside the verb's own args.
-
-    ``help`` and ``attach`` read their instance out of a free-form positional
-    list rather than a named argument, so the conflict ``main`` catches for
-    every other verb has to be caught here instead.
-
-    Raises:
-        UsageError: Both spellings were used.
-    """
-    if leading is not None and inline is not None:
-        raise PassthroughUsageError(
-            f"instance named twice: '{leading}' before the verb and '{inline}' after it"
-        )
-    return leading if leading is not None else inline
-
-
 def _print_json(payload: object) -> None:
     """Emit machine-readable output to stdout as JSON."""
     print(json.dumps(payload, indent=2))
@@ -843,41 +835,6 @@ def _add_rfc05_verbs(
             parser.add_argument("--reload", action="store_true", help="Reload in standalone mode")
 
 
-def _rfc05_operands(args: argparse.Namespace, known_instances: set[str] | None) -> None:
-    if not hasattr(args, "operands"):
-        return
-    operands: list[str] = args.operands
-    if len(operands) > 2:
-        raise UsageError(f"{args.command} takes one operand and an optional instance")
-    inline = None
-    value = None
-    if len(operands) == 2:
-        inline, value = operands
-    elif operands:
-        value = operands[0]
-        if args.command == "type" and args.file is not None:
-            known = known_instances
-            if known is None:
-                known = {
-                    item.name
-                    for item in lifecycle.read_instances(
-                        registry_path=lifecycle.registry_path_from_env()
-                    )
-                }
-            if value in known:
-                inline, value = value, None
-    args.instance = _one_instance(args.instance, inline)
-    field = {
-        "navigate": "destination",
-        "eval": "source",
-        "press": "key",
-        "type": "text",
-        "wait-text": "substring",
-    }[args.command]
-    setattr(args, field, value)
-    delattr(args, "operands")
-
-
 def check_preconditions(
     args: argparse.Namespace, *, known_instances: set[str] | None = None
 ) -> None:
@@ -894,7 +851,7 @@ def check_preconditions(
     carries everything it needs.
     """
     command = getattr(args, "command", None)
-    _rfc05_operands(args, known_instances)
+    verb_args.rfc05_operands(args, known_instances)
 
     if hasattr(args, "dialog"):
         from .dialog_policy import validate_policy
@@ -1002,6 +959,8 @@ def check_preconditions(
     if command == "detect":
         curated.check_detect_wait(None if args.no_wait else args.wait)
 
+    lease_cli.check_timeout(args)
+
 
 def _run(args: argparse.Namespace) -> int:
     """Dispatch one parsed verb. Raises LifecycleError for operational failures."""
@@ -1022,6 +981,7 @@ def _run(args: argparse.Namespace) -> int:
             registry_path=registry_path,
             name=args.name,
             owner=args.owner,
+            idle_timeout=args.idle_timeout_seconds,
         )
         _print_json(
             {
@@ -1032,6 +992,7 @@ def _run(args: argparse.Namespace) -> int:
                 "profile": instance.profile,
                 "browser_version": instance.browser_version,
                 "user_data_dir": instance.user_data_dir,
+                **lease_cli.launch_fields(instance.name, registry_path),
             }
         )
         return EXIT_OK
@@ -1053,6 +1014,10 @@ def _run(args: argparse.Namespace) -> int:
         if args.instance is None:
             raise UsageError("retain requires an INSTANCE")
         _print_json(lifecycle.retain(args.instance, note=args.note, registry_path=registry_path))
+        return EXIT_OK
+
+    if args.command == "configure":
+        _print_json(lease_cli.configure_payload(args, registry_path))
         return EXIT_OK
 
     if args.command == "profile":
@@ -1100,13 +1065,13 @@ def _run(args: argparse.Namespace) -> int:
 
     if args.command == "help":
         instance, query = passthrough.resolve_help_args(args.args, registry_path=registry_path)
-        instance = _one_instance(getattr(args, "instance", None), instance)
+        instance = verb_args.one_instance(getattr(args, "instance", None), instance)
         passthrough.run_help(instance, query, registry_path=registry_path, endpoint=args.endpoint)
         return EXIT_OK
 
     if args.command == "attach":
         instance, subscriptions = events.resolve_attach_args(args.args)
-        instance = _one_instance(getattr(args, "instance", None), instance)
+        instance = verb_args.one_instance(getattr(args, "instance", None), instance)
         events.run_attach(
             instance=instance,
             events=subscriptions,
@@ -1566,7 +1531,21 @@ def _split_leading_instance(
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Entry point for both the ``browser-tools`` and ``bt`` console scripts."""
+    """Entry point for both the ``browser-tools`` and ``bt`` console scripts.
+
+    Every exit path releases this process's protection of the instance it
+    drove and restarts that instance's idle countdown (#195): a command that
+    failed still used the browser, and a command that succeeded must not
+    leave the instance one command away from expiry.
+    """
+    try:
+        return _dispatch(argv)
+    finally:
+        idle.finish()
+
+
+def _dispatch(argv: list[str] | None = None) -> int:
+    """Parse and run one invocation, and report its exit code."""
     raw_argv = sys.argv[1:] if argv is None else argv
 
     try:
