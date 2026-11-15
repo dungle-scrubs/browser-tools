@@ -60,6 +60,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from . import endpoint as endpoint_module
+from . import port_lock
 from .core import instance_status as core_status
 from .core import launcher as core_launcher
 from .core import registry as core_registry
@@ -1014,11 +1015,9 @@ def _safe_allocation_base() -> Generator[None]:
     ``core/registry.py`` is verbatim: ``BASE_PORT`` and ``MAX_PORT`` are
     module globals and ``allocate_port`` takes no base argument, so the only
     call-site lever is to set them for the duration of the vendored call and
-    restore them after -- the same set-call-restore shape the test suite's
-    conftest uses for its own session. Restored even on failure, so a launch
-    that dies mid-call leaks nothing into the process. The window is a
-    single-threaded CLI path, so no concurrent allocation observes the
-    changed globals.
+    restore them after, even on failure. No other thread allocates in this
+    process. Other processes do, so the Chrome launch also holds the
+    machine-wide port lock around this call (#234): see ``port_lock``.
     """
     original_base = core_registry.BASE_PORT
     original_max = core_registry.MAX_PORT
@@ -1384,7 +1383,7 @@ def launch(
             initialize_directory = _temporary_setup_initializer(engine=engine, profile=profile)
 
         try:
-            with _safe_allocation_base():
+            with _safe_allocation_base(), port_lock.held():
                 info = asyncio.run(
                     core_launcher.launch_browser(
                         port_override=port,
