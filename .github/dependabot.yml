@@ -4,6 +4,11 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    # Update uv.lock and leave a requirement in pyproject.toml alone while it
+    # still allows the new release. The default raised every floor to the
+    # newest version, which narrows what an install can resolve and broke the
+    # tests that hold the websockets floor at 16.0.
+    versioning-strategy: "increase-if-necessary"
     open-pull-requests-limit: 10
     labels:
       - "dependencies"
