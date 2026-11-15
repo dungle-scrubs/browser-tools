@@ -424,7 +424,12 @@ def test_launch_defaults_to_one_hour(registry, browser_double, capsys):
     ["0s", "90", "1x", "1h1h", "30m1h", "8d", "-5s", "1.5h", "s", "1h 30m", ""],
 )
 def test_an_invalid_duration_is_a_usage_error(registry, browser_double, capsys, text):
-    assert cli.main(["launch", "--headless", "--idle-timeout", text]) == cli.EXIT_USAGE
+    # Python 3.13's argparse reads "-5s" as an option and exits 2 itself.
+    try:
+        code = cli.main(["launch", "--headless", "--idle-timeout", text])
+    except SystemExit as exc:
+        code = exc.code
+    assert code == cli.EXIT_USAGE
     assert "error:" in capsys.readouterr().err
     assert browser_double == []
 
